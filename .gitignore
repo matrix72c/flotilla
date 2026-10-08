@@ -9,7 +9,7 @@ dist/
 .import_linter_cache/
 .uv-cache/
 .venv-*/
-build/
+/build/
 .coverage*
 htmlcov/
 *.log
