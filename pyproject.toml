@@ -1,0 +1,173 @@
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[project]
+name = "flotilla-compose"
+dynamic = ["version"]
+description = "Run Compose task environments as groups of sandboxes, one per service"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Programming Language :: Python :: 3.12",
+  "Operating System :: POSIX :: Linux",
+]
+dependencies = [
+  "httpx>=0.27,<1",
+  "pydantic>=2.10,<3",
+  "pyyaml>=6.0,<7",
+]
+
+[project.optional-dependencies]
+# Harbor 适配只在需要评测时安装（Architecture §16.2）。
+harbor = []
+
+[project.scripts]
+flotilla = "flotilla.cli:main"
+
+[project.urls]
+Repository = "https://github.com/matrix72c/flotilla"
+Issues = "https://github.com/matrix72c/flotilla/issues"
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/flotilla"]
+
+[tool.uv]
+# 首版开发目标为 Linux x86_64。
+environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
+
+[[tool.uv.index]]
+url = "https://pypi.org/simple"
+default = true
+
+[dependency-groups]
+dev = [
+  "pytest>=8.3",
+  "pytest-asyncio>=0.25",
+  "ruff>=0.14",
+  "mypy>=1.13",
+  "import-linter>=2.0",
+  "types-pyyaml>=6.0",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+src = ["src", "tests"]
+# docs/ 包含设计文档中的 Python 代码块，不纳入代码格式检查。
+extend-exclude = ["docs"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "TID251"]
+# 本库文档为中文，docstring / 注释中的全角标点是有意的；关闭"歧义 Unicode 字符"检查。
+ignore = ["RUF001", "RUF002", "RUF003"]
+
+[tool.ruff.lint.per-file-ignores]
+# 下面的 banned-api 只约束 core：其余代码（真实 Clock 实现、后端的重试退避、测试）可以用挂钟。
+"!src/flotilla/core/**" = ["TID251"]
+
+# 时间注入（Architecture §16.2、platform.base.Clock）：core 一律经注入的 Clock 取时间与等待，
+# 时序不变量才能用 ManualClock 确定性地测。按解析后的全限定名匹配，别名 / from-import 绕不过去。
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"time".msg = "core 不得用挂钟；经注入的 Clock 取时间与等待"
+"asyncio.sleep".msg = "core 经注入的 Clock.sleep 等待"
+"asyncio.wait_for".msg = "超时挂在事件循环的挂钟上；core 用 Clock.sleep 自行计时"
+"asyncio.timeout".msg = "超时挂在事件循环的挂钟上；core 用 Clock.sleep 自行计时"
+"asyncio.timeout_at".msg = "超时挂在事件循环的挂钟上；core 用 Clock.sleep 自行计时"
+"asyncio.get_running_loop".msg = "loop.time / call_later 是挂钟；core 不直接碰事件循环"
+"asyncio.get_event_loop".msg = "loop.time / call_later 是挂钟；core 不直接碰事件循环"
+"datetime.datetime.now".msg = "core 经注入的 Clock.now 取时间"
+"datetime.datetime.utcnow".msg = "core 经注入的 Clock.now 取时间"
+"datetime.datetime.today".msg = "core 经注入的 Clock.now 取时间"
+"datetime.date.today".msg = "core 经注入的 Clock.now 取时间"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src", "tests"]
+warn_unused_ignores = true
+mypy_path = ["src"]
+explicit_package_bases = true
+# mypy 2 默认把缓存放进 sqlite；GPFS 上 sqlite 的文件锁不可用（disk I/O error），改用普通文件缓存。
+sqlite_cache = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests/unit"]
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-q"
+# 警告即失败：asyncio 的 "Task exception was never retrieved"、"coroutine was never awaited" 等都意味着 bug。
+filterwarnings = ["error"]
+
+# ─────────────────────────────────────────────────────────────────
+# 依赖边界（Architecture §16.2）。import-linter 机械强制，进 CI。
+# ─────────────────────────────────────────────────────────────────
+
+[tool.importlinter]
+root_package = "flotilla"
+
+# core 的禁止表列全了除 platform.base 以外的所有兄弟包，等价白名单。新增顶层包时须同步加入。
+[[tool.importlinter.contracts]]
+name = "core 只依赖 platform.base"
+type = "forbidden"
+source_modules = ["flotilla.core"]
+forbidden_modules = [
+  "flotilla.platform.opensandbox",
+  "flotilla.platform.fake",
+  "flotilla.compose",
+  "flotilla.build",
+  "flotilla.scan",
+  "flotilla.share",
+  "flotilla.manifest",
+  "flotilla.capabilities",
+  "flotilla.config",
+  "flotilla.probe",
+  "flotilla.integrations",
+  "flotilla.cli",
+]
+
+[[tool.importlinter.contracts]]
+name = "platform 不依赖 core"
+type = "forbidden"
+source_modules = ["flotilla.platform"]
+forbidden_modules = ["flotilla.core"]
+
+# 可读 platform.base 的能力报告类型，但不碰任何后端——没有后端就造不出 Platform 实例。
+[[tool.importlinter.contracts]]
+name = "离线链路（compose/build/scan）不调用平台"
+type = "forbidden"
+source_modules = [
+  "flotilla.compose",
+  "flotilla.build",
+  "flotilla.scan",
+]
+forbidden_modules = [
+  "flotilla.platform.opensandbox",
+  "flotilla.platform.fake",
+]
+
+[[tool.importlinter.contracts]]
+name = "integrations、probe 与 cli 处于最外层，不被其它内部包 import"
+type = "forbidden"
+source_modules = [
+  "flotilla.core",
+  "flotilla.platform",
+  "flotilla.compose",
+  "flotilla.build",
+  "flotilla.scan",
+  "flotilla.share",
+  "flotilla.manifest",
+  "flotilla.capabilities",
+  "flotilla.config",
+]
+forbidden_modules = [
+  "flotilla.integrations",
+  "flotilla.cli",
+  "flotilla.probe",
+]

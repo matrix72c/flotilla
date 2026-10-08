@@ -1,0 +1,23 @@
+__pycache__/
+*.pyc
+.venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+dist/
+*.egg-info/
+.import_linter_cache/
+.uv-cache/
+.venv-*/
+build/
+.coverage*
+htmlcov/
+*.log
+.env
+.env.*
+!.env.example
+
+# Deployment credentials, local settings, and generated capability reports.
+deployments/local/
+deployments/*.json
+artifacts/

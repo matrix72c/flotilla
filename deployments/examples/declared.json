@@ -1,0 +1,74 @@
+{
+  "deployment": "example",
+  "max_ttl_seconds": 21600,
+  "list_visibility_s": 30.0,
+  "link_max_members": 1,
+  "external_forms": [
+    "none"
+  ],
+  "implicit_egress": [],
+  "devices": [],
+  "notes": [
+    "Template only. Replace limits, targets, and all capability declarations with deployment evidence."
+  ],
+  "link": {
+    "ok": false,
+    "source": "declared",
+    "evidence": "Not assessed. Replace with deployment evidence."
+  },
+  "link_udp": {
+    "ok": false,
+    "source": "declared",
+    "evidence": "Not assessed. Replace with deployment evidence."
+  },
+  "inbound_isolation": {
+    "ok": false,
+    "source": "declared",
+    "evidence": "Not assessed. Replace with deployment evidence."
+  },
+  "implicit_egress_declared": {
+    "ok": false,
+    "source": "declared",
+    "evidence": "Not assessed. Replace with deployment evidence."
+  },
+  "shared_volume": {
+    "ok": false,
+    "source": "declared",
+    "evidence": "Not assessed. Replace with deployment evidence."
+  },
+  "missing_subpath": {
+    "ok": false,
+    "source": "declared",
+    "evidence": "Not assessed. Replace with deployment evidence."
+  },
+  "no_auto_mount": {
+    "ok": false,
+    "source": "declared",
+    "evidence": "Not assessed. Replace with deployment evidence."
+  },
+  "volume_file": {
+    "ok": false,
+    "source": "declared",
+    "evidence": "Not assessed. Replace with deployment evidence."
+  },
+  "exec_auth": {
+    "ok": false,
+    "source": "declared",
+    "evidence": "Not assessed. Replace with deployment evidence."
+  },
+  "diagnostics": {
+    "ok": false,
+    "source": "declared",
+    "evidence": "Not assessed. Replace with deployment evidence."
+  },
+  "privileged_runtime": {
+    "ok": false,
+    "source": "declared",
+    "evidence": "Not assessed. Replace with deployment evidence."
+  },
+  "multi_container": {
+    "ok": false,
+    "source": "declared",
+    "evidence": "Not assessed. Replace with deployment evidence."
+  }
+}

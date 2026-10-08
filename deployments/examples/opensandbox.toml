@@ -1,0 +1,36 @@
+# Template only: replace every deployment-specific value before use.
+[opensandbox]
+# Server root; the backend appends /v1.
+endpoint = "https://sandbox.example.com"
+credential_env = "FLOTILLA_OPENSANDBOX_CREDENTIAL"
+capabilities = "capabilities.json"
+
+[opensandbox.network]
+link = "cidr"
+sandbox_cidrs = ["10.42.0.0/16"]
+platform_cidrs = ["10.43.0.0/16", "169.254.169.254/32"]
+
+[opensandbox.execd]
+protocol = "current"
+wrapper = "/.flotilla/bin/busybox"
+
+[storage]
+volumes = "host"
+# Must be an allowed host path backed by shared storage on all worker nodes.
+host_path = "/srv/flotilla"
+
+[share]
+# Prepare this immutable release before running probe; publication is not implemented.
+release = "example-release"
+# Replace with the SHA256 of the prepared release's RELEASE.json.
+release_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+
+[network]
+external = []
+
+[security]
+accept_insecure = []
+
+[reaper]
+# Replace with the image digest produced by images/anchor/build.sh.
+anchor_image = "registry.example.com/flotilla@sha256:0000000000000000000000000000000000000000000000000000000000000000"
