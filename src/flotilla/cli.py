@@ -52,6 +52,7 @@ async def _probe(args: argparse.Namespace) -> int:
         execd=cfg.execd_settings(),
         extensions=cfg.opensandbox.extensions,
         create_fields=cfg.opensandbox.create_fields,
+        group_extension=cfg.opensandbox.group_extension,
     )
     # 临时锚点（§5.6）：自己的 launch_id，挂共享根目录做目录操作，命令结束时删除；只在 launches/<id> 下建目录。
     anchor = Anchor(platform, clock, f"probe-{uuid.uuid4().hex[:12]}", cfg.anchor_settings())

@@ -90,6 +90,7 @@ class OpenSandbox(_Model):
     network: OpenSandboxNetwork = OpenSandboxNetwork()
     execd: OpenSandboxExecd = OpenSandboxExecd()
     create_fields: dict[str, Any] = {}
+    group_extension: str | None = None  # 放置组写入 `extensions` 的键；部署没有同组调度时不设
 
     @field_validator("endpoint")
     @classmethod

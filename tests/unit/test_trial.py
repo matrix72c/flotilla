@@ -209,6 +209,20 @@ async def test_single_unit_trial_skips_link(
     ready = await clock.run(_new_trial(platform, clock, anchor, reaper, plan).start())
     assert platform.calls["link"] == 0
     assert "wire" not in ready.timings
+    assert platform.spec_of(ready.handles["main"].iid).group is None  # 不互联就不分组
+
+
+@pytest.mark.asyncio
+async def test_linked_units_share_one_group_per_trial(
+    platform: FakePlatform, clock: ManualClock, anchor: Anchor, reaper: Reaper, shell: Shell
+) -> None:
+    _seed_hosts(platform)
+    ready = await clock.run(_new_trial(platform, clock, anchor, reaper, _three()).start())
+    groups = {platform.spec_of(h.iid).group for h in ready.handles.values()}
+    assert len(groups) == 1 and None not in groups
+    reaper.track("t2")
+    other = await clock.run(Trial(platform, clock, anchor, reaper, _three(), "t2", SETTINGS).start())
+    assert platform.spec_of(other.handles["main"].iid).group not in groups  # 每个 trial 一个组
 
 
 # ───────────────────────────── prepare ─────────────────────────────
@@ -296,6 +310,7 @@ async def test_unit_terminal_before_running_is_recreated_once(
     ready = await clock.run(_new_trial(platform, clock, anchor, reaper, _three()).start())
     assert ready.recreated == {"db"}
     assert ready.handles["db"].iid != failed[0]
+    assert platform.spec_of(ready.handles["db"].iid).group == platform.spec_of(ready.handles["main"].iid).group
     await clock.advance(5.0)
     assert failed[0] not in {s.iid for s in platform.instances()}  # 旧实例已删除
 

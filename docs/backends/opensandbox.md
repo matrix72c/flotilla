@@ -19,7 +19,8 @@
 | `opensandbox.execd.wrapper` | 所有实例中静态 BusyBox 的绝对路径，默认 `/.flotilla/bin/busybox` |
 | `opensandbox.extensions` | 透传给创建接口的扩展 |
 | `opensandbox.privileged_extensions` | 特权运行时所需的附加扩展 |
-| `opensandbox.create_fields` | 附加创建字段，不能覆盖镜像、网络、卷、TTL、资源等管理字段 |
+| `opensandbox.create_fields` | 附加创建字段，不能覆盖镜像、网络、卷、TTL、资源、`env` 等管理字段 |
+| `opensandbox.group_extension` | 放置组写入 `extensions` 的键（第 3.3 节）；部署没有同组调度时不设 |
 | `storage.volumes` | 卷形式：标准 `host` 卷或 `pvc` 卷（第 6 节） |
 | `storage.host_path` | `host`：所有 worker 可见、平台允许挂载的共享根目录 |
 | `storage.claim_name` | `pvc`：承载共享根目录的卷名（`pvc.claimName`，DNS label） |
@@ -35,9 +36,9 @@
 | C1 生命周期 | 创建、查询、删除、按标签分页列出、续期 | Mock HTTP 与单元测试；probe 可测 |
 | C2 执行与文件 | execd、数字 uid/gid、工作目录、环境变量、文件读写 | 两种协议的单元测试；probe 可测主要行为 |
 | C3 后台进程 | 启动、状态与退出码 | 单元测试；probe 可测 |
-| C4–C7 网络与地址 | IP / CIDR 策略编译、策略整体替换、经 execd 读取地址 | 策略与调用单元测试；实际可达性和隔离需部署验证 |
+| C4–C7 网络与地址 | IP / CIDR 策略编译、策略整体替换、放置组、经 execd 读取地址 | 策略与调用单元测试；实际可达性和隔离需部署验证 |
 | C8 共享存储 | 标准 host / pvc 卷与 subPath | 请求编译单元测试；probe 测只读与子目录隔离的部分性质 |
-| C9 执行鉴权 | 默认经 server 代理携带控制面凭证 | 所有到达路径上的按实例鉴权需部署声明和独立验证 |
+| C9 执行鉴权 | 每个实例一个 execd 访问 token（第 5 节）；控制面凭证另经 server 代理携带 | 请求组装单元测试；token 是否在所有路径上被校验、是否出现在查询接口中需部署验证 |
 | C10 资源 | 等值写入 `resourceLimits` 与 `resourceRequests` | probe 读取实际 cgroup 限制 |
 | C11–C13 容量、诊断、隐式放行 | 配置、能力报告与错误映射 | 需部署证据，不能由请求编译证明 |
 | C14 特权、设备等 | 部分能力由扩展与报告表达 | 按部署及任务能力拒绝或接受 |
@@ -73,8 +74,11 @@
 
 ### 3.3 创建请求
 
-每个请求包含镜像、占位入口、标签、有限 TTL、资源、卷和初始网络策略。业务环境变量随执行传入，不放进创建请求的 `env`。
-`extensions` 透传；`create_fields` 可提供额外字段，但不能覆盖 flotilla 管理的字段。
+每个请求包含镜像、占位入口、标签、有限 TTL、资源、卷、初始网络策略，以及只含 execd 访问 token 的 `env`（第 5 节）。
+业务环境变量随执行传入，不放进创建请求的 `env`。
+`extensions` 透传；配置了 `group_extension` 时，带放置组的实例（`InstanceSpec.group`，每个 trial 一个值，只给需要互联的单元）
+再在 `extensions` 中写入该键，例如 `{"sandboxGroup": "<uuid>"}`，由部署按它把同组实例调度到可以互联的位置。`extensions` 本身不能预设这个键。
+`create_fields` 可提供额外字段，但不能覆盖 flotilla 管理的字段。
 创建不自动重试，结果不明时由编排核心按标签对账。
 
 ### 3.4 资源与 TTL
@@ -131,6 +135,15 @@ DNS、元数据或控制面等平台隐式放行的目标必须完整声明。`d
 
 出口策略不能单独证明入站隔离或执行通道鉴权。部署应核对来自其他实例、外部主机和实例内回环的所有路径。
 能力报告标出安全缺口，配置默认不接受这些缺口。参见 Platform_Requirements C5、C9 与 Architecture 第 2 节。
+
+**execd 访问 token**：后端为每个实例生成一个随机 token（`secrets.token_urlsafe(32)`），放进创建请求的
+`env.EXECD_ACCESS_TOKEN`，之后对该实例的每个 execd 请求都带 `X-EXECD-ACCESS-TOKEN`。这是上游 execd 的约定：
+设置了 token 的 execd 拒绝不带或带错 token 的请求，无论请求经 server 代理、从其他实例直连还是经本地回环到达。
+
+- 每个实例的 token 不同：一个单元即使读到自己的 token，也不能在其他单元执行；
+- token 只在创建它的进程内存中，不落盘、不进日志与错误信息；不是本进程创建的实例不能执行。进程重启后，上一次运行的实例只会被删除，删除走控制面，不需要 token；
+- 经执行通道启动的命令先经 `env -i` 清空继承环境（3.6 节），业务进程的环境中没有 token；实例内的 root 仍能从入口进程的环境读到本实例的 token，这只让它在本实例执行，不构成越权；
+- 部署若在查询接口中原样返回创建请求的 `env`，持有控制面凭证的人都能读到 token，不满足 C9 第 2 条，按 `exec_auth` 缺口处理。
 
 ## 6 共享存储
 

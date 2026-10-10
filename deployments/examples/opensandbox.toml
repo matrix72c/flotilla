@@ -4,6 +4,9 @@
 endpoint = "https://sandbox.example.com"
 credential_env = "FLOTILLA_OPENSANDBOX_CREDENTIAL"
 capabilities = "capabilities.json"
+# Set only if the deployment co-schedules sandboxes that share an extensions key
+# (each multi-service trial sends one UUID under this key).
+# group_extension = "sandboxGroup"
 
 [opensandbox.network]
 link = "cidr"

@@ -61,6 +61,17 @@ Credentials are read from the environment variable named by `opensandbox.credent
 
 The probe currently measures a subset of the platform contract. Unmeasured properties are marked `declared`; a declaration is not an automatically verified result. Network isolation and authentication must be assessed on the actual deployment. See the [platform requirements](docs/Platform_Requirements.md).
 
+After the probe has written a capability report, run a complete web + app + db trial on the same deployment:
+
+```sh
+uv run python -m tests.e2e.web_app_db \
+  --deployment deployments/local/opensandbox.toml \
+  --image '<your-registry>/flotilla:probe@sha256:<digest>' \
+  --out deployments/local/e2e.json
+```
+
+The script starts the trial through the orchestration core, checks name resolution, network isolation between Compose networks, UDP, a shared trial volume, external egress, and execution-channel authentication between units, and then confirms that every instance has been deleted. It prints the report's gaps but does not refuse a deployment because of them.
+
 Image build helpers accept a complete output image reference and an optional `--push`:
 
 ```sh

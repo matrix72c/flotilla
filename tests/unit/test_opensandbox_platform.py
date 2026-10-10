@@ -32,7 +32,7 @@ from flotilla.platform.base import (
 from flotilla.platform.fake import ManualClock
 from flotilla.platform.opensandbox import ExecdSettings, OpenSandboxPlatform, StorageSettings, build
 from flotilla.platform.opensandbox.network import NetworkSettings
-from flotilla.platform.opensandbox.platform import MANAGED_CREATE_FIELDS
+from flotilla.platform.opensandbox.platform import EXECD_TOKEN_HEADER, MANAGED_CREATE_FIELDS
 
 Handler = Callable[[httpx.Request], httpx.Response]
 
@@ -62,6 +62,8 @@ def _platform(
     storage: StorageSettings = HOST_STORAGE,
     execd: ExecdSettings | None = None,
     create_fields: dict[str, object] | None = None,
+    extensions: dict[str, object] | None = None,
+    group_extension: str | None = None,
 ) -> OpenSandboxPlatform:
     return build(
         endpoint="http://os.test",
@@ -71,8 +73,9 @@ def _platform(
         storage=storage,
         caps=caps,
         execd=execd,
-        extensions={"project": "p1"},
+        extensions={"project": "p1"} if extensions is None else extensions,
         create_fields=create_fields,
+        group_extension=group_extension,
         transport=httpx.MockTransport(handler),
     )
 
@@ -96,6 +99,18 @@ async def _create_body(
     await clock.run(_platform(handler, clock, caps=caps, **platform_kwargs).create(spec))
     (body,) = bodies
     return body
+
+
+def _with_create(handler: Handler, *ids: str) -> Handler:
+    """`POST /sandboxes` 依次返回 `ids`，其余请求交给 `handler`。"""
+    pending = iter(ids)
+
+    def wrapped(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/sandboxes" and request.method == "POST":
+            return httpx.Response(200, json={"id": next(pending)})
+        return handler(request)
+
+    return wrapped
 
 
 # ───────────────────────────── create ─────────────────────────────
@@ -133,7 +148,8 @@ async def test_create_builds_request_body(clock: ManualClock, caps: Capabilities
     # 每个实例都带 networkPolicy（否则无 egress sidecar，§3.3）；none + 创建时无对端 = deny-all。
     assert body["networkPolicy"] == {"defaultAction": "deny", "egress": []}
     assert body["extensions"] == {"project": "p1"}
-    assert "env" not in body  # 不传 env（§3.3）
+    # env 只有 execd 访问 token（业务环境随执行传入，§3.3）。
+    assert list(body["env"]) == ["EXECD_ACCESS_TOKEN"] and len(body["env"]["EXECD_ACCESS_TOKEN"]) >= 32
     assert "ports" not in body  # 只有部署配置的 create_fields 才会加
 
 
@@ -177,8 +193,10 @@ async def test_exec_routes_through_proxy_prefix(clock: ManualClock, caps: Capabi
         paths.append(request.url.path)
         return httpx.Response(200, content=b'{"type":"init","text":"c"}\n\n{"type":"execution_complete"}\n\n')
 
+    platform = _platform(_with_create(handler, "sb-1"), clock, caps=caps)
+    handle = await clock.run(platform.create(_spec("db")))
     proc_spec = ProcessSpec(argv=("echo", "hi"), uid=0, gid=0, cwd="/", env={}, timeout_s=5.0)
-    result = await clock.run(_platform(handler, clock, caps=caps).exec(InstanceHandle(iid="sb-1"), proc_spec))
+    result = await clock.run(platform.exec(handle, proc_spec))
     assert result.exit_code == 0
     # 一次 exec 只发一个请求（env 随请求的 envs，不再先写 env 文件），打到该实例的 execd 代理前缀。
     assert paths == ["/v1/sandboxes/sb-1/proxy/44772/command"]
@@ -250,34 +268,38 @@ async def test_link_replaces_policy_with_peers(clock: ManualClock, caps: Capabil
 
 
 @pytest.mark.asyncio
-async def test_link_unknown_external_is_transient(clock: ManualClock, caps: Capabilities) -> None:
+async def test_unknown_instance_is_transient(clock: ManualClock, caps: Capabilities) -> None:
+    # 别的进程建的实例：标签对不上本进程记下的任何创建，没有外部策略也没有 execd 访问 token。
+    sent: list[str] = []
+
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("/command"):
-            out = json.dumps({"type": "stdout", "text": "default via 10.0.1.1 dev eth0\n"})
-            addr = json.dumps({"type": "stdout", "text": "2: eth0 inet 10.0.1.9/24 scope global eth0\n"})
-            argv = json.loads(request.content)["argv"]
-            body = out if "route" in argv else addr
-            return httpx.Response(200, content=f'{body}\n\n{{"type":"execution_complete"}}\n\n'.encode())
-        if request.method == "GET":  # 别的进程建的实例：标签对不上本进程记下的任何创建
+        sent.append(f"{request.method} {request.url.path}")
+        if request.method == "GET":
             return httpx.Response(200, json={"id": "sb-a", "status": {"state": "Running"}, "metadata": {"x": "y"}})
         return httpx.Response(200)
 
-    platform = _platform(handler, clock, caps=caps)  # 未经 create，没有任何外部策略记录
-    members = {"a": InstanceHandle(iid="sb-a"), "b": InstanceHandle(iid="sb-b")}
-    topo = Topology(networks={"n": frozenset({"a", "b"})})
+    platform = _platform(handler, clock, caps=caps)
+    proc_spec = ProcessSpec(argv=("true",), uid=0, gid=0, cwd="/", env={}, timeout_s=5.0)
     with pytest.raises(FlotillaError) as exc:
-        await clock.run(platform.link(members, topo))
-    assert exc.value.category is ErrorCategory.TRANSIENT and exc.value.stage == "wire"
+        await clock.run(platform.exec(InstanceHandle(iid="sb-a"), proc_spec))
+    assert exc.value.category is ErrorCategory.TRANSIENT and exc.value.stage == "run"
+    with pytest.raises(FlotillaError) as exc:
+        await clock.run(platform.internal_address(InstanceHandle(iid="sb-a")))
+    assert exc.value.stage == "address"
+    assert all(not s.endswith("/command") for s in sent)  # 不带 token 的执行请求一个都没有发出
 
 
 @pytest.mark.asyncio
 async def test_link_recovers_external_of_reconciled_instance(clock: ManualClock, caps: Capabilities) -> None:
-    # 创建响应丢失（transient）、core 经对账拿到 iid：link 凭 get 到的标签对上创建前记下的外部策略。
+    # 创建响应丢失（transient）、core 经对账拿到 iid：凭 get 到的标签对上创建前记下的外部策略与 token。
     policies: dict[str, dict[str, Any]] = {}
+    tokens: list[str] = []
+    created_token: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path
         if path == "/v1/sandboxes" and request.method == "POST":
+            created_token.append(json.loads(request.content)["env"]["EXECD_ACCESS_TOKEN"])
             return httpx.Response(503)
         if path == "/v1/sandboxes/sb-lost" and request.method == "GET":
             return httpx.Response(
@@ -287,6 +309,7 @@ async def test_link_recovers_external_of_reconciled_instance(clock: ManualClock,
             policies[path.split("/")[3]] = json.loads(request.content)
             return httpx.Response(200)
         if path.endswith("/command"):
+            tokens.append(request.headers[EXECD_TOKEN_HEADER])
             argv = json.loads(request.content)["argv"]
             text = "default via 10.0.1.1 dev eth0" if "route" in argv else "2: eth0 inet 10.0.1.9/24 scope global eth0"
             event = json.dumps({"type": "stdout", "text": text})
@@ -298,6 +321,7 @@ async def test_link_recovers_external_of_reconciled_instance(clock: ManualClock,
         await clock.run(platform.create(_spec("a", ExternalPolicy(mode="any"))))
     await clock.run(platform.link({"a": InstanceHandle(iid="sb-lost")}, Topology(networks={})))
     assert policies["sb-lost"]["defaultAction"] == "allow"  # 用的是创建时的 any，而不是缺省
+    assert tokens and len(set(tokens)) == 1 and tokens[0] == created_token[0]  # 执行带的是创建前生成的 token
 
 
 @pytest.mark.asyncio
@@ -312,16 +336,19 @@ async def test_internal_address_cached_and_forgotten_on_delete(clock: ManualCloc
             text = "default via 10.0.1.1 dev eth0" if "route" in argv else "2: eth0 inet 10.0.1.9/24 scope global eth0"
             event = json.dumps({"type": "stdout", "text": text})
             return httpx.Response(200, content=f'{event}\n\n{{"type":"execution_complete"}}\n\n'.encode())
+        if request.method == "GET":
+            return httpx.Response(404)
         return httpx.Response(204)
 
-    platform = _platform(handler, clock, caps=caps)
-    handle = InstanceHandle(iid="sb-1")
+    platform = _platform(_with_create(handler, "sb-1"), clock, caps=caps)
+    handle = await clock.run(platform.create(_spec("db")))
     assert await clock.run(platform.internal_address(handle)) == "10.0.1.9"
     assert await clock.run(platform.internal_address(handle)) == "10.0.1.9"
     assert commands == 2  # 第二次读缓存（route + addr 各一次）
     await clock.run(platform.delete("sb-1"))
-    await clock.run(platform.internal_address(handle))
-    assert commands == 4
+    with pytest.raises(FlotillaError):  # 删除后记录全部清掉：地址缓存与 token 都不在了
+        await clock.run(platform.internal_address(handle))
+    assert commands == 2
 
 
 @pytest.mark.asyncio
@@ -346,8 +373,10 @@ async def test_legacy_execd_settings_reach_command_and_upload(clock: ManualClock
             return httpx.Response(200, content=b'{"type":"execution_complete"}\n\n')
         return httpx.Response(200)
 
-    platform = _platform(handler, clock, caps=caps, execd=ExecdSettings(protocol="legacy", wrapper="/opt/bb"))
-    handle = InstanceHandle(iid="sb-1")
+    platform = _platform(
+        _with_create(handler, "sb-1"), clock, caps=caps, execd=ExecdSettings(protocol="legacy", wrapper="/opt/bb")
+    )
+    handle = await clock.run(platform.create(_spec("db")))
     proc_spec = ProcessSpec(argv=("mkdir", "-p", "/x"), uid=0, gid=0, cwd="/", env={}, timeout_s=5.0)
     await clock.run(platform.exec(handle, proc_spec))
     await clock.run(platform.write_file(handle, "/etc/hosts", b"x", mode=0o644, uid=0, gid=0))
@@ -355,3 +384,87 @@ async def test_legacy_execd_settings_reach_command_and_upload(clock: ManualClock
     assert [path for path, _ in seen] == [f"{prefix}/command", f"{prefix}/files/upload"]
     command = seen[0][1]
     assert command is not None and "argv" not in command and str(command["command"]).startswith("/opt/bb sh -c")
+
+
+# ───────────────────────────── execd 访问 token（§5）─────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_each_instance_gets_own_token_on_every_execd_request(clock: ManualClock, caps: Capabilities) -> None:
+    from datetime import UTC, datetime
+
+    created: dict[str, str] = {}
+    seen: list[tuple[str, str, str | None]] = []
+    ids = iter(["sb-a", "sb-b"])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        token = request.headers.get(EXECD_TOKEN_HEADER)
+        if path == "/v1/sandboxes" and request.method == "POST":
+            iid = next(ids)
+            created[iid] = json.loads(request.content)["env"]["EXECD_ACCESS_TOKEN"]
+            assert token is None
+            return httpx.Response(200, json={"id": iid})
+        seen.append((path.split("/")[3], path, token))
+        if path.endswith("/command"):
+            return httpx.Response(200, content=b'{"type":"execution_complete"}\n\n')
+        if "/command/status/" in path:
+            return httpx.Response(200, json={"running": False, "exit_code": 0})
+        if path.endswith("/files/download"):
+            return httpx.Response(200, content=b"x")
+        return httpx.Response(200, json={})
+
+    platform = _platform(handler, clock, caps=caps)
+    ha = await clock.run(platform.create(_spec("a")))
+    hb = await clock.run(platform.create(_spec("b")))
+    assert created["sb-a"] != created["sb-b"]
+    proc_spec = ProcessSpec(argv=("true",), uid=0, gid=0, cwd="/", env={}, timeout_s=5.0)
+    for handle in (ha, hb):
+        await clock.run(platform.exec(handle, proc_spec))
+        await clock.run(platform.write_file(handle, "/tmp/f", b"x", mode=0o644, uid=0, gid=0))
+        await clock.run(platform.read_file(handle, "/tmp/f"))
+    await clock.run(platform.renew("sb-a", datetime(2030, 1, 1, tzinfo=UTC)))
+    execd = [(iid, token) for iid, rest, token in seen if "proxy/44772" in rest]
+    assert {iid for iid, _ in execd} == {"sb-a", "sb-b"}
+    assert all(token == created[iid] for iid, token in execd)
+    control = [token for _, rest, token in seen if "proxy/44772" not in rest]
+    assert control and all(token is None for token in control)  # 控制面请求不带 execd token
+
+
+@pytest.mark.asyncio
+async def test_missing_id_error_does_not_echo_token(clock: ManualClock, caps: Capabilities) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        echoed = json.loads(request.content)["env"]
+        return httpx.Response(200, json={"env": echoed, "state": "pending"})  # 平台原样带回 env，却缺 id
+
+    platform = _platform(handler, clock, caps=caps)
+    with pytest.raises(FlotillaError) as exc:
+        await clock.run(platform.create(_spec("db")))
+    assert "env" in str(exc.value) and "EXECD_ACCESS_TOKEN" not in str(exc.value)
+
+
+# ───────────────────────────── 放置组（§3.3）─────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_group_written_to_configured_extension(clock: ManualClock, caps: Capabilities) -> None:
+    grouped = dataclasses.replace(_spec("db"), group="g-1")
+    body = await _create_body(clock, caps, grouped, group_extension="sandboxGroup")
+    assert body["extensions"] == {"project": "p1", "sandboxGroup": "g-1"}
+    # 未分组的实例、或部署没有配置同组调度时，不写。
+    assert (
+        "sandboxGroup"
+        not in (await _create_body(clock, caps, _spec("db"), group_extension="sandboxGroup"))["extensions"]
+    )
+    assert (await _create_body(clock, caps, grouped))["extensions"] == {"project": "p1"}
+
+
+def test_extensions_cannot_preset_group_key(clock: ManualClock, caps: Capabilities) -> None:
+    with pytest.raises(ValueError, match="sandboxGroup"):
+        _platform(
+            lambda r: httpx.Response(200),
+            clock,
+            caps=caps,
+            extensions={"project": "p1", "sandboxGroup": "fixed"},
+            group_extension="sandboxGroup",
+        )

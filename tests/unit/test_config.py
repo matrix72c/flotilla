@@ -70,6 +70,13 @@ release_sha256 = "{SHA}"
     assert cfg.network.policy() == ExternalPolicy(mode="none")  # 未给 external：只能 none
 
 
+def test_group_extension_is_optional() -> None:
+    assert config().opensandbox.group_extension is None
+    data = config_data()
+    data["opensandbox"] = {**data["opensandbox"], "group_extension": "sandboxGroup"}
+    assert FlotillaConfig.from_mapping(data).opensandbox.group_extension == "sandboxGroup"
+
+
 def test_pvc_storage_translates_to_settings() -> None:
     cfg = config(storage={"volumes": "pvc", "claim_name": "project-data", "root_subpath": "opt/flotilla"})
     settings = cfg.storage_settings()

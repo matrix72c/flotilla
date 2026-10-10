@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 
@@ -103,6 +104,9 @@ class Trial:
         self._handles: dict[str, InstanceHandle] = {}
         self._timings: dict[str, float] = {}
         self._recreated: set[str] = set()
+        # 需要互联的单元同一个放置组（C4 第 3 条）；重建的单元沿用同一个组。
+        self._grouped = network.link_members(plan) if network.topology(plan) is not None else frozenset()
+        self._group = str(uuid.uuid4()) if self._grouped else None
         self._specs = {unit: self._spec(unit) for unit in sorted(plan.units)}
 
     @property
@@ -215,6 +219,7 @@ class Trial:
             external=network.external_policy(self._plan, unit, self._settings.external),
             privileged=u.privileged,
             devices=u.devices,
+            group=self._group if unit in self._grouped else None,
         )
 
     def _labels(self, unit: str) -> dict[str, str]:

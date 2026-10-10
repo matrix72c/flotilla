@@ -168,6 +168,9 @@ class InstanceSpec:
     external: ExternalPolicy
     privileged: bool = False
     devices: frozenset[str] = frozenset()
+    #: 放置组（C4 第 3 条）：值相同的实例由部署放到彼此可以互联的位置。flotilla 只表达"同组"，不指定放在哪里；
+    #: 不需要的部署忽略它。trial 给需要互联的单元同一个值，每个 trial 一个。
+    group: str | None = None
 
 
 @dataclass(frozen=True)

@@ -22,7 +22,8 @@
 **超时**：单次请求默认用 client 的超时（`build()` 设定）；`timeout=None` 表示"用 client 默认"，不是"不限时"。
 SSE 命令流另有经 `Clock` 的总时限（`stream_post` 的 `deadline_s`）：execd 定期发 `ping`，读超时管不住它。
 
-一个 `httpx.AsyncClient` 由全部实例共用：`with_prefix` 派生出指向某实例 execd 的 `Http`（同一连接池）。
+一个 `httpx.AsyncClient` 由全部实例共用：`with_prefix` 派生出指向某实例 execd 的 `Http`（同一连接池），
+`with_headers` 再给它的每个请求加上该实例的请求头（execd 访问 token，后端文档 §5）。
 """
 
 from __future__ import annotations
@@ -94,12 +95,19 @@ class Http:
     """一个基址（client 的 base_url + `prefix`）上的请求。`client` 由调用方构造（测试注入 `httpx.MockTransport`）。"""
 
     def __init__(
-        self, client: httpx.AsyncClient, clock: Clock, retry: RetryPolicy = DEFAULT_RETRY, *, prefix: str = ""
+        self,
+        client: httpx.AsyncClient,
+        clock: Clock,
+        retry: RetryPolicy = DEFAULT_RETRY,
+        *,
+        prefix: str = "",
+        headers: Mapping[str, str] | None = None,
     ) -> None:
         self._client = client
         self._clock = clock
         self._retry = retry
         self._prefix = prefix
+        self._headers = dict(headers or {})
 
     @property
     def client(self) -> httpx.AsyncClient:
@@ -107,7 +115,16 @@ class Http:
 
     def with_prefix(self, prefix: str) -> Http:
         """同一 client、时钟与重试策略，路径再加 `prefix`（例如某实例的 execd 代理前缀，§3.1）。"""
-        return Http(self._client, self._clock, self._retry, prefix=self._prefix + prefix)
+        return Http(self._client, self._clock, self._retry, prefix=self._prefix + prefix, headers=self._headers)
+
+    def with_headers(self, headers: Mapping[str, str]) -> Http:
+        """同一基址，每个请求再加 `headers`（与调用时给的请求头合并，调用时给的优先）。不进日志。"""
+        return Http(self._client, self._clock, self._retry, prefix=self._prefix, headers={**self._headers, **headers})
+
+    def _merged(self, headers: Mapping[str, str] | None) -> dict[str, str] | None:
+        if not self._headers:
+            return dict(headers) if headers is not None else None
+        return {**self._headers, **(headers or {})}
 
     async def request(
         self,
@@ -131,7 +148,13 @@ class Http:
 
         async def send() -> httpx.Response:
             return await self._client.request(
-                method, url, json=json, params=params, content=content, headers=headers, timeout=_timeout(timeout)
+                method,
+                url,
+                json=json,
+                params=params,
+                content=content,
+                headers=self._merged(headers),
+                timeout=_timeout(timeout),
             )
 
         return await self._run(send, _json_body, stage=stage, idempotent=idempotent, method=method, path=url)
@@ -148,7 +171,9 @@ class Http:
         url = self._prefix + path
 
         async def send() -> httpx.Response:
-            return await self._client.request("GET", url, params=params, timeout=_timeout(timeout))
+            return await self._client.request(
+                "GET", url, params=params, headers=self._merged(None), timeout=_timeout(timeout)
+            )
 
         return await self._run(send, lambda r: r.content, stage=stage, idempotent=True, method="GET", path=url)
 
@@ -169,7 +194,8 @@ class Http:
         url = self._prefix + path
 
         async def read() -> httpx.Response:
-            async with self._client.stream("POST", url, json=json, headers={"Accept": "text/event-stream"}) as response:
+            headers = self._merged({"Accept": "text/event-stream"})
+            async with self._client.stream("POST", url, json=json, headers=headers) as response:
                 await response.aread()  # 读进 response.content，退出上下文后仍可用
                 return response
 

@@ -111,6 +111,7 @@ sandbox 内不运行任何 flotilla 的守护进程，也没有 flotilla 的控�
 | `internal_address` | 写 hosts 用的实际地址 | C7 |
 | `link` | 组内互联：让一组实例按拓扑互通 | C4、C5 |
 | `InstanceSpec.external` | 单个实例对组外目标的出站，创建时确定 | C6、C13 |
+| `InstanceSpec.group` | 放置组：同组实例放到彼此可以互联的位置 | C4 |
 | `InstanceSpec.volumes` | 共享存储 | C8 |
 | `InstanceSpec.privileged` / `devices` | 可选运行时 | C14 |
 
@@ -197,6 +198,7 @@ class InstanceSpec:
     external: ExternalPolicy         # 对组外目标的出站（6.4 节），trial 中不再改变
     privileged: bool = False         # 需要 C14 的特权运行时
     devices: frozenset[str] = frozenset()
+    group: str | None = None         # 放置组（C4 第 3 条）：每个 trial 一个，只给需要互联的单元
 
 @dataclass(frozen=True)
 class ProcessSpec:
@@ -476,7 +478,7 @@ flotilla 用**内部 IP + 每个 sandbox 自己的 `/etc/hosts`** 实现，不�
 | 同一单元内的业务进程经本地回环 | — |
 
 网关鉴权只保护第一条路径。flotilla 要求执行通道对三条路径都校验按实例下发的凭证（C9，`exec_auth`）；否则 trial 内任何服务都能以 root 在其他单元执行命令，
-agent 攻破任一服务后可以绕过任务的权限边界，reward 可能失真。部署不满足时：
+agent 攻破任一服务后可以绕过任务的权限边界，reward 可能失真。凭证怎么生成、怎么交给执行通道由后端决定（OpenSandbox 见后端文档第 5 节）。部署不满足时：
 
 - 按安全类默认拒绝（第 2 节）；显式接受后，扫描报告逐任务标出"判分可能依赖服务间权限边界"的迹象（非 agent 服务持有 secrets、以非 root 运行、agent 服务只在 internal 网络中）；
 - flotilla 不以网络规则排除执行通道端口作为替代：那是对 Compose 语义的额外端口限制，且挡不住本地回环。
@@ -737,7 +739,7 @@ trial 的错误带 `stage`（`prepare` / `create` / `address` / `wire` / `hosts`
 | ready 之后的基础设施故障（5.7 节） | `lost` | 是 |
 
 provider 内部只对单个单元的 `create` 做一次重试（删除旧实例、重建）。重试发生在 `create` 阶段，此时还没有 `link`，旧实例可以直接删除，
-新实例照常进入 `address` 与第一次 `link`，不需要重写任何 hosts。**不做**按集群或放置域的删除重建：可达与放置无关是平台的保证（C4 第 3 条），
+新实例沿用同一个放置组，照常进入 `address` 与第一次 `link`，不需要重写任何 hosts。**不做**按集群或放置域的删除重建：同组可达与放置无关是平台的保证（C4 第 3 条），
 flotilla 不在 trial 中检测它。`start` 阶段的失败属于任务本身，不重试。重试用尽后按上表报告；flotilla 不重来整个 trial，xtuner 也不重来，样本失败。
 
 失败时已经创建的 sandbox 全部交给回收器，清理失败不覆盖原始错误（PRD F6）。
@@ -864,8 +866,9 @@ flotilla 只在语义层面描述网络：把 Compose 的网络关系编译为�
 
 ### 6.1 与放置无关
 
-组内可达性与实例被调度到哪个节点、集群、资源池无关（C4 第 3 条）。flotilla 不选择放置，不从实例 ID 解析集群，不在创建时带放置提示，
-不因放置不一致删除重建，也不经入口隧道补足互访。部署不满足时，能力报告中 `link = False`，扫描器在该部署上拒绝多服务任务，
+同一放置组内的可达性与实例被调度到哪个节点、集群、资源池无关（C4 第 3 条）。每个 trial 生成一个放置组标识，
+需要互联的单元都带上它（`InstanceSpec.group`），由后端按部署的方式交给平台，例如把同组实例调度到同一集群。flotilla 不选择具体放置，
+不从实例 ID 解析集群，不因放置不一致删除重建，也不经入口隧道补足互访。部署不满足时，能力报告中 `link = False`，扫描器在该部署上拒绝多服务任务，
 单服务任务不受影响。各部署的现状见后端文档第 2 节。
 
 ### 6.2 trial 内：Compose 网络 → 拓扑
@@ -1044,6 +1047,7 @@ flotilla 不做换算：内存上限须等于原值，CPU 上限不低于原值�
 
 - 平台凭证只从训练进程的环境变量读取，请求日志中脱敏；不写入 `env`、标签、清单（PRD N4）；
 - 业务环境变量（可能含 Compose 声明的口令）不放进 `InstanceSpec.env`，只随执行请求传入（执行上下文，3.5 节）：平台查询接口可能原样返回创建参数；
+  后端为执行通道鉴权放进创建请求的凭证同样受此影响，部署须保证查询接口不返回它（C9 第 2 条）；
   执行请求是否被平台记录、对谁可见，由各后端文档说明。
 
 ---

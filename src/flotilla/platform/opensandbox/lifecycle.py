@@ -62,7 +62,11 @@ class Lifecycle:
         )
         if not isinstance(result, dict) or not result.get("id"):
             raise FlotillaError(
-                f"创建响应缺少 id：{result!r}", stage="create", category=ErrorCategory.TRANSIENT, retryable=True
+                # 只报字段名：创建响应会原样带回 `env`（含 execd 访问 token），不进错误信息与日志。
+                f"创建响应缺少 id（字段：{sorted(result) if isinstance(result, dict) else type(result).__name__}）",
+                stage="create",
+                category=ErrorCategory.TRANSIENT,
+                retryable=True,
             )
         return str(result["id"])
 
