@@ -2,7 +2,8 @@
 
 与构建共用 `flotilla.compose` 的解析与归类代码，保证"能构建 ⇔ 扫描通过"。本模块在 Compose 本身的归类
 （`Project.findings`）之上补充与部署相关的判断：多服务互联（`link`、`link_max_members`）、UDP（`link_udp`）、
-特权运行时、挂载点与 `/.flotilla` 冲突、文件 bind（`volume_file`）、缺失的 bind 源。
+特权运行时、挂载点与 `/.flotilla` 冲突、文件 bind（`volume_file`）、缺失的 bind 源。`scan_task` 再并入 Harbor
+任务目录在 `task.toml` 层面的归类（`flotilla.compose.task`）。
 """
 
 from __future__ import annotations
@@ -10,10 +11,12 @@ from __future__ import annotations
 import os
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from flotilla.compose.layout import classify
+from flotilla.compose.manifest_gen import param_name
 from flotilla.compose.model import Finding, Project
+from flotilla.compose.task import HarborTask
 from flotilla.platform.base import Capabilities
 
 SHARE_MOUNT = "/.flotilla"
@@ -29,11 +32,36 @@ class ScanResult:
     restart_services: tuple[str, ...]  # 带 restart 策略的服务（§3.6 统计）
     runtime_params: tuple[str, ...]  # 需要配置的运行时参数名
     external_units: tuple[str, ...]  # 获得调用方出站策略的服务（§6.4）
+    services: tuple[str, ...] = ()
+
+    def to_json(self) -> dict[str, Any]:
+        """一行报告（§13）：状态与每个非"实现"字段的类别、原因。"""
+        return {
+            "task": self.task,
+            "status": self.status,
+            "services": list(self.services),
+            "findings": [{"path": f.path, "kind": f.kind, "reason": f.reason} for f in self.findings],
+            "restart_services": list(self.restart_services),
+            "runtime_params": list(self.runtime_params),
+            "external_units": list(self.external_units),
+        }
 
 
-def scan(task: str, project: Project, caps: Capabilities, *, env_dir: str | None = None) -> ScanResult:
+def scan_task(task: HarborTask, caps: Capabilities) -> ScanResult:
+    """一个 Harbor 任务目录：`task.toml` 层面的归类加上 `scan`（含 bind 源检查）。"""
+    return scan(task.name, task.project, caps, env_dir=str(task.env_dir), extra=task.findings)
+
+
+def scan(
+    task: str,
+    project: Project,
+    caps: Capabilities,
+    *,
+    env_dir: str | None = None,
+    extra: Iterable[Finding] = (),
+) -> ScanResult:
     """对一个规范化后的任务按能力报告归类。`env_dir` 给出时检查 bind 源是否存在、是否为文件。"""
-    findings = list(project.findings)
+    findings = [*extra, *project.findings]
     findings.extend(_deployment(project, caps))
     if env_dir is not None:
         findings.extend(_bind_sources(project, env_dir, caps))
@@ -44,10 +72,13 @@ def scan(task: str, project: Project, caps: Capabilities, *, env_dir: str | None
         status="rejected" if rejected else "accepted",
         findings=tuple(findings),
         restart_services=tuple(sorted(n for n, s in project.services.items() if s.restart != "no")),
-        runtime_params=tuple(sorted({p for params in project.runtime_params.values() for p in params})),
+        runtime_params=tuple(
+            sorted({param_name(expr) for params in project.runtime_params.values() for expr, _ in params.values()})
+        ),
         external_units=tuple(
             sorted(n for n, s in project.services.items() if any(not project.networks[x].internal for x in s.networks))
         ),
+        services=tuple(sorted(project.services)),
     )
 
 

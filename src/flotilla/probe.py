@@ -10,10 +10,11 @@
 | C3 后台进程 | 后台进程先为运行中，退出后状态与退出码正确 |
 | C6 `none` | `none` 策略的实例连不到公网 IP（TCP） |
 | C7 实例地址 | 可取得，两次读取一致 |
+| C5 入站隔离 | 同组（同集群）但未互联的、开放出站的外部实例，连不到成员的监听端口 |
 | C8 第 1、3、6 条 | 锚点建两个兄弟目录；实例只读挂载其一：root 写入失败、看不到兄弟目录；锚点删除目录 |
 | C10 资源 | 实例内 cgroup 的内存上限等于请求值；CPU 上限不低于请求值，实际倍数照实记录 |
 
-其余项（C4 互联、C5 入站隔离、C6 `any` / `allowlist`、C8 读写共享 / 单文件 / 缺失目录 / 不自动挂载、C9、C12、C13、
+其余项（C4 互联、C6 `any` / `allowlist`、C8 读写共享 / 单文件 / 缺失目录 / 不自动挂载、C9、C12、C13、
 C14、C16）需要多个实例的网络配合或平台的书面说明，由部署者在**声明文件**（`Declared`）中给出，来源记为 `declared`，
 probe 原样写入报告、不判断真伪；契约测试覆盖它们之后改为测得。
 
@@ -64,6 +65,9 @@ _EXEC_TIMEOUT_S = 30.0
 _MEMORY = "512Mi"
 _MEMORY_BYTES = 512 * 1024 * 1024
 _PUBLIC_IP = "1.1.1.1"  # C6 none：一个不属于任何部署的公网地址
+_NONE = ExternalPolicy(mode="none")
+_INBOUND_PORT = 48080  # C5：成员监听的端口
+_INBOUND_TOKEN = "__flotilla_inbound__"  # 监听端的回应；也是连接端发送的内容
 _PATH = "/usr/local/bin:/usr/bin:/bin"
 
 
@@ -177,6 +181,7 @@ async def probe(
         address = await run.address(unit)
         memory_limit, cpu_limit, cpu_ratio = await run.resources(unit)
         external_none = await run.external_none(unit)
+        inbound = await run.inbound(declared.inbound_isolation)
         storage = await run.storage()
     finally:
         leaked = await run.cleanup()
@@ -208,7 +213,7 @@ async def probe(
             link=declared.link,
             link_udp=declared.link_udp,
             link_max_members=declared.link_max_members,
-            inbound_isolation=declared.inbound_isolation,
+            inbound_isolation=inbound,
             external_forms=declared.external_forms,
             external_none=external_none,
             internal_address="exec" if address.ok else "none",  # 取不到地址时报告校验会拒绝 link = True
@@ -260,6 +265,11 @@ def _probed(ok: bool, evidence: str) -> Item:
     return Item(ok=ok, source="probed", evidence=evidence)
 
 
+def _connect(ip: str) -> str:
+    """向 `ip:_INBOUND_PORT` 发一次连接，打印对端回应（C5）。"""
+    return f"echo {_INBOUND_TOKEN} | nc -w 3 {ip} {_INBOUND_PORT} 2>/dev/null; true"
+
+
 def _sh(
     script: str, *, uid: int = 0, gid: int = 0, cwd: str = "/", timeout_s: float = _EXEC_TIMEOUT_S, **env: str
 ) -> ProcessSpec:
@@ -281,7 +291,14 @@ class _Run:
 
     # ───────────────────────────── 实例 ─────────────────────────────
 
-    def _spec(self, name: str, volumes: tuple[SharedVolume, ...] = ()) -> InstanceSpec:
+    def _spec(
+        self,
+        name: str,
+        volumes: tuple[SharedVolume, ...] = (),
+        *,
+        external: ExternalPolicy = _NONE,
+        group: str | None = None,
+    ) -> InstanceSpec:
         share = SharedVolume(
             key=f"share/releases/{self.settings.share_release}", mount_path="/.flotilla", read_only=True
         )
@@ -292,7 +309,8 @@ class _Run:
             timeout_seconds=self.settings.ttl_s,
             resources=Resources(cpu="1", memory=_MEMORY),
             volumes=(share, *volumes),
-            external=ExternalPolicy(mode="none"),
+            external=external,
+            group=group,
         )
 
     async def _create(self, spec: InstanceSpec, *, wait: bool = True) -> InstanceHandle:
@@ -481,6 +499,56 @@ class _Run:
         reachable = out[1] == "public=0"
         return _probed(
             not reachable, f"none 策略下 TCP {_PUBLIC_IP}:443 {'可达' if reachable else '不可达'}（{out[1]}）"
+        )
+
+    async def inbound(self, declared: Item) -> Item:
+        """C5 组外不可入：同组（同集群）但未互联的一个外部实例，连不到成员的监听端口。
+
+        外部实例用开放出站（`external=any`），所以连不上只能是平台的入站隔离 / 项目级默认拒绝互访，
+        而不是外部实例自己的出站策略拦的。需要部署配置 `platform_cidrs`（`any` 才能编译）；没有时本项不测，
+        按声明值返回。成员先自连一次做正向对照：监听没起来就不能把"外部连不上"归因于隔离。
+        """
+        try:
+            outsider = await self._create(
+                self._spec("inbound-outsider", external=ExternalPolicy(mode="any"), group=self.run_id)
+            )
+        except FlotillaError as exc:
+            if exc.category is ErrorCategory.INVALID:  # 构造不出开放出站的外部实例（platform_cidrs 未配置）
+                return declared
+            raise
+        member = await self._create(self._spec("inbound-member", group=self.run_id))
+        listener = ProcessSpec(
+            argv=(
+                "/bin/sh",
+                "-c",
+                f"while true; do echo {_INBOUND_TOKEN} | nc -l {_INBOUND_PORT} -q 1 >/dev/null 2>&1 "
+                f"|| nc -l {_INBOUND_PORT}; done",
+            ),
+            uid=0,
+            gid=0,
+            cwd="/",
+            env={"PATH": _PATH},
+            timeout_s=None,
+        )
+        await self.platform.start_process(member, listener)
+        member_ip = await self.platform.internal_address(member)
+        await self.clock.sleep(2.0)  # 给监听一点时间就绪
+        own = (await self.platform.exec(member, _sh(_connect("127.0.0.1")))).stdout.decode()
+        cross = (await self.platform.exec(outsider, _sh(_connect(member_ip)))).stdout.decode()
+        await self._delete(outsider.iid)
+        await self._delete(member.iid)
+        if _INBOUND_TOKEN not in own:
+            raise FlotillaError(
+                f"C5 无法测：成员自身监听未就绪（自连 127.0.0.1:{_INBOUND_PORT} 得到 {own!r}）",
+                stage="run",
+                category=ErrorCategory.INVALID,
+                retryable=False,
+            )
+        reachable = _INBOUND_TOKEN in cross
+        return _probed(
+            not reachable,
+            f"开放出站的组外实例连成员 {member_ip}:{_INBOUND_PORT} "
+            + ("可入（无入站隔离）" if reachable else "不可入"),
         )
 
     # ───────────────────────────── C8 ─────────────────────────────

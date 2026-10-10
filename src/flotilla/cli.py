@@ -1,6 +1,6 @@
 """flotilla 命令行入口（Architecture §16.3）。
 
-已实现：`probe`。其余子命令（build / publish / scan / gc / share）参数骨架在位，执行时报"尚未实现"，随对应模块落地。
+已实现：`probe`、`scan`。其余子命令（build / publish / gc / share）参数骨架在位，执行时报"尚未实现"，随对应模块落地。
 
 平台凭证只从配置 `opensandbox.credential_env` 指定的环境变量读取（原则 8）。
 """
@@ -9,16 +9,21 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import sys
 import uuid
+from collections import Counter
 from collections.abc import Sequence
 from pathlib import Path
 
+from flotilla.capabilities import CapabilityReport
+from flotilla.compose.task import TaskError, find_tasks, load_task
 from flotilla.config import ConfigError, FlotillaConfig
 from flotilla.core.anchor import Anchor
 from flotilla.platform.clock import SystemClock
 from flotilla.platform.opensandbox import build
 from flotilla.probe import Declared, ProbeSettings, probe
+from flotilla.scan import scan_task
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -26,7 +31,11 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("build", help="离线构建并写任务清单（第 4 节）")
     sub.add_parser("publish", help="上传任务文件并把清单标为已发布（§4.7）")
-    sub.add_parser("scan", help="逐字段归类报告（第 13 节）")
+    s = sub.add_parser("scan", help="逐字段归类报告（第 13 节）")
+    s.add_argument("tasks", nargs="+", type=Path, help="Harbor 任务目录，或包含任务目录的上级目录（递归找 task.toml）")
+    s.add_argument("--capabilities", required=True, type=Path, help="目标部署的能力报告（flotilla probe 的产物）")
+    s.add_argument("--out", type=Path, help="逐任务的报告，每行一个 JSON；缺省只打印汇总")
+    s.add_argument("--top", type=int, default=15, help="汇总中列出的拒绝原因条数")
     sub.add_parser("gc", help="清理残留，经临时锚点（§5.6）")
     p = sub.add_parser("probe", help="对部署运行契约测试，写出能力报告（第 14 节）")
     p.add_argument("--deployment", required=True, type=Path, help="部署配置（FlotillaConfig 的 TOML）")
@@ -83,6 +92,50 @@ async def _probe(args: argparse.Namespace) -> int:
     return 1 if missing else 0
 
 
+def _scan(args: argparse.Namespace) -> int:
+    """逐任务归类（§13）：每行一个 JSON 写到 `--out`，汇总打印到 stdout。读不出来的任务记为拒绝，不中止扫描。"""
+    caps = CapabilityReport.load_json(args.capabilities.read_bytes()).to_capabilities()
+    status: Counter[str] = Counter()
+    reasons: Counter[str] = Counter()
+    by_shape: Counter[tuple[str, str]] = Counter()
+    out = args.out.open("w") if args.out is not None else None
+    try:
+        for i, path in enumerate(find_tasks(args.tasks), 1):
+            try:
+                task = load_task(path)
+            except TaskError as exc:
+                line = {"task": path.name, "path": str(path), "status": "rejected", "findings": [
+                    {"path": "task", "kind": "reject", "reason": f"无法读取：{exc}"}
+                ]}  # fmt: skip
+                reasons["无法读取任务目录"] += 1
+                shape = "unreadable"
+            else:
+                result = scan_task(task, caps)
+                line = {**result.to_json(), "path": str(path)}
+                reasons.update({f.reason for f in result.findings if f.kind == "reject"})
+                shape = "single" if len(result.services) == 1 else "multi"
+            status[str(line["status"])] += 1
+            by_shape[(shape, str(line["status"]))] += 1
+            if out is not None:
+                out.write(json.dumps(line, ensure_ascii=False) + "\n")
+            if i % 1000 == 0:
+                print(f"已扫描 {i} 个任务", file=sys.stderr, flush=True)
+    finally:
+        if out is not None:
+            out.close()
+    total = sum(status.values())
+    print(f"任务 {total} 个：通过 {status['accepted']}，拒绝 {status['rejected']}")
+    for shape in ("single", "multi", "unreadable"):
+        a, r = by_shape[(shape, "accepted")], by_shape[(shape, "rejected")]
+        if a or r:
+            print(f"  {dict(single='单服务', multi='多服务', unreadable='读不出')[shape]}：通过 {a}，拒绝 {r}")
+    if reasons:
+        print(f"拒绝原因（按涉及的任务数，前 {args.top} 条）：")
+        for reason, n in reasons.most_common(args.top):
+            print(f"  {n:6d}  {reason}")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -92,6 +145,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         except ConfigError as exc:
             print(exc, file=sys.stderr)
             return 2
+    if args.command == "scan":
+        return _scan(args)
     print(f"子命令 {args.command!r} 尚未实现", file=sys.stderr)
     return 2
 

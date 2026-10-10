@@ -79,7 +79,7 @@ def build_manifest(
         trial_volumes=_trial_volumes(layout),
         task_files=None,  # 由 publish 写入
         runtime_params=[
-            RuntimeParam(service=svc, var=var, expr=expr, param=_param_name(expr), default=default)
+            RuntimeParam(service=svc, var=var, expr=expr, param=param_name(expr), default=default)
             for svc, params in sorted(project.runtime_params.items())
             for var, (expr, default) in sorted(params.items())
         ],
@@ -167,7 +167,8 @@ def _trial_volumes(layout: Layout) -> list[TrialVolume]:
     return out
 
 
-def _param_name(expr: str) -> str:
+def param_name(expr: str) -> str:
+    """运行时参数的名字：表达式中第一个 `${…}` 引用的变量（provider 配置 `runtime_params` 按它给值，§10）。"""
     start = expr.index("${") + 2
     end = start
     while end < len(expr) and (expr[end].isalnum() or expr[end] == "_"):

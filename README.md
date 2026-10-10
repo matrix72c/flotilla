@@ -15,7 +15,9 @@ flotilla translates service dependencies, networks, shared volumes, health check
 | OpenSandbox lifecycle, execution, files, CIDR policies, standard host and PVC volumes | Implemented; deployment validation remains in progress |
 | Configuration, capability reports, `flotilla probe` | Implemented; probe combines measured results with explicit deployment declarations |
 | Image building and task publishing | Planned; library packages and CLI commands are placeholders |
-| `flotilla scan`, `gc`, and `share` commands | Planned; supporting library functionality is partially implemented |
+| Harbor task loading and classification | Implemented as library modules behind `flotilla scan` |
+| `flotilla scan` | Implemented; classifies Harbor task directories against a capability report |
+| `flotilla gc` and `share` commands | Planned; supporting library functionality is partially implemented |
 | XTuner `FlotillaProvider` and Harbor environment adapter | Design only; adapter modules are placeholders |
 
 The design documents describe the intended system, including features that are not implemented yet. They are not a statement of release completeness or a certification of any deployment.

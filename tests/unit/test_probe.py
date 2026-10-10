@@ -15,7 +15,7 @@ from flotilla.capabilities import CapabilityReport, Item
 from flotilla.core.anchor import Anchor, AnchorSettings
 from flotilla.platform.base import ErrorCategory, ExecResult, FlotillaError, InstanceHandle, ProcessSpec
 from flotilla.platform.fake import FakePlatform, ManualClock, SharedTree
-from flotilla.probe import PROBE_LABEL, Declared, ProbeSettings, _mounted_subdir, probe
+from flotilla.probe import _INBOUND_TOKEN, PROBE_LABEL, Declared, ProbeSettings, _mounted_subdir, probe
 
 SETTINGS = ProbeSettings(
     image="reg/unit@sha256:" + "b" * 64, share_release="r1", endpoint="http://os.test", hosts_recheck_s=5.0
@@ -77,6 +77,10 @@ class ProbeShell:
             if "notool" in self.broken:
                 return _out("NOTOOL\n")
             return _out("self=1\npublic=0\n" if "egress" in self.broken else "self=1\npublic=1\n")
+        if _INBOUND_TOKEN in script:  # C5：成员自连总通；外部实例连成员只在未隔离（broken "inbound"）时通
+            if "127.0.0.1" in script:
+                return _out(f"{_INBOUND_TOKEN}\n")
+            return _out(f"{_INBOUND_TOKEN}\n" if "inbound" in self.broken else "")
         if script.startswith("ls -A /probe-ro"):
             listing = "inner\nsibling\n" if "isolation" in self.broken else "inner\n"
             run_id = self._platform.spec(iid).labels[PROBE_LABEL]
@@ -137,6 +141,7 @@ async def test_compliant_deployment_satisfies_required_items(platform: FakePlatf
         report.exec.placeholder_entry,
         report.exec.background,
         report.network.external_none,
+        report.network.inbound_isolation,
         report.storage.read_only,
         report.storage.subdir_isolation,
         report.storage.dir_management,
@@ -155,7 +160,7 @@ async def test_declared_items_are_copied_verbatim(platform: FakePlatform, clock:
     assert report.network.link == DECLARED.link and report.runtime.exec_auth == DECLARED.exec_auth
     assert report.network.external_forms == DECLARED.external_forms
     assert report.lifecycle.list_visibility_s == 30.0
-    assert report.security_gaps() == ["inbound_isolation", "exec_auth", "no_auto_mount"]
+    assert report.security_gaps() == ["exec_auth", "no_auto_mount"]  # inbound 现在测得满足
 
 
 @pytest.mark.asyncio
@@ -193,6 +198,38 @@ async def test_non_compliant_answer_reported_as_unsatisfied(
     section, field = item.split(".")
     assert getattr(getattr(report, section), field).ok is False
     assert report.missing_required()  # 这些都是必需项
+
+
+@pytest.mark.asyncio
+async def test_inbound_not_isolated_is_security_gap(platform: FakePlatform, clock: ManualClock) -> None:
+    # 外部实例能连进成员：入站隔离测得不满足，进安全缺口（provider 默认拒绝该部署）。
+    report = await run_probe(platform, clock, broken=frozenset({"inbound"}))
+    assert report.network.inbound_isolation.ok is False
+    assert report.network.inbound_isolation.source == "probed"
+    assert "inbound_isolation" in report.security_gaps()
+
+
+@pytest.mark.asyncio
+async def test_inbound_falls_back_to_declared_without_platform_cidrs(
+    platform: FakePlatform, clock: ManualClock
+) -> None:
+    # 构造不出开放出站的外部实例（external=any 需 platform_cidrs）：本项不测，用声明值，不建任何实例。
+    from flotilla.core.anchor import Anchor, AnchorSettings
+    from flotilla.platform.base import ErrorCategory, FlotillaError
+    from flotilla.probe import _Run
+
+    anchor = Anchor(platform, clock, "Lp", AnchorSettings(image="anchor@sha256:abc"))
+    await clock.run(anchor.start())
+    run = _Run(platform, clock, anchor, SETTINGS, run_id="pX")
+    platform.inject_fault(
+        "create",
+        FlotillaError("any 需 platform_cidrs", stage="create", category=ErrorCategory.INVALID, retryable=False),
+    )
+    declared = DECLARED.inbound_isolation
+    result = await clock.run(run.inbound(declared))
+    assert result == declared
+    assert [i for i in platform.iids() if PROBE_LABEL in platform.spec(i).labels] == []
+    await anchor.close()
 
 
 @pytest.mark.asyncio

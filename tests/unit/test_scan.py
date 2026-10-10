@@ -96,4 +96,5 @@ def test_compose_rejections_carry_through(caps: Capabilities) -> None:
 @pytest.mark.parametrize("udp", [False, True])
 def test_runtime_params_listed(caps: Capabilities, udp: bool) -> None:
     p = _project({"proxy": {"image": "p", "environment": {"U": "${CB2TB_API_UPSTREAM:-x}"}}})
-    assert scan("t", p, replace(caps, link_udp=udp)).runtime_params == ("U",)
+    # 报参数名（provider 的 runtime_params 按它给值，§10），不是服务里的变量名。
+    assert scan("t", p, replace(caps, link_udp=udp)).runtime_params == ("CB2TB_API_UPSTREAM",)
