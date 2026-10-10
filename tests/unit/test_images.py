@@ -119,6 +119,9 @@ class FakeRegistry(Registry):
         self.resolved.append((name, reference))
         return self._digests[f"{name}:{reference}"]
 
+    def image_config(self, pinned: str) -> dict[str, object]:
+        return {"Cmd": ["/bin/sh"]}
+
     def copy(self, source: str, target: str) -> None:
         self.copied.append((source, target))
 

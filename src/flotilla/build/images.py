@@ -16,7 +16,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 from flotilla.compose.layout import classify
 from flotilla.compose.model import Project, Service
@@ -134,6 +134,10 @@ class Registry(Protocol):
 
     def digest(self, name: str, reference: str) -> str:
         """`name`（registry/repo）在 `reference`（tag 或 digest）处的 manifest digest（`sha256:…`）。"""
+        ...
+
+    def image_config(self, pinned: str) -> Mapping[str, Any]:
+        """`pinned`（`repo@sha256:…`）的 image config 的 `config` 段（§4.2 第 5 步），只读 manifest 与 config blob。"""
         ...
 
     def copy(self, source: str, target: str) -> None:

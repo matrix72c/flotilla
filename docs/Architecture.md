@@ -1254,7 +1254,12 @@ flotilla/
       volumes.py            卷键、种子、属主、bind 源组
       reaper.py  anchor.py  gc.py
     compose/                解析与规范化、字段归类表（4.6 节）；build 与 scan 共用
-    build/                  BuildKit、bind 与任务文件、推送、写清单（第 4 节）
+    build/
+      images.py             镜像处置（link / mirror / build）、digest 解析与 mirror 复制
+      meta.py               registry 的 image config → 清单的镜像元数据（USER 解析为数字）
+      keys.py               构建键与内容哈希（与 FILES.json 同规则）
+      builder.py            BuildKit 构建与派生层、镜像命名
+      docker.py             Registry 与 Builder 的 docker 实现（buildx imagetools / build --push）
     scan.py                 扫描器（第 13 节）
     share/                  发布布局、publish / verify / gc（3.3 节）
     manifest.py             清单 schema（带 schema 版本，4.5 节）

@@ -15,7 +15,8 @@ flotilla translates service dependencies, networks, shared volumes, health check
 | OpenSandbox lifecycle, execution, files, CIDR policies, standard host and PVC volumes | Implemented; deployment validation remains in progress |
 | Configuration, capability reports, `flotilla probe` | Implemented; probe combines measured results with explicit deployment declarations |
 | Image disposition (link existing images by digest, mirror by digest) | Implemented as library modules; link/mirror resolve via `docker buildx imagetools` |
-| Image building (BuildKit) and task publishing | Planned; the `flotilla build` / `publish` CLI commands are placeholders |
+| Image metadata, build keys, BuildKit build/derive layers | Implemented as library modules |
+| `flotilla build` / `publish` CLI commands | Planned; the library pieces above are in place, the drivers are not |
 | Harbor task loading and classification | Implemented as library modules behind `flotilla scan` |
 | `flotilla scan` | Implemented; classifies Harbor task directories against a capability report |
 | `flotilla gc` and `share` commands | Planned; supporting library functionality is partially implemented |
