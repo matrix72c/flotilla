@@ -112,6 +112,21 @@ is a no-op; a build key whose contents changed is refused rather than overwritte
 uv run flotilla publish build-output --deployment deployments/local/opensandbox.toml
 ```
 
+## Running a built task
+
+`tests/e2e/manifest_trial.py` starts a trial from a manifest that `flotilla build` produced, through the same
+translation the provider uses, and runs commands in a chosen service once the trial is ready:
+
+```sh
+uv run python -m tests.e2e.manifest_trial \
+  --deployment deployments/local/opensandbox.toml \
+  --manifest build-output/<build_key>/flotilla.manifest.json \
+  --check 'ls /app' --check 'target:ls /run/secrets/'
+```
+
+A manifest with task files must be published first; the script checks that the manifest was published against this
+deployment's shared storage, as the provider does.
+
 ## Design documents
 
 The detailed design documents are currently in Chinese.

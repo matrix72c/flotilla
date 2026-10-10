@@ -355,3 +355,41 @@ def test_needs_publish_set_when_task_files_exported(tmp_path: Path) -> None:
 def test_needs_publish_false_without_task_files(tmp_path: Path) -> None:
     task = load_task(_task(tmp_path, "nofiles", toml='[environment]\ndocker_image = "r.io/ns/app:1"\n'))
     assert build_task(task, tmp_path / "out", _ctx()).needs_publish is False
+
+
+def _shared_volume_task(root: Path, name: str) -> Path:
+    return _task(
+        root,
+        name,
+        compose=(
+            "services:\n"
+            "  main:\n    image: r.io/a:1\n"
+            "    volumes:\n      - {type: volume, source: data, target: /data}\n"
+            "  app:\n    image: r.io/b:1\n"
+            "    volumes:\n      - {type: volume, source: data, target: /data2}\n"
+            "volumes:\n  data: {}\n"
+        ),
+    )
+
+
+def test_manifest_declares_seed_only_when_exported(tmp_path: Path) -> None:
+    """清单声明的 seed 必须与实际导出的一致。
+
+    真实部署上踩过：清单无条件声明 `seeds/<v>.tar`，而镜像在挂载点下没有内容时并不产出 tar，
+    于是 trial 的 prepare 阶段去解包一个不存在的文件而失败。
+    """
+    path = _shared_volume_task(tmp_path, "noseed")
+    out = build_task(load_task(path), tmp_path / "out", _ctx(image_export=FakeExport({})))
+    assert out.status == "built"
+    manifest = json.loads(out.manifest_path.read_text())  # type: ignore[union-attr]
+    (volume,) = manifest["trial_volumes"]
+    assert volume["key"] == "data" and volume["seed"] is None  # 没有内容 → 不声明 seed
+
+
+def test_manifest_declares_seed_when_image_has_content(tmp_path: Path) -> None:
+    path = _shared_volume_task(tmp_path, "withseed")
+    export = FakeExport({"/data": {"seed.txt": "x"}})
+    out = build_task(load_task(path), tmp_path / "out", _ctx(image_export=export))
+    manifest = json.loads(out.manifest_path.read_text())  # type: ignore[union-attr]
+    (volume,) = manifest["trial_volumes"]
+    assert volume["seed"] == "seeds/data.tar"

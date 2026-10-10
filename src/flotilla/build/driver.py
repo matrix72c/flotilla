@@ -147,6 +147,7 @@ def _build(task: HarborTask, out_dir: Path, ctx: BuildContext, result: ScanResul
         meta=meta,
         resources={name: ctx.resources.get(name, DEFAULT_RESOURCES) for name in project.services},
         users=users,
+        seeds=exported.seeds,
     )
     target_dir.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(manifest.dump_json())

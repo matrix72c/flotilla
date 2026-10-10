@@ -53,8 +53,12 @@ def build_manifest(
     meta: Mapping[str, ImageMeta],
     resources: Mapping[str, Resources],
     users: Mapping[str, tuple[int, int]] | None = None,
+    seeds: Mapping[str, str] | None = None,
 ) -> Manifest:
     """写出任务清单。`users`：Compose `user` 字段解析出的数字身份（服务 → (uid, gid)），由构建器按镜像解析。
+
+    `seeds`：实际导出了初始内容的卷（卷名 → 相对任务文件目录的 tar），由构建器在导出任务文件后传入；
+    不传表示没有任何卷有初始内容。
 
     项目有拒绝项时不应调用（scan 先拒绝）。
     """
@@ -76,7 +80,7 @@ def build_manifest(
             for n, s in project.services.items()
             if s.depends_on
         },
-        trial_volumes=_trial_volumes(layout),
+        trial_volumes=_trial_volumes(layout, seeds or {}),
         task_files=None,  # 由 publish 写入
         runtime_params=[
             RuntimeParam(service=svc, var=var, expr=expr, param=param_name(expr), default=default)
@@ -156,11 +160,16 @@ def _networks(project: Project) -> dict[str, Network]:
     return out
 
 
-def _trial_volumes(layout: Layout) -> list[TrialVolume]:
+def _trial_volumes(layout: Layout, seeds: Mapping[str, str]) -> list[TrialVolume]:
+    """本 trial 要准备的目录。`seeds` 是**实际导出了**种子的卷（卷名 → 相对任务文件的 tar）。
+
+    镜像在挂载点下没有内容时不产出种子（§7.3，与 Docker 的空卷一致），清单也不能声明它——否则 prepare
+    阶段会去解包一个不存在的 tar。
+    """
     out: list[TrialVolume] = []
     for v in layout.volumes:
         if v.mode == "trial":
-            out.append(TrialVolume(key=v.name, seed=None if v.nocopy else f"seeds/{v.name}.tar"))
+            out.append(TrialVolume(key=v.name, seed=None if v.nocopy else seeds.get(v.name)))
     for g in layout.binds:
         if g.mode == "trial":
             out.append(TrialVolume(key=f"binds/{g.index}", copy_from=f"binds/{g.index}"))
