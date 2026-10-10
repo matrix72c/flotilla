@@ -18,6 +18,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
+from flotilla.build.prebuilt import PrebuiltSettings
 from flotilla.compose.layout import classify
 from flotilla.compose.model import Project, Service
 
@@ -75,6 +76,8 @@ class BuildSettings:
     #: `FROM` 都按它替换。构建机或平台拉不到公共仓库时，用它指到内网的副本；替换后的引用若落在可拉前缀下，
     #: 该服务即变为 link。键按原样匹配（含 tag），不做前缀或模糊匹配。
     image_replacements: Mapping[str, str] = field(default_factory=dict)
+    #: 预构建镜像：数据集已把每个任务的环境构建好时，按任务名引用它而不是重新构建（§4.2 第 3 步）。
+    prebuilt: PrebuiltSettings = field(default_factory=lambda: PrebuiltSettings())
 
     def __post_init__(self) -> None:
         for prefix in self.pullable_registries:

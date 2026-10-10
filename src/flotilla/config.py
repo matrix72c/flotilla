@@ -29,6 +29,7 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from flotilla.build.images import BuildSettings
+from flotilla.build.prebuilt import PrebuiltSettings
 from flotilla.capabilities import SECURITY_FIELDS, CapabilityReport
 from flotilla.core.anchor import AnchorSettings
 from flotilla.core.reaper import ReaperSettings
@@ -113,6 +114,18 @@ class OpenSandbox(_Model):
 # ───────────────────────────── 通用段落 ─────────────────────────────
 
 
+class Prebuilt(_Model):
+    """`[build.prebuilt]`：数据集自带的预构建镜像（§4.2 第 3 步）。"""
+
+    reference: str = ""  # 带 {task} 占位的引用模板；为空表示不用预构建镜像
+    verify: bool = True  # 校验镜像与任务 Dockerfile 的指令序列一致
+
+    @model_validator(mode="after")
+    def _check(self) -> Prebuilt:
+        PrebuiltSettings(reference=self.reference, verify=self.verify)  # 抛 ValueError
+        return self
+
+
 class Build(_Model):
     """数据集构建者配置 `[build]`（§4.3）。只在 `flotilla build` 用到；运行期不读。"""
 
@@ -120,6 +133,13 @@ class Build(_Model):
     mirror_images: bool = False
     target: str = ""
     image_replacements: dict[str, str] = {}
+    prebuilt: Prebuilt = None  # type: ignore[assignment]
+
+    @model_validator(mode="after")
+    def _default_prebuilt(self) -> Build:
+        if self.prebuilt is None:
+            object.__setattr__(self, "prebuilt", Prebuilt())
+        return self
 
     def settings(self) -> BuildSettings:
         return BuildSettings(
@@ -127,6 +147,7 @@ class Build(_Model):
             mirror_images=self.mirror_images,
             target=self.target,
             image_replacements=self.image_replacements,
+            prebuilt=PrebuiltSettings(reference=self.prebuilt.reference, verify=self.prebuilt.verify),
         )
 
 

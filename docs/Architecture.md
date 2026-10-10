@@ -514,6 +514,13 @@ agent 攻破任一服务后可以绕过任务的权限边界，reward 可能失�
    | **mirror** | `image` 服务，镜像不在可拉前缀下（公共镜像等），且不需要改镜像；或 link 的服务按配置要求固化 | 按 digest 复制到使用方的 registry（同一 digest 只复制一次），清单引用复制后的 `repo@sha256:…` |
    | **build / derive** | 有 `build`，或第 7 步需要改镜像 | BuildKit 构建（`build` 从 Dockerfile；改现成镜像时 `FROM` 它派生一层），推送后引用其 digest |
 
+   **预构建镜像**：数据集常常已把每个任务的环境构建好推到仓库（例如 TB2 的 `<repo>:<task>-<date>`）。配置
+   `[build.prebuilt].reference`（带 `{task}` 占位）后，这类任务按任务名引用现成镜像、解析 digest 即为 link，不再构建。
+   **必须校验镜像与任务 Dockerfile 一致**：比对镜像 history 的尾部与 Dockerfile 的指令序列（任务的指令是在基础镜像之上
+   最后加的），不一致以 `invalid` 拒绝该任务，不静默使用。校验比的是指令序列，不是文件内容——同名而内容不同的 COPY
+   源查不出来，所以清单同时记下镜像 digest 使其可追溯。history 是 Docker 的摘要而非原文，几处有损（`COPY --from` 丢标志、
+   `ARG` 给 `RUN` 加前缀、`ENV` 的 `$VAR` 已展开、exec 形式丢逗号、多阶段只留最后阶段）按已知规则放宽。
+
    **公共镜像替换**：`[build].image_replacements` 把 `image` 与 Dockerfile `FROM` 中的公共引用映射到内网副本，
    在本步之前生效——替换后落在可拉前缀下的服务即为 link。`FROM` 的替换交给 BuildKit 的 `--build-context`，不改任务的
    Dockerfile。既不在替换表、又不在可拉前缀下的基础镜像在构建前报错（构建机通常拉不到公共仓库，不等到超时）。
@@ -1260,6 +1267,7 @@ flotilla/
     compose/                解析与规范化、字段归类表（4.6 节）；build 与 scan 共用
     build/
       images.py             镜像处置（link / mirror / build）、digest 解析与 mirror 复制
+      prebuilt.py           预构建镜像的查找与与任务 Dockerfile 的一致性校验
       meta.py               registry 的 image config → 清单的镜像元数据（USER 解析为数字）
       keys.py               构建键与内容哈希（与 FILES.json 同规则）
       builder.py            BuildKit 构建与派生层、镜像命名
@@ -1341,6 +1349,10 @@ target = "<registry>/<namespace>/<repo>"   # mirror 与构建产物的推送目�
 # 公共镜像 → 内网副本；`image` 与 Dockerfile 的 FROM 都按它替换
 [build.image_replacements]
 "ubuntu:24.04" = "<registry>/<namespace>/ubuntu:24.04"
+
+[build.prebuilt]                      # 数据集自带的预构建镜像；{task} 代入任务目录名
+reference = "<registry>/<namespace>/<repo>:{task}-<date>"
+verify = true                          # 校验镜像与任务 Dockerfile 的指令序列一致
 
 [storage]
 volumes = "pvc"                         # 标准 pvc 卷；或 "host" 加 host_path（后端文档第 6 节）
