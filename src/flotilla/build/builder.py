@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
-from flotilla.build.images import ImageError
+from flotilla.build.images import BuildSettings, ImageError, ImageRef
 
 MAX_TAG = 128
 _UNSAFE = re.compile(r"[^A-Za-z0-9_.-]+")
@@ -48,6 +48,60 @@ def _slug(text: str, budget: int | None = None) -> str:
     return f"{slug[: budget - 9].rstrip('-._')}-{digest}"
 
 
+def base_images(dockerfile_text: str) -> list[str]:
+    """Dockerfile 里 `FROM` 的基础镜像，按出现顺序去重。
+
+    跳过多阶段构建里引用前一阶段的 `FROM <stage>`（`AS <name>` 定义过的名字）与 `FROM scratch`。
+    `ARG` 插值不展开：带 `$` 的引用原样返回，由调用方决定怎么处理。
+    """
+    stages: set[str] = set()
+    out: list[str] = []
+    for raw in dockerfile_text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or not line.lower().startswith("from "):
+            continue
+        parts = line.split()
+        ref = parts[1]
+        if len(parts) >= 4 and parts[2].lower() == "as":
+            stages.add(parts[3])
+        if ref in stages or ref == "scratch":
+            continue
+        if ref not in out:
+            out.append(ref)
+    return out
+
+
+def build_contexts(dockerfile_text: str, settings: BuildSettings) -> dict[str, str]:
+    """基础镜像的替换（§4.2 第 1 步）：原 `FROM` 引用 → 替换后的引用。
+
+    返回的映射交给 BuildKit 的 `--build-context <原引用>=docker-image://<替换>`，不改 Dockerfile 本身。
+    替换表里没有、且带 `$` 的（ARG 插值）跳过——展开不了，交给构建时的 `build-arg`。
+    """
+    out: dict[str, str] = {}
+    for ref in base_images(dockerfile_text):
+        replaced = settings.replace(ref)
+        if replaced != ref:
+            out[ref] = replaced
+    return out
+
+
+def unreplaced_bases(dockerfile_text: str, settings: BuildSettings) -> list[str]:
+    """既不在替换表里、也不落在可拉前缀下的基础镜像（构建机多半拉不到，应明确报错而不是等超时）。"""
+    out: list[str] = []
+    for ref in base_images(dockerfile_text):
+        replaced = settings.replace(ref)
+        if replaced != ref or "$" in replaced:
+            continue
+        try:
+            parsed = ImageRef.parse(replaced)
+        except ImageError:  # 没有显式 registry：公共仓库（docker.io）
+            out.append(ref)
+            continue
+        if not settings.pullable(parsed):
+            out.append(ref)
+    return out
+
+
 @dataclass(frozen=True)
 class BuildRequest:
     """一次镜像构建。
@@ -62,6 +116,7 @@ class BuildRequest:
     dockerfile: str | None = None
     dockerfile_text: str | None = None
     args: Mapping[str, str] = field(default_factory=dict)
+    contexts: Mapping[str, str] = field(default_factory=dict)  # `FROM` 替换（§4.2 第 1 步）
 
     def __post_init__(self) -> None:
         if (self.dockerfile is None) == (self.dockerfile_text is None):

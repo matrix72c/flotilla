@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
 from flotilla.compose.layout import classify
@@ -71,11 +71,22 @@ class BuildSettings:
     pullable_registries: tuple[str, ...] = ()  # 平台能直接拉的 registry / 前缀；落在其下的 image 服务默认 link
     mirror_images: bool = False  # true 时 image 服务一律 mirror（把内容固化进使用方的 registry）
     target: str = ""  # mirror / build 的推送目标仓库，形如 `registry/namespace/repo`
+    #: 公共镜像替换表（§4.2 第 1 步后、第 3 步前生效）：原引用 → 替换后的引用。服务的 `image` 与 Dockerfile 的
+    #: `FROM` 都按它替换。构建机或平台拉不到公共仓库时，用它指到内网的副本；替换后的引用若落在可拉前缀下，
+    #: 该服务即变为 link。键按原样匹配（含 tag），不做前缀或模糊匹配。
+    image_replacements: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         for prefix in self.pullable_registries:
             if not prefix or prefix.endswith("/"):
                 raise ValueError(f"pullable_registries 的前缀不能为空或以 / 结尾：{prefix!r}")
+        for source, target in self.image_replacements.items():
+            if not source or not target:
+                raise ValueError(f"image_replacements 的两端都不能为空：{source!r} → {target!r}")
+
+    def replace(self, ref: str) -> str:
+        """按替换表映射一个镜像引用；表里没有就原样返回。"""
+        return self.image_replacements.get(ref, ref)
 
     def pullable(self, ref: ImageRef) -> bool:
         """`ref` 是否落在某个可拉前缀下（按 registry/路径的段边界匹配，不做子串匹配）。"""
@@ -123,7 +134,7 @@ def plan_image(service: str, svc: Service, settings: BuildSettings, *, needs_cha
         return ServiceImage(service, "build", None)
     if svc.image is None:
         raise ImageError(f"服务 {service} 既没有 image 也没有 build")
-    ref = ImageRef.parse(svc.image)
+    ref = ImageRef.parse(settings.replace(svc.image))
     if settings.mirror_images or not settings.pullable(ref):
         return ServiceImage(service, "mirror", ref)
     return ServiceImage(service, "link", ref)

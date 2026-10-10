@@ -119,10 +119,14 @@ class Build(_Model):
     pullable_registries: tuple[str, ...] = ()
     mirror_images: bool = False
     target: str = ""
+    image_replacements: dict[str, str] = {}
 
     def settings(self) -> BuildSettings:
         return BuildSettings(
-            pullable_registries=self.pullable_registries, mirror_images=self.mirror_images, target=self.target
+            pullable_registries=self.pullable_registries,
+            mirror_images=self.mirror_images,
+            target=self.target,
+            image_replacements=self.image_replacements,
         )
 
 

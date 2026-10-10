@@ -11,11 +11,14 @@ import pytest
 from flotilla.build.builder import (
     MAX_TAG,
     BuildRequest,
+    base_images,
+    build_contexts,
     derive_dockerfile,
     image_tag,
     shell_dockerfile,
+    unreplaced_bases,
 )
-from flotilla.build.images import ImageError
+from flotilla.build.images import BuildSettings, ImageError, plan_image
 from flotilla.build.keys import build_key, tree_hash
 from flotilla.build.meta import parse_config, parse_user
 from flotilla.compose.model import Project, Service
@@ -204,3 +207,45 @@ def test_build_request_requires_exactly_one_dockerfile(tmp_path: Path) -> None:
     with pytest.raises(ImageError):
         BuildRequest(service="s", tag="t:1", context=tmp_path, dockerfile="Dockerfile", dockerfile_text="FROM x")
     assert BuildRequest(service="s", tag="t:1", context=tmp_path, dockerfile="Dockerfile").dockerfile == "Dockerfile"
+
+
+# ───────────────────────────── 公共镜像替换（§4.2 第 1 步）─────────────────────────────
+
+REPLACEMENTS = {
+    "ubuntu:24.04": "registry.h.pjlab.org.cn/ns/ubuntu:24.04",
+    "docker.io/library/redis:7": "registry.h.pjlab.org.cn/ns/redis:7",
+}
+SETTINGS = BuildSettings(pullable_registries=("registry.h.pjlab.org.cn",), image_replacements=REPLACEMENTS)
+
+DOCKERFILE = """
+# 注释里的 FROM nope:1 不算
+FROM ubuntu:24.04 AS base
+RUN ["/bin/sh", "-c", "true"]
+FROM base AS second
+FROM python:3.13-slim-bookworm
+FROM scratch
+FROM ${BASE_ARG}
+"""
+
+
+def test_base_images_skips_stages_scratch_and_dedups() -> None:
+    assert base_images(DOCKERFILE) == ["ubuntu:24.04", "python:3.13-slim-bookworm", "${BASE_ARG}"]
+
+
+def test_build_contexts_only_maps_replaced() -> None:
+    assert build_contexts(DOCKERFILE, SETTINGS) == {"ubuntu:24.04": "registry.h.pjlab.org.cn/ns/ubuntu:24.04"}
+
+
+def test_unreplaced_bases_flags_unreachable_only() -> None:
+    # ubuntu 有替换、ARG 插值跳过；python 既没替换也不可拉 → 必须报出来，而不是等构建超时。
+    assert unreplaced_bases(DOCKERFILE, SETTINGS) == ["python:3.13-slim-bookworm"]
+    # 已经指向可拉 registry 的基础镜像不算缺失。
+    assert unreplaced_bases("FROM registry.h.pjlab.org.cn/ns/x:1\n", SETTINGS) == []
+
+
+def test_replacement_applies_before_disposition() -> None:
+    # 替换后落到可拉前缀下 → 从 mirror 变 link（§4.2 第 3 步在替换之后判定）。
+    svc = Service(name="cache", image="docker.io/library/redis:7")
+    assert plan_image("cache", svc, SETTINGS, needs_change=False).disposition == "link"
+    plain = BuildSettings(pullable_registries=("registry.h.pjlab.org.cn",), target="t.io/ns/r")
+    assert plan_image("cache", svc, plain, needs_change=False).disposition == "mirror"

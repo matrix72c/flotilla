@@ -118,6 +118,8 @@ class DockerBuilder:
                 args += ["--file", str(request.context / request.dockerfile)]
             for key, value in sorted(request.args.items()):
                 args += ["--build-arg", f"{key}={value}"]
+            for source, replacement in sorted(request.contexts.items()):
+                args += ["--build-context", f"{source}=docker-image://{replacement}"]
             args.append(str(request.context))
             self._run(args)
             return self._digest_from(metadata, request)

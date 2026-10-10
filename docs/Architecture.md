@@ -514,6 +514,10 @@ agent 攻破任一服务后可以绕过任务的权限边界，reward 可能失�
    | **mirror** | `image` 服务，镜像不在可拉前缀下（公共镜像等），且不需要改镜像；或 link 的服务按配置要求固化 | 按 digest 复制到使用方的 registry（同一 digest 只复制一次），清单引用复制后的 `repo@sha256:…` |
    | **build / derive** | 有 `build`，或第 7 步需要改镜像 | BuildKit 构建（`build` 从 Dockerfile；改现成镜像时 `FROM` 它派生一层），推送后引用其 digest |
 
+   **公共镜像替换**：`[build].image_replacements` 把 `image` 与 Dockerfile `FROM` 中的公共引用映射到内网副本，
+   在本步之前生效——替换后落在可拉前缀下的服务即为 link。`FROM` 的替换交给 BuildKit 的 `--build-context`，不改任务的
+   Dockerfile。既不在替换表、又不在可拉前缀下的基础镜像在构建前报错（构建机通常拉不到公共仓库，不等到超时）。
+
    link 依赖源 registry 保留该 digest；`image` 服务默认 link，`[build].mirror_images = true` 时改为一律 mirror（把内容固化进使用方的 registry，不受源 tag 变动或清理影响）。
    构建前对所有 `image` 服务批量解析 digest 并确认平台能拉，拉不到的降级为 mirror；都失败时该任务以 `invalid` 记入扫描报告。
 4. **处理 bind 源**：按 4.4 节：写入镜像的写到目标路径；由平台挂载的放入第 6 步的任务文件 `binds/<n>`。
@@ -1330,6 +1334,13 @@ wrapper = "/.flotilla/bin/busybox"      # 执行包装用的 busybox；锚点镜
 
 [opensandbox.create_fields]             # 原样合并进创建请求的其余顶层字段，不能覆盖 flotilla 管理的字段
 # 按部署需要设置附加字段；不能覆盖 flotilla 管理的字段
+
+[build]                                 # 数据集构建者（4.3 节）；运行期不读
+pullable_registries = ["<平台能直接拉的 registry 前缀>"]
+target = "<registry>/<namespace>/<repo>"   # mirror 与构建产物的推送目标
+# 公共镜像 → 内网副本；`image` 与 Dockerfile 的 FROM 都按它替换
+[build.image_replacements]
+"ubuntu:24.04" = "<registry>/<namespace>/ubuntu:24.04"
 
 [storage]
 volumes = "pvc"                         # 标准 pvc 卷；或 "host" 加 host_path（后端文档第 6 节）
