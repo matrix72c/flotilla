@@ -236,6 +236,8 @@ class FakePlatform:
         self.caps = caps
         self.clock = clock or ManualClock()
         self._exec_handler = exec_handler or _default_exec_handler
+        self.shared_tree: SharedTree | None = None  # 装上 SharedTree 后，锚点上的文件读写落到它那里
+        self.tree_contents: dict[str, bytes] = {}  # 共享根目录上的文件内容（相对路径 → 内容）
         self._instances: dict[str, _Instance] = {}
         self._faults: dict[PlatformMethod, deque[_Fault]] = defaultdict(deque)
         self._latency: dict[PlatformMethod, tuple[float, Literal["before", "after"]]] = {}
@@ -506,6 +508,13 @@ class FakePlatform:
         if fault is not None:
             raise fault.error
         self._require(handle.iid).files[path] = data
+        tree = self.shared_tree
+        if tree is not None and path.startswith(tree.mount):
+            key = path[len(tree.mount) :]
+            self.tree_contents[key] = data
+            tree.files.add(key)
+            tree.modes[key] = f"{mode:04o}"
+            tree.owners[key] = f"{uid}:{gid}"
 
     async def read_file(self, handle: InstanceHandle, path: str) -> bytes:
         fault = await self._call("read_file")
@@ -513,6 +522,9 @@ class FakePlatform:
             raise fault.error
         inst = self._require(handle.iid)
         data = inst.files.get(path)
+        tree = self.shared_tree
+        if data is None and tree is not None and path.startswith(tree.mount):
+            data = self.tree_contents.get(path[len(tree.mount) :])
         if data is None:
             raise FlotillaError(
                 f"no such file: {path}",
@@ -537,23 +549,28 @@ class FakePlatform:
 
 
 class SharedTree:
-    """共享根目录的内存模型：把锚点的 `mkdir` / `rm` / `ls` / `chown` / `tar` / `cp` 作用在一组路径上。
+    """共享根目录的内存模型：把锚点的目录与文件操作作用在一组路径上。
 
-    装上后成为 `platform` 的 exec handler（锚点的目录操作经 exec，§7.2）；`events` 记下每次删除，供检查先后。
-    路径相对共享根目录。
+    覆盖 `mkdir` / `rm` / `ls`（含 `ls -d` 问存在性）/ `chown` / `chmod` / `tar` / `cp` / `mv`
+    （与锚点镜像实际自带的 busybox applet 一致，§7.2）；文件内容经 `write_file` / `read_file` 落在 `tree_contents`。
+    装上后成为 `platform` 的 exec handler；`events` 记下每次操作，供检查先后。路径相对共享根目录。
     """
 
     def __init__(self, platform: FakePlatform, *, mount: str = "/flotilla-root") -> None:
         self.dirs: set[str] = set()
         self.files: set[str] = set()  # 普通文件（例如已发布的种子 tar）
-        self.owners: dict[str, str] = {}  # 目录 → "uid:gid"
+        self.owners: dict[str, str] = {}  # 路径 → "uid:gid"
+        self.modes: dict[str, str] = {}  # 路径 → mode（八进制串）
+        self.links: dict[str, str] = {}  # 符号链接 → 目标（原样）
         self.events: list[str] = []
-        self._mount = mount.rstrip("/") + "/"
+        self.mount = mount.rstrip("/") + "/"
+        self._platform = platform
         platform.set_exec_handler(self._exec)
+        platform.shared_tree = self  # 让 write_file / read_file 落到这棵树上
 
     def _rel(self, path: str) -> str:
-        assert path.startswith(self._mount), path
-        return path[len(self._mount) :]
+        assert path.startswith(self.mount), path
+        return path[len(self.mount) :]
 
     def _exec(self, iid: str, proc: ProcessSpec) -> ExecResult:
         op = proc.argv[0]
@@ -575,21 +592,57 @@ class SharedTree:
             self.dirs.update(dest + d[len(src) :] for d in list(self.dirs) if d.startswith(src + "/"))
             self.events.append(f"cp {src} {dest}")
             return ExecResult(exit_code=0, stdout=b"", stderr=b"")
+        if op == "mv":  # mv -Tn -- <src> <dest>：目标存在时不覆盖
+            src, dest = self._rel(proc.argv[-2]), self._rel(proc.argv[-1])
+            if src not in self.dirs and src not in self.files:
+                return missing
+            if dest in self.dirs or dest in self.files:
+                return ExecResult(exit_code=1, stdout=b"", stderr=b"File exists")
+            self._move(src, dest)
+            self.events.append(f"mv {src} {dest}")
+            return ExecResult(exit_code=0, stdout=b"", stderr=b"")
         path = self._rel(proc.argv[-1])
-        if op == "mkdir":
+        if op == "chmod":
+            if path not in self.dirs and path not in self.files:
+                return missing
+            self.modes[path] = proc.argv[1]
+        elif op == "mkdir":
             parts = path.split("/")
             self.dirs.update("/".join(parts[: i + 1]) for i in range(len(parts)))
             self.events.append(f"mkdir {path}")
         elif op == "chown":
-            if path not in self.dirs:
+            if path not in self.dirs and path not in self.files:
                 return missing
             self.owners[path] = proc.argv[1]
         elif op == "rm":
             self.dirs = {d for d in self.dirs if d != path and not d.startswith(path + "/")}
+            self.files = {f for f in self.files if f != path and not f.startswith(path + "/")}
             self.events.append(f"rm {path}")
         elif op == "ls":
+            if "-d" in proc.argv:  # ls -d -- <path>：只问存在性（真实 busybox 的行为）
+                found = path in self.dirs or path in self.files
+                return ExecResult(exit_code=0 if found else 1, stdout=b"", stderr=b"" if found else missing.stderr)
             if path not in self.dirs:
                 return missing
-            children = sorted({d[len(path) + 1 :].split("/")[0] for d in self.dirs if d.startswith(path + "/")})
+            entries = {*self.dirs, *self.files}
+            children = sorted({e[len(path) + 1 :].split("/")[0] for e in entries if e.startswith(path + "/")})
             return ExecResult(exit_code=0, stdout="".join(f"{c}\n" for c in children).encode(), stderr=b"")
         return ExecResult(exit_code=0, stdout=b"", stderr=b"")
+
+    def _move(self, src: str, dest: str) -> None:
+        """把 `src`（及其子树）改名为 `dest`，连带属主、mode、链接与文件内容。"""
+
+        def moved(path: str) -> str:
+            return dest + path[len(src) :] if path == src or path.startswith(src + "/") else path
+
+        self.dirs = {moved(d) for d in self.dirs}
+        self.files = {moved(f) for f in self.files}
+        self.owners = {moved(k): v for k, v in self.owners.items()}
+        self.modes = {moved(k): v for k, v in self.modes.items()}
+        self.links = {moved(k): v for k, v in self.links.items()}
+        contents = self._platform.tree_contents
+        self._platform.tree_contents = {moved(k): v for k, v in contents.items()}
+
+    def content(self, key: str) -> bytes:
+        """已上传文件的内容（测试断言用）。"""
+        return self._platform.tree_contents[key]

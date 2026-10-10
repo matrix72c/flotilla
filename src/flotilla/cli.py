@@ -1,6 +1,6 @@
 """flotilla 命令行入口（Architecture §16.3）。
 
-已实现：`probe`、`scan`、`build`。其余子命令（publish / gc / share）参数骨架在位，执行时报"尚未实现"，随对应模块落地。
+已实现：`probe`、`scan`、`build`、`publish`。其余子命令（gc / share）参数骨架在位，执行时报"尚未实现"，随对应模块落地。
 
 平台凭证只从配置 `opensandbox.credential_env` 指定的环境变量读取（原则 8）。
 """
@@ -17,16 +17,18 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from flotilla.build.docker import DockerBuilder, DockerImageExport, DockerRegistry
-from flotilla.build.driver import BuildContext, BuildOutcome, build_task, write_report
+from flotilla.build.driver import FILES_DIR, MANIFEST_NAME, BuildContext, BuildOutcome, build_task, write_report
 from flotilla.capabilities import CapabilityReport
 from flotilla.compose.task import TaskError, find_tasks, load_task
 from flotilla.config import ConfigError, FlotillaConfig
 from flotilla.core.anchor import Anchor
-from flotilla.manifest import Resources
+from flotilla.manifest import Manifest, Resources
+from flotilla.platform.base import FlotillaError
 from flotilla.platform.clock import SystemClock
 from flotilla.platform.opensandbox import build
 from flotilla.probe import Declared, ProbeSettings, probe
 from flotilla.scan import scan_task
+from flotilla.share.publish import PublishError, mark_published, publish_task_files
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -39,7 +41,10 @@ def _build_parser() -> argparse.ArgumentParser:
     b.add_argument("--docker", default="docker", help="docker 可执行与前置参数，空格分隔")
     b.add_argument("--force", action="store_true", help="已有同键的清单也重建")
     b.add_argument("--report", type=Path, help="逐任务的构建报告，每行一个 JSON")
-    sub.add_parser("publish", help="上传任务文件并把清单标为已发布（§4.7）")
+    pb = sub.add_parser("publish", help="上传任务文件并把清单标为已发布（§4.7）")
+    pb.add_argument("out", type=Path, help="flotilla build 的输出目录（其下是 <build_key>/）")
+    pb.add_argument("--deployment", required=True, type=Path, help="部署配置（提供共享存储与锚点镜像）")
+    pb.add_argument("--keys", nargs="*", help="只发布这些构建键；缺省发布输出目录下的全部")
     s = sub.add_parser("scan", help="逐字段归类报告（第 13 节）")
     s.add_argument("tasks", nargs="+", type=Path, help="Harbor 任务目录，或包含任务目录的上级目录（递归找 task.toml）")
     s.add_argument("--capabilities", required=True, type=Path, help="目标部署的能力报告（flotilla probe 的产物）")
@@ -177,6 +182,60 @@ def _build(args: argparse.Namespace) -> int:
     return 1 if counts["failed"] else 0
 
 
+async def _publish(args: argparse.Namespace) -> int:
+    """把构建输出里的任务文件发布到共享存储，并把清单标为已发布（§4.7）。
+
+    经临时锚点操作（与 `probe` 一样有自己的 launch_id，命令结束即删除）。没有任务文件的构建键跳过。
+    """
+    cfg = FlotillaConfig.load(args.deployment)
+    storage_root = cfg.storage_settings().root
+    keys = args.keys or sorted(p.name for p in args.out.iterdir() if (p / MANIFEST_NAME).is_file())
+    pending = [(k, args.out / k) for k in keys]
+    if not pending:
+        print(f"{args.out} 下没有可发布的构建输出", file=sys.stderr)
+        return 2
+    clock = SystemClock()
+    platform = build(
+        endpoint=cfg.opensandbox.endpoint,
+        credential=cfg.credential(),
+        clock=clock,
+        settings=cfg.network_settings(),
+        storage=cfg.storage_settings(),
+        caps=cfg.load_report().to_capabilities(),
+        execd=cfg.execd_settings(),
+        extensions=cfg.opensandbox.extensions,
+        create_fields=cfg.opensandbox.create_fields,
+        group_extension=cfg.opensandbox.group_extension,
+    )
+    anchor = Anchor(platform, clock, f"publish-{uuid.uuid4().hex[:12]}", cfg.anchor_settings())
+    failed = 0
+    try:
+        await anchor.start()
+        for key, directory in pending:
+            try:
+                note = await _publish_one(anchor, key, directory, storage_root)
+            except (PublishError, FlotillaError, OSError, ValueError) as exc:
+                failed += 1
+                note = f"失败：{type(exc).__name__}: {exc}"
+            print(f"{key[:12]}  {note}", flush=True)
+    finally:
+        await anchor.close()
+        await platform.aclose()
+    return 1 if failed else 0
+
+
+async def _publish_one(anchor: Anchor, key: str, directory: Path, storage_root: str) -> str:
+    manifest_path = directory / MANIFEST_NAME
+    manifest = Manifest.load_json(manifest_path.read_bytes())
+    files_dir = directory / FILES_DIR
+    if not files_dir.is_dir() or not any(files_dir.iterdir()):
+        return "无任务文件，跳过"
+    result = await publish_task_files(anchor, key, files_dir, storage_root=storage_root)
+    manifest_path.write_text(mark_published(manifest, result, storage_root).dump_json())
+    verb = "已是最新" if result.skipped else f"上传 {result.uploaded} 个文件"
+    return f"{verb} → {result.task_files}"
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -191,6 +250,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "build":
         try:
             return _build(args)
+        except ConfigError as exc:
+            print(exc, file=sys.stderr)
+            return 2
+    if args.command == "publish":
+        try:
+            return asyncio.run(_publish(args))
         except ConfigError as exc:
             print(exc, file=sys.stderr)
             return 2

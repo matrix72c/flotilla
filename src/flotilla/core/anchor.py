@@ -186,6 +186,67 @@ class Anchor:
             await self.mkdir(parent, stage=stage)
         await self._run(("cp", "-a", "--", self._path(src_key), self._path(dest_key)), stage)
 
+    async def upload(self, key: str, data: bytes, *, mode: int, uid: int, gid: int, stage: Stage) -> None:
+        """把 `data` 写到共享存储的 `key`（§4.7 任务文件上传）。父目录须已存在。"""
+        self.ensure_alive(stage)
+        assert self._handle is not None
+        try:
+            await self._platform.write_file(self._handle, self._path(key), data, mode=mode, uid=uid, gid=gid)
+        except FlotillaError as exc:
+            raise at_stage(exc, stage) from exc
+
+    async def download(self, key: str, *, stage: Stage) -> bytes:
+        """读回共享存储上的 `key`（§4.7 核对 FILES.json）。"""
+        self.ensure_alive(stage)
+        assert self._handle is not None
+        try:
+            return await self._platform.read_file(self._handle, self._path(key))
+        except FlotillaError as exc:
+            raise at_stage(exc, stage) from exc
+
+    async def rename(self, src_key: str, dest_key: str, *, stage: Stage) -> None:
+        """原子改名（§4.7 第 2 步：staging → 正式目录）。目标已存在时失败，不覆盖。"""
+        if not src_key or not dest_key:
+            raise ValueError("rename 的两端都不能是共享根目录本身")
+        # `mv -T` 把目标当文件而不是"移进目录里"；`-n` 不覆盖已存在的目标。
+        await self._run(("mv", "-Tn", "--", self._path(src_key), self._path(dest_key)), stage)
+
+    async def exists(self, key: str, *, stage: Stage) -> bool:
+        """`key` 是否存在。
+
+        用 `ls -d`（锚点镜像自带的 applet）而不是 `test`：后者不在镜像里，127 会被误读成"不存在"。
+        只把"命令跑起来了但报 No such file"算作不存在；其余非零退出按故障抛出，不当成答案。
+        """
+        self.ensure_alive(stage)
+        assert self._handle is not None
+        proc = ProcessSpec(
+            argv=("ls", "-d", "--", self._path(key)),
+            uid=0,
+            gid=0,
+            cwd="/",
+            env=_ENV,
+            timeout_s=self._settings.exec_timeout_s,
+        )
+        try:
+            result = await self._platform.exec(self._handle, proc)
+        except FlotillaError as exc:
+            raise at_stage(exc, stage) from exc
+        if result.exit_code == 0:
+            return True
+        stderr = result.stderr.decode(errors="replace")
+        if "No such file" in stderr or ("not found" in stderr and self._path(key) in stderr):
+            return False
+        raise FlotillaError(
+            f"锚点 ls -d {self._path(key)} 退出码 {result.exit_code}：{stderr.strip()[-300:]}",
+            stage=stage,
+            category=ErrorCategory.TRANSIENT,
+            retryable=True,
+        )
+
+    async def chmod(self, key: str, mode: int, *, stage: Stage) -> None:
+        """设置 `key` 的权限位（§4.7 第 2 步恢复 mode）。"""
+        await self._run(("chmod", f"{mode:04o}", "--", self._path(key)), stage)
+
     async def listdir(self, key: str, *, stage: Stage) -> list[str]:
         result = await self._run(("ls", "-1A", "--", self._path(key)), stage)
         return result.stdout.decode().splitlines()

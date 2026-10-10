@@ -673,7 +673,10 @@ share 由编排核心给每个单元统一挂载，不在清单中。清单到�
 
 发布步骤：
 
-1. 起一个临时锚点（挂载共享根目录，7.2 节），把 `files/` 经文件接口上传到 `tasks/.staging/<build_key>.<uuid>/`，按文件校验 sha256；
+1. 起一个临时锚点（挂载共享根目录，7.2 节），把 `files/` 经文件接口上传到 `tasks/.staging/<build_key>.<uuid>/`，按文件校验 sha256。
+   锚点镜像只带必要的 busybox applet（`mkdir` / `mv` / `chmod` / `chown` / `ls` / `cp` / `tar` / `rm` / `cat`），
+   没有 `ln`：任务文件里出现符号链接时明确拒绝，不静默跳过；存在性判断用 `ls -d` 而不是 `test`（镜像里没有它，
+   127 会被误读成"不存在"）；
 2. 在其中恢复属主与权限，写出 `FILES.json`（每个条目的路径、类型、mode、uid/gid、大小与 sha256、符号链接目标；按路径排序），再原子 `rename` 到 `tasks/<build_key>/`；
    目标已存在且 `FILES.json` 一致时跳过，不一致时报错，不覆盖；
 3. 在清单中写入 `task_files_published: {"storage_root": …, "files_sha256": <FILES.json 的 sha256>}`，`storage_root` 标识发布所用的共享根目录（后端文档给出格式）。
@@ -1275,7 +1278,9 @@ flotilla/
       builder.py            BuildKit 构建与派生层、镜像命名
       docker.py             Registry 与 Builder 的 docker 实现（buildx imagetools / build --push）
     scan.py                 扫描器（第 13 节）
-    share/                  发布布局、publish / verify / gc（3.3 节）
+    share/
+      publish.py            任务发布：FILES.json、经锚点上传、原子改名、清单标为已发布（§4.7）
+      （share 发布布局与 verify / gc 待实现，3.3 节）
     manifest.py             清单 schema（带 schema 版本，4.5 节）
     config.py               FlotillaConfig：所有运行期配置的唯一入口（16.3 节）；不调用平台的启动校验与到各设置的翻译
     capabilities.py         能力报告 schema 与判定（必需项、安全缺口、到 Capabilities 的投影；Platform_Requirements 第 5 节）

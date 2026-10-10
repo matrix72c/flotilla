@@ -17,7 +17,7 @@ flotilla translates service dependencies, networks, shared volumes, health check
 | Image disposition (link existing images by digest, mirror by digest) | Implemented as library modules; link/mirror resolve via `docker buildx imagetools` |
 | Image metadata, build keys, BuildKit build/derive layers | Implemented as library modules |
 | `flotilla build` | Implemented; scans, decides each image, builds what needs building, exports task files, writes the manifest |
-| `flotilla publish` | Planned; the build output is written locally and not yet uploaded |
+| `flotilla publish` | Implemented; uploads task files through a temporary anchor and marks the manifest published |
 | Harbor task loading and classification | Implemented as library modules behind `flotilla scan` |
 | `flotilla scan` | Implemented; classifies Harbor task directories against a capability report |
 | `flotilla gc` and `share` commands | Planned; supporting library functionality is partially implemented |
@@ -100,6 +100,17 @@ uv run flotilla build <task-dirs> \
 The deployment file's `[build]` section names the registries the platform can pull from, the push target, any
 replacements for public base images, and an optional prebuilt-image reference. Building requires Docker with
 BuildKit on the machine; tasks that only reference existing images do not.
+
+## Publishing task files
+
+A task whose build exported task files must be published before it can run: `flotilla build` only writes locally,
+since the build machine holds no platform credentials. `flotilla publish` uploads `files/` through a temporary
+anchor, writes `FILES.json`, renames it into place atomically, and records the result in the manifest. Re-running it
+is a no-op; a build key whose contents changed is refused rather than overwritten.
+
+```sh
+uv run flotilla publish build-output --deployment deployments/local/opensandbox.toml
+```
 
 ## Design documents
 
