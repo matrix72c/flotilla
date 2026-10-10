@@ -28,6 +28,7 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from flotilla.build.images import BuildSettings
 from flotilla.capabilities import SECURITY_FIELDS, CapabilityReport
 from flotilla.core.anchor import AnchorSettings
 from flotilla.core.reaper import ReaperSettings
@@ -110,6 +111,19 @@ class OpenSandbox(_Model):
 
 
 # ───────────────────────────── 通用段落 ─────────────────────────────
+
+
+class Build(_Model):
+    """数据集构建者配置 `[build]`（§4.3）。只在 `flotilla build` 用到；运行期不读。"""
+
+    pullable_registries: tuple[str, ...] = ()
+    mirror_images: bool = False
+    target: str = ""
+
+    def settings(self) -> BuildSettings:
+        return BuildSettings(
+            pullable_registries=self.pullable_registries, mirror_images=self.mirror_images, target=self.target
+        )
 
 
 class Storage(_Model):
@@ -257,6 +271,7 @@ class ResourceDefaults(_Model):
 class FlotillaConfig(_Model):
     opensandbox: OpenSandbox
     storage: Storage
+    build: Build = Build()
     share: Share
     network: Network = Network()
     security: Security = Security()

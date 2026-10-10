@@ -505,18 +505,28 @@ agent 攻破任一服务后可以绕过任务的权限边界，reward 可能失�
    没配置时用默认值，没有默认值时 `open` 报错。`build.args` 中的插值仍在构建时完成。
    合并时与 Harbor 一样，在任务文件之前叠加 agent 服务的保活覆盖（3.5 节），任务文件可以覆盖它。
 2. **扫描**：逐字段归类（4.6 节），按目标部署的能力报告判断；有拒绝项的任务不再构建。
-3. **构建镜像**：`build` 的服务用 BuildKit 构建；`image` 的服务拉取后按 digest 固定。
+3. **确定每个服务的镜像**：按下表把每个服务归到一种处置，都以 digest 写入清单（C15）。tag → digest 只查
+   registry 的 manifest 接口（`Docker-Content-Digest`），不下载镜像层；钉的是 tag 指向的那个 digest（多架构镜像即其 index 的 digest）：
+
+   | 处置 | 条件 | 做法 |
+   |---|---|---|
+   | **link** | `image` 服务，镜像落在 `[build].pullable_registries` 列出的、平台能直接拉的前缀下，且第 7 步不需要改镜像 | 解析 digest，清单直接引用源 registry 的 `repo@sha256:…`，不拉不推 |
+   | **mirror** | `image` 服务，镜像不在可拉前缀下（公共镜像等），且不需要改镜像；或 link 的服务按配置要求固化 | 按 digest 复制到使用方的 registry（同一 digest 只复制一次），清单引用复制后的 `repo@sha256:…` |
+   | **build / derive** | 有 `build`，或第 7 步需要改镜像 | BuildKit 构建（`build` 从 Dockerfile；改现成镜像时 `FROM` 它派生一层），推送后引用其 digest |
+
+   link 依赖源 registry 保留该 digest；`image` 服务默认 link，`[build].mirror_images = true` 时改为一律 mirror（把内容固化进使用方的 registry，不受源 tag 变动或清理影响）。
+   构建前对所有 `image` 服务批量解析 digest 并确认平台能拉，拉不到的降级为 mirror；都失败时该任务以 `invalid` 记入扫描报告。
 4. **处理 bind 源**：按 4.4 节：写入镜像的写到目标路径；由平台挂载的放入第 6 步的任务文件 `binds/<n>`。
 5. **记录镜像元数据**：`ENTRYPOINT`、`CMD`、`USER`（解析为数字 uid / gid）、`WORKDIR`、`ENV`、`HEALTHCHECK`、`STOPSIGNAL`。
 6. **导出任务文件**：bind 源（`binds/<n>`）、共享卷的初始内容（`seeds/<volume>.tar`，7.3 节）、全部引用只读的卷的内容（`_volumes/<volume>/`），
    写入本地输出目录 `<out>/<build_key>/files/`。构建机离线、没有平台凭证，**不写共享存储**；这些文件由任务发布（4.7 节）上传。
-7. **镜像改动**：服务镜像只在以下情况改动：第 4 步写入目标路径的 bind、7.3 节的 `nocopy` 清空、镜像中没有 `/bin/sh` 而部署声明需要它（3.4 节）。
-   公共镜像在不需要这些改动时按原 digest 转推，不产生衍生镜像。
+7. **镜像改动**：服务镜像只在以下情况改动（即第 3 步归到 build / derive）：第 4 步写入目标路径的 bind、7.3 节的 `nocopy` 清空、镜像中没有 `/bin/sh` 而部署声明需要它（3.4 节）。
+   不需要这些改动的 `image` 服务按原 digest link 或 mirror，不产生衍生镜像。
 8. **推送并写清单**：镜像以 digest 引用；`task_files` 标为"待发布"（4.7 节）。
 
 ### 4.3 镜像命名
 
-镜像仓库（C15）由使用方选择。可以把任务镜像放在同一个仓库中，以 tag 区分：
+镜像仓库（C15）由使用方选择。只有 build / derive 与 mirror 产出的镜像推进这个仓库；link 的服务直接引用源 registry 的 digest，不占这里的 tag。推进来的镜像可以放在同一个仓库中，以 tag 区分：
 
 ```
 <registry>/<namespace>/<repo>:<task-slug>--<service>--<buildkey12>
@@ -524,7 +534,8 @@ agent 攻破任一服务后可以绕过任务的权限边界，reward 可能失�
 
 - `task-slug` 由任务路径规范化得到，超长时截断并附哈希；tag 总长不超过 128；
 - 清单中同时记录 digest，运行时以 `repo@sha256:…` 拉取，tag 只供人查看与 `flotilla gc --images` 盘点；
-- 可以把公共基础镜像镜像到使用方控制的仓库，减少运行期的外部依赖；同一 digest 只推一次。
+- link 的服务不进这套命名：清单直接记源 registry 的 `repo@sha256:…`，`flotilla gc --images` 不管它；
+- mirror 把平台拉不到的镜像复制到使用方控制的仓库，减少运行期的外部依赖；同一 digest 只推一次。
 
 ### 4.4 bind mount
 
