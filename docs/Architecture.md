@@ -1130,10 +1130,12 @@ agent_overlay = {
 | `start` | 启动 trial（第 5 节） |
 | `exec` / `upload_*` / `download_*` | 默认作用于 agent 服务；指定服务时作用于该服务，服务不存在时报错 |
 | `stop` | 整个环境结束：交给回收器（5.5 节） |
-| `capabilities` | `docker_compose = True`；`disable_internet`、`network_allowlist*`、`dynamic_network_policy` 均为 `False` |
+| `capabilities` | `docker_compose = True`、`disable_internet = True`（见下）；`network_allowlist*`、`dynamic_network_policy` 为 `False` |
 | `stop_service(name)` | 报错：首版不支持（见下） |
 
-Harbor 0.23 按 `capabilities` 在 trial 开始前拒绝 `no-network`、`allowlist` 与阶段之间切换网络策略的任务（6.6 节），flotilla 不需要自己检查。
+Harbor 0.23 按 `capabilities` 在 trial 开始前拒绝环境不支持的网络模式（6.6 节），flotilla 不需要自己检查。
+
+**`disable_internet = True`**：声明 flotilla 能让容器断网。依据是部署声明没有 IP 级外网、唯一隐式放行是集群 DNS（C13，`none` 由 probe 测得、`implicit_egress` 只有 kube-dns）；缺这个前提的部署不得声明。于是 Harbor 把 `network_mode = no-network` 的任务放进来，适配层把该任务全部单元的出站强制为 `none`（任务的 `network_mode` 经清单带到 provider，覆盖训练侧的 `[network] external`）。`allowlist` 仍不声明（要把 Harbor 的允许主机精确翻成窄列表并保证范围不超过 Harbor，H3），依赖它的任务由扫描拒绝。
 
 `stop_service("main")` 只在 Harbor 的独立验证模式（`environment_mode = "separate"`）下、收集 `main` 以外服务的产物之前调用，要求 `main` 内的全部进程（含 agent 经 `exec` 留下的后台进程）都停止。
 现有部署都给不出这个保证（平台没有"停止实例内全部进程"，删除也不能确认进程已终止），所以首版不支持：
@@ -1173,7 +1175,7 @@ Harbor 的清单来源与训练相同：`flotilla build` 的输出目录。适�
 - 输入：Harbor 任务目录（或包含它们的上级目录，递归找 `task.toml`），以及目标部署的能力报告；输出：每个任务一行 JSON（状态、服务名、每个非"实现"字段的类别与原因、运行时参数、受调用方出站策略约束的服务）与汇总表；读不出来的任务目录记为拒绝，不中止扫描；
 - 与构建共用解析与归类代码（4.6 节），保证"能构建"与"扫描通过"一致；
 - 与部署相关的归类（多服务互联、特权、设备、UDP、文件 bind、执行鉴权、入站隔离、平台隐式放行对 `internal` 的影响）按能力报告判断，同一任务在不同部署上可能得到不同结论；
-- 拒绝声明 Harbor `network_policy`（`public` 以外）的任务，以及会触发 `stop_service` 的独立验证模式任务（6.6 节、第 11 节）；
+- Harbor `network_policy`：`public` 与 `no-network`（映射为全单元 `none`，第 11 节）接受；`allowlist` 与阶段之间切换网络策略的任务拒绝。会触发 `stop_service` 的独立验证模式任务拒绝（6.6 节、第 11 节）；
 - 报告列出每个任务的运行时参数、需要特权运行时的原因、hosts 的限制是否可能影响该任务（服务使用自带 DNS 客户端、依赖轮询）、出站是否受调用方策略限制；
 - 检查挂载点冲突：服务的卷、bind、`working_dir` 落在 `/.flotilla` 之下，或镜像中该路径已有内容时，拒绝；
 - 统计带 restart 策略的服务（3.6 节）；
