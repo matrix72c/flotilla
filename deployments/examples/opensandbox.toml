@@ -18,6 +18,11 @@ wrapper = "/.flotilla/bin/busybox"
 volumes = "host"
 # Must be an allowed host path backed by shared storage on all worker nodes.
 host_path = "/srv/flotilla"
+# Alternatively, use an existing volume that every worker can mount read-write
+# (a ReadWriteMany PVC on Kubernetes):
+# volumes = "pvc"
+# claim_name = "flotilla-shared"
+# root_subpath = "flotilla"
 
 [share]
 # Prepare this immutable release before running probe; publication is not implemented.

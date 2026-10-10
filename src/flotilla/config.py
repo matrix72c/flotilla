@@ -112,13 +112,20 @@ class OpenSandbox(_Model):
 
 
 class Storage(_Model):
-    volumes: Literal["host"] = "host"
+    volumes: Literal["host", "pvc"] = "host"
     host_path: str = ""
+    claim_name: str = ""
+    root_subpath: str = ""
 
     @model_validator(mode="after")
     def _settings(self) -> Storage:
-        StorageSettings(volumes=self.volumes, host_path=self.host_path)  # 抛 ValueError
+        self.settings()  # 抛 ValueError
         return self
+
+    def settings(self) -> StorageSettings:
+        return StorageSettings(
+            volumes=self.volumes, host_path=self.host_path, claim_name=self.claim_name, root_subpath=self.root_subpath
+        )
 
 
 class Share(_Model):
@@ -401,8 +408,7 @@ class FlotillaConfig(_Model):
         return NetworkSettings(sandbox_cidrs=n.sandbox_cidrs, platform_cidrs=n.platform_cidrs, max_rules=n.max_rules)
 
     def storage_settings(self) -> StorageSettings:
-        s = self.storage
-        return StorageSettings(volumes=s.volumes, host_path=s.host_path)
+        return self.storage.settings()
 
     def execd_settings(self) -> ExecdSettings:
         e = self.opensandbox.execd

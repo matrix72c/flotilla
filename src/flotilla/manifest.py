@@ -99,7 +99,7 @@ class Finding(_Model):
 
 
 class Published(_Model):
-    host_path: str
+    storage_root: str  # 发布时的 `StorageSettings.root`
     files_sha256: str
 
 

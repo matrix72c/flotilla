@@ -12,7 +12,7 @@ flotilla translates service dependencies, networks, shared volumes, health check
 |---|---|
 | Compose normalization, manifest generation, field classification | Implemented as Python library modules |
 | Trial lifecycle, topology, hosts, shared-volume preparation, cleanup, runtime monitoring | Implemented with unit tests and a fake platform |
-| OpenSandbox lifecycle, execution, files, CIDR policies, standard host volumes | Implemented; deployment validation remains in progress |
+| OpenSandbox lifecycle, execution, files, CIDR policies, standard host and PVC volumes | Implemented; deployment validation remains in progress |
 | Configuration, capability reports, `flotilla probe` | Implemented; probe combines measured results with explicit deployment declarations |
 | Image building and task publishing | Planned; library packages and CLI commands are placeholders |
 | `flotilla scan`, `gc`, and `share` commands | Planned; supporting library functionality is partially implemented |

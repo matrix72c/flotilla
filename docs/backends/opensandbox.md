@@ -20,8 +20,10 @@
 | `opensandbox.extensions` | 透传给创建接口的扩展 |
 | `opensandbox.privileged_extensions` | 特权运行时所需的附加扩展 |
 | `opensandbox.create_fields` | 附加创建字段，不能覆盖镜像、网络、卷、TTL、资源等管理字段 |
-| `storage.volumes` | 当前只支持标准 `host` 卷 |
-| `storage.host_path` | 所有 worker 可见、平台允许挂载的共享根目录 |
+| `storage.volumes` | 卷形式：标准 `host` 卷或 `pvc` 卷（第 6 节） |
+| `storage.host_path` | `host`：所有 worker 可见、平台允许挂载的共享根目录 |
+| `storage.claim_name` | `pvc`：承载共享根目录的卷名（`pvc.claimName`，DNS label） |
+| `storage.root_subpath` | `pvc`：共享根目录在该卷内的相对路径；空串表示卷的根目录 |
 
 配置校验要求 CIDR 合法，`cidr` 互联有 sandbox 网段，`any` 出站有平台网段。
 能力报告、共享目录与 share 发布的接入校验设计见 Architecture 16.3 节；完整 provider 尚未实现。
@@ -34,7 +36,7 @@
 | C2 执行与文件 | execd、数字 uid/gid、工作目录、环境变量、文件读写 | 两种协议的单元测试；probe 可测主要行为 |
 | C3 后台进程 | 启动、状态与退出码 | 单元测试；probe 可测 |
 | C4–C7 网络与地址 | IP / CIDR 策略编译、策略整体替换、经 execd 读取地址 | 策略与调用单元测试；实际可达性和隔离需部署验证 |
-| C8 共享存储 | 标准 host 卷与 subPath | 请求编译单元测试；probe 测只读与子目录隔离的部分性质 |
+| C8 共享存储 | 标准 host / pvc 卷与 subPath | 请求编译单元测试；probe 测只读与子目录隔离的部分性质 |
 | C9 执行鉴权 | 默认经 server 代理携带控制面凭证 | 所有到达路径上的按实例鉴权需部署声明和独立验证 |
 | C10 资源 | 等值写入 `resourceLimits` 与 `resourceRequests` | probe 读取实际 cgroup 限制 |
 | C11–C13 容量、诊断、隐式放行 | 配置、能力报告与错误映射 | 需部署证据，不能由请求编译证明 |
@@ -132,10 +134,23 @@ DNS、元数据或控制面等平台隐式放行的目标必须完整声明。`d
 
 ## 6 共享存储
 
-`SharedVolume` 编译为标准 `host` 卷。卷名按挂载顺序生成 `v0`、`v1` 等；卷键作为相对共享根目录的 `subPath`。
-空卷键表示根目录本身，不写 subPath。挂载点必须为绝对路径，卷键不得含路径穿越。
+每个 `SharedVolume` 编译为一个标准卷，卷名按挂载顺序生成 `v0`、`v1` 等。挂载点必须为绝对路径，卷键与 `root_subpath` 不得含路径穿越。
 
-部署必须允许给定 host 路径，并保证各 worker 上该路径指向同一共享存储。只读、单文件挂载、缺失目录行为与跨节点共享都需要实际验证。
+| 形式 | 请求 | `subPath` |
+|---|---|---|
+| `host` | `{"name": "vN", "host": {"path": host_path}, …}` | 卷键；空卷键（共享根目录本身）不写 |
+| `pvc` | `{"name": "vN", "pvc": {"claimName": claim_name, "createIfNotExists": false}, …}` | `root_subpath/卷键`；空卷键时为 `root_subpath`，两者都空时不写 |
+
+两种形式都是上游 OpenSandbox 的卷 schema：每个卷一个唯一的 `name` 与恰好一个后端结构。`createIfNotExists` 固定为 `false`，
+卷名写错时创建失败，而不是由服务端新建一个空卷。同一 claim 的多个引用在上游 K8s 运行时合成一个 pod volume，`readOnly` 按挂载各自生效。
+
+部署前提：
+
+- `host`：部署允许给定 host 路径，各 worker 上该路径指向同一共享存储；
+- `pvc`：claim 已存在，可被所有 worker 上的实例同时读写挂载（K8s 中为 `ReadWriteMany`）；
+- 只读、单文件挂载、缺失目录行为与跨节点共享都需要实际验证。
+
+已发布的清单以 `storage_root`（`host:<host_path>` 或 `pvc:<claim_name>[/<root_subpath>]`）记录任务文件所在的共享根目录（Architecture 4.7 节）。
 
 ## 7 当前限制
 

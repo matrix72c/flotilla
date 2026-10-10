@@ -70,6 +70,12 @@ release_sha256 = "{SHA}"
     assert cfg.network.policy() == ExternalPolicy(mode="none")  # 未给 external：只能 none
 
 
+def test_pvc_storage_translates_to_settings() -> None:
+    cfg = config(storage={"volumes": "pvc", "claim_name": "project-data", "root_subpath": "opt/flotilla"})
+    settings = cfg.storage_settings()
+    assert (settings.volumes, settings.claim_name, settings.root_subpath) == ("pvc", "project-data", "opt/flotilla")
+
+
 def test_endpoint_trailing_slash_normalized() -> None:
     assert config().opensandbox.endpoint == "http://os.test"
 
@@ -82,6 +88,7 @@ def test_endpoint_trailing_slash_normalized() -> None:
         {"opensandbox": {**config_data()["opensandbox"], "credential_env": "ak:sk"}},
         {"opensandbox": {**config_data()["opensandbox"], "endpoint": "os.test"}},
         {"storage": {"volumes": "unknown", "host_path": "/mnt"}},  # 未支持的卷形式
+        {"storage": {"volumes": "pvc", "host_path": "/mnt"}},  # pvc 形式缺 claim_name
         {"share": {"release": "../x", "release_sha256": SHA}},
         {"share": {"release": "r1", "release_sha256": "abc"}},
         {"network": {"external": ["0.0.0.0/0"]}},  # 任意外网须写 "any"

@@ -574,7 +574,7 @@ schema 定义在 `src/flotilla/manifest.py`（Pydantic，`extra="forbid"`），�
   "trial_volumes": [{"key": "secret_file_data", "seed": "seeds/secret_file_data.tar"},     // 本 trial 要准备的目录（7.1、7.3 节）
                     {"key": "binds/2", "copy_from": "binds/2"}],                            // 有写者的多引用 bind 源组（4.4 节）
   "task_files": "tasks/<build_key>",                                                       // 相对共享根目录；publish 写入
-  "task_files_published": {"host_path": "…", "files_sha256": "…"},                         // 4.7 节
+  "task_files_published": {"storage_root": "…", "files_sha256": "…"},                      // 4.7 节
   "runtime_params": [{"service": "model-api-proxy", "var": "UPSTREAM_BASE_URL",
                       "expr": "${CB2TB_API_UPSTREAM:-http://127.0.0.1:9}", "param": "CB2TB_API_UPSTREAM",
                       "default": "http://127.0.0.1:9"}],
@@ -652,9 +652,9 @@ share 由编排核心给每个单元统一挂载，不在清单中。清单到�
 1. 起一个临时锚点（挂载共享根目录，7.2 节），把 `files/` 经文件接口上传到 `tasks/.staging/<build_key>.<uuid>/`，按文件校验 sha256；
 2. 在其中恢复属主与权限，写出 `FILES.json`（每个条目的路径、类型、mode、uid/gid、大小与 sha256、符号链接目标；按路径排序），再原子 `rename` 到 `tasks/<build_key>/`；
    目标已存在且 `FILES.json` 一致时跳过，不一致时报错，不覆盖；
-3. 在清单中写入 `task_files_published: {"host_path": …, "files_sha256": <FILES.json 的 sha256>}`。
+3. 在清单中写入 `task_files_published: {"storage_root": …, "files_sha256": <FILES.json 的 sha256>}`，`storage_root` 标识发布所用的共享根目录（后端文档给出格式）。
 
-训练侧只接受已发布的清单：provider 在 `open` 时检查 `host_path` 与配置一致，并在首次用到某个 `build_key` 时经锚点核对 `FILES.json` 的 sha256；
+训练侧只接受已发布的清单：provider 在 `open` 时检查 `storage_root` 与配置一致，并在首次用到某个 `build_key` 时经锚点核对 `FILES.json` 的 sha256；
 不一致以 `invalid` 报告。没有任务文件的任务不需要发布。
 
 ---
@@ -1221,8 +1221,8 @@ flotilla/
         execd.py            执行、后台进程、文件（envs + env -i 按名字带回、uid / gid、超时、上传避开 multipart；current / legacy 协议）
         network.py          外部策略与 link 编译为 networkPolicy（创建时与 wire 时各一次）
         link_cidr.py        组内互联策略 cidr（标准 IP / CIDR）；目前编译在 network.py，本文件尚为空
-        volumes.py          SharedVolume → host 卷
-        storage.py          [storage]：标准 host 卷设置
+        volumes.py          SharedVolume → host / pvc 卷
+        storage.py          [storage]：卷形式与共享根目录
         address.py          内部地址
         http.py             重试、退避、限流、请求日志脱敏、错误映射
         platform.py         组装 Platform（能力报告由 config 加载后以 Capabilities 传入）
@@ -1310,8 +1310,9 @@ wrapper = "/.flotilla/bin/busybox"      # 执行包装用的 busybox；锚点镜
 # 按部署需要设置附加字段；不能覆盖 flotilla 管理的字段
 
 [storage]
-volumes = "host"                        # 标准 host 卷（后端文档第 6 节）
-host_path = "/<平台允许的共享根目录>"      # volumes = "host"：共享根目录（7.2 节）
+volumes = "pvc"                         # 标准 pvc 卷；或 "host" 加 host_path（后端文档第 6 节）
+claim_name = "<承载共享根目录的卷名>"
+root_subpath = "<共享根目录在卷内的相对路径>"   # 7.2 节；空串为卷的根目录
 
 [share]
 release = "2026-09-28.1"

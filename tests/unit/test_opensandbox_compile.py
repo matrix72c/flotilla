@@ -1,4 +1,4 @@
-"""OpenSandbox 后端的纯编译与 HTTP 层：networkPolicy、host 卷、错误映射与重试。
+"""OpenSandbox 后端的纯编译与 HTTP 层：networkPolicy、host / pvc 卷、错误映射与重试。
 
 对应 backends/opensandbox.md §3.5、第 4、6 节。
 """
@@ -16,7 +16,7 @@ from flotilla.platform.fake import ManualClock
 from flotilla.platform.opensandbox.http import Http, RetryPolicy, error_fields, map_status
 from flotilla.platform.opensandbox.network import NetworkSettings, compile_policy
 from flotilla.platform.opensandbox.storage import StorageSettings
-from flotilla.platform.opensandbox.volumes import compile_volumes
+from flotilla.platform.opensandbox.volumes import compile_host_volumes, compile_pvc_volumes
 
 NET = NetworkSettings(sandbox_cidrs=("10.0.0.0/16",), platform_cidrs=("192.168.0.0/24", "169.254.169.254/32"))
 NONE = ExternalPolicy(mode="none")
@@ -103,21 +103,50 @@ def test_bad_settings_rejected() -> None:
         NetworkSettings(sandbox_cidrs=("not-a-cidr",))
 
 
-# ───────────────────────────── host 卷（第 6 节）─────────────────────────────
+# ───────────────────────────── host / pvc 卷（第 6 节）─────────────────────────────
+
+VOLS = [
+    SharedVolume(key="share/releases/r1", mount_path="/.flotilla", read_only=True),
+    SharedVolume(key="launches/L/t/static", mount_path="/srv", read_only=False),
+    SharedVolume(key="", mount_path="/flotilla-root", read_only=False),
+]
 
 
-def test_volumes_compile_in_order() -> None:
-    vols = [
-        SharedVolume(key="share/releases/r1", mount_path="/.flotilla", read_only=True),
-        SharedVolume(key="launches/L/t/static", mount_path="/srv", read_only=False),
-        SharedVolume(key="", mount_path="/flotilla-root", read_only=False),
-    ]
+def test_host_volumes_compile_in_order() -> None:
     host = {"path": "/mnt/shared"}
-    assert compile_volumes(vols, "/mnt/shared") == [
+    assert compile_host_volumes(VOLS, "/mnt/shared") == [
         {"name": "v0", "host": host, "mountPath": "/.flotilla", "readOnly": True, "subPath": "share/releases/r1"},
         {"name": "v1", "host": host, "mountPath": "/srv", "readOnly": False, "subPath": "launches/L/t/static"},
         {"name": "v2", "host": host, "mountPath": "/flotilla-root", "readOnly": False},
     ]
+
+
+def test_pvc_volumes_prefix_root_subpath() -> None:
+    # 每个引用一个卷、名字不重复；上游把同一 claim 合成一个 pod volume，readOnly 按挂载各自生效。
+    pvc = {"claimName": "shared-root", "createIfNotExists": False}
+    assert compile_pvc_volumes(VOLS, "shared-root", "opt/flotilla") == [
+        {
+            "name": "v0",
+            "pvc": pvc,
+            "mountPath": "/.flotilla",
+            "readOnly": True,
+            "subPath": "opt/flotilla/share/releases/r1",
+        },
+        {
+            "name": "v1",
+            "pvc": pvc,
+            "mountPath": "/srv",
+            "readOnly": False,
+            "subPath": "opt/flotilla/launches/L/t/static",
+        },
+        # 锚点：共享根目录本身，不是 claim 的根目录。
+        {"name": "v2", "pvc": pvc, "mountPath": "/flotilla-root", "readOnly": False, "subPath": "opt/flotilla"},
+    ]
+
+
+def test_pvc_volumes_at_claim_root() -> None:
+    out = compile_pvc_volumes(VOLS, "shared-root", "")
+    assert [v.get("subPath") for v in out] == ["share/releases/r1", "launches/L/t/static", None]
 
 
 @pytest.mark.parametrize(
@@ -128,9 +157,26 @@ def test_volumes_compile_in_order() -> None:
         (SharedVolume(key="a", mount_path="/x", read_only=True), "relative"),
     ],
 )
-def test_volumes_reject_bad_paths(vol: SharedVolume, host: str) -> None:
+def test_host_volumes_reject_bad_paths(vol: SharedVolume, host: str) -> None:
     with pytest.raises(ValueError):
-        compile_volumes([vol], host)
+        compile_host_volumes([vol], host)
+
+
+@pytest.mark.parametrize(
+    ("vol", "claim", "root"),
+    [
+        (SharedVolume(key="a/../b", mount_path="/x", read_only=True), "c", ""),
+        (SharedVolume(key="a", mount_path="rel", read_only=True), "c", ""),
+        (SharedVolume(key="a", mount_path="/x", read_only=True), "Bad_Claim", ""),
+        (SharedVolume(key="a", mount_path="/x", read_only=True), "", ""),
+        (SharedVolume(key="a", mount_path="/x", read_only=True), "c", "/abs"),
+        (SharedVolume(key="a", mount_path="/x", read_only=True), "c", "opt/../x"),
+        (SharedVolume(key="a", mount_path="/x", read_only=True), "c", "opt/"),
+    ],
+)
+def test_pvc_volumes_reject_bad_paths(vol: SharedVolume, claim: str, root: str) -> None:
+    with pytest.raises(ValueError):
+        compile_pvc_volumes([vol], claim, root)
 
 
 # ───────────────────────────── 存储设置（第 6 节）─────────────────────────────
@@ -138,7 +184,19 @@ def test_volumes_reject_bad_paths(vol: SharedVolume, host: str) -> None:
 
 def test_storage_settings_compiles_host_volumes() -> None:
     vol = SharedVolume(key="k", mount_path="/m", read_only=True)
-    assert StorageSettings(host_path="/mnt").compile([vol])[0]["host"] == {"path": "/mnt"}
+    settings = StorageSettings(host_path="/mnt")
+    assert settings.compile([vol])[0]["host"] == {"path": "/mnt"}
+    assert settings.root == "host:/mnt"
+
+
+def test_storage_settings_compiles_pvc_volumes() -> None:
+    vol = SharedVolume(key="k", mount_path="/m", read_only=True)
+    settings = StorageSettings(volumes="pvc", claim_name="data", root_subpath="opt/f")
+    (entry,) = settings.compile([vol])
+    assert entry["pvc"] == {"claimName": "data", "createIfNotExists": False}
+    assert entry["subPath"] == "opt/f/k"
+    assert settings.root == "pvc:data/opt/f"
+    assert StorageSettings(volumes="pvc", claim_name="data").root == "pvc:data"
 
 
 @pytest.mark.parametrize(
@@ -146,6 +204,9 @@ def test_storage_settings_compiles_host_volumes() -> None:
     [
         {},  # host 形式缺 host_path
         {"host_path": "relative"},
+        {"host_path": "/mnt", "claim_name": "data"},  # host 形式不用 pvc 的字段
+        {"volumes": "pvc"},  # pvc 形式缺 claim_name
+        {"volumes": "pvc", "claim_name": "data", "host_path": "/mnt"},
         {"volumes": "nfs", "host_path": "/mnt"},
     ],
 )
