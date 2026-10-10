@@ -2,13 +2,15 @@
 
 - `DockerRegistry`：`docker buildx imagetools` 查 digest、读 image config、按 digest 复制。`imagetools` 只和
   registry 打交道，不把镜像层拉到本地（`inspect` 读 manifest 与 config blob，`create` 在 registry 之间复制）；
-- `DockerBuilder`：`docker buildx build --push` 构建并推送，从 metadata 文件取推送后的 digest。
+- `DockerBuilder`：`docker buildx build --push` 构建并推送，从 metadata 文件取推送后的 digest；
+- `DockerImageExport`：`docker create` + `docker cp` 从镜像里取卷的初始内容（容器不启动，不执行镜像代码）。
 
 命令、超时、凭证（docker config 目录）都可注入，便于测试与适配不同部署的 docker 调用方式。
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import subprocess
 import tempfile
@@ -58,8 +60,20 @@ class DockerRegistry:
             raise ImageError(f"无法从 {ref} 解析 digest（imagetools 输出：{out[:200]!r}）")
         return digest
 
+    def image_history(self, pinned: str) -> Sequence[Mapping[str, Any]]:
+        """镜像的构建 history（`prebuilt.verify` 用）。"""
+        history = self._image(pinned).get("history")
+        return [h for h in history if isinstance(h, Mapping)] if isinstance(history, list) else []
+
     def image_config(self, pinned: str) -> Mapping[str, Any]:
         """镜像的 image config 的 `config` 段（§4.2 第 5 步）。只读 manifest 与 config blob，不拉镜像层。"""
+        config = self._image(pinned).get("config")
+        if not isinstance(config, Mapping):
+            raise ImageError(f"{pinned} 的 image config 里没有 config 段")
+        return config
+
+    def _image(self, pinned: str) -> Mapping[str, Any]:
+        """镜像的完整 image config（含 `config` 与 `history`）。多架构时取 linux/amd64。"""
         out = self._run(["buildx", "imagetools", "inspect", pinned, "--format", "{{json .Image}}"])
         try:
             image = json.loads(out)
@@ -72,10 +86,9 @@ class DockerRegistry:
                 if isinstance(entry, Mapping) and "config" in entry:
                     image = entry
                     break
-        config = image.get("config") if isinstance(image, Mapping) else None
-        if not isinstance(config, Mapping):
-            raise ImageError(f"{pinned} 的 image config 里没有 config 段：{out[:200]!r}")
-        return config
+        if not isinstance(image, Mapping):
+            raise ImageError(f"{pinned} 的 image config 形态异常：{out[:200]!r}")
+        return image
 
     def copy(self, source: str, target: str) -> None:
         self._run(["buildx", "imagetools", "create", "--tag", target, source])
@@ -137,3 +150,34 @@ class DockerBuilder:
 
     def _run(self, args: Sequence[str]) -> str:
         return _docker(args, docker_cmd=self.docker_cmd, timeout_s=self.timeout_s)
+
+
+@dataclass(frozen=True)
+class DockerImageExport:
+    """用 `docker create` + `docker cp` 实现 `ImageExport`（§4.2 第 6 步）。
+
+    卷的初始内容要从镜像的文件系统里取。`docker cp` 从一个**不启动**的容器里拷，所以不执行镜像里的任何代码；
+    容器在 finally 里删除。`docker cp` 会保留属主与权限（§7.3 要求）。
+    """
+
+    docker_cmd: Sequence[str] = field(default_factory=lambda: ("docker",))
+    timeout_s: float = 600.0
+
+    def extract(self, image: str, path: str, dest: Path) -> bool:
+        container = _docker(["create", image, "true"], docker_cmd=self.docker_cmd, timeout_s=self.timeout_s).strip()
+        if not container:
+            raise ImageError(f"docker create 没有返回容器 ID：{image}")
+        try:
+            # `path/.` 把目录内容拷到 dest 之下而不是 dest/<basename>。
+            try:
+                _docker(
+                    ["cp", f"{container}:{path.rstrip('/')}/.", str(dest)],
+                    docker_cmd=self.docker_cmd,
+                    timeout_s=self.timeout_s,
+                )
+            except ImageError:
+                return False  # 镜像里没有这个路径：空卷（与 Docker 一致）
+            return any(dest.iterdir())
+        finally:
+            with contextlib.suppress(ImageError):
+                _docker(["rm", "-f", container], docker_cmd=self.docker_cmd, timeout_s=self.timeout_s)

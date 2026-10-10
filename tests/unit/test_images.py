@@ -122,6 +122,9 @@ class FakeRegistry(Registry):
     def image_config(self, pinned: str) -> dict[str, object]:
         return {"Cmd": ["/bin/sh"]}
 
+    def image_history(self, pinned: str) -> list[dict[str, object]]:
+        return []
+
     def copy(self, source: str, target: str) -> None:
         self.copied.append((source, target))
 

@@ -16,7 +16,8 @@ flotilla translates service dependencies, networks, shared volumes, health check
 | Configuration, capability reports, `flotilla probe` | Implemented; probe combines measured results with explicit deployment declarations |
 | Image disposition (link existing images by digest, mirror by digest) | Implemented as library modules; link/mirror resolve via `docker buildx imagetools` |
 | Image metadata, build keys, BuildKit build/derive layers | Implemented as library modules |
-| `flotilla build` / `publish` CLI commands | Planned; the library pieces above are in place, the drivers are not |
+| `flotilla build` | Implemented; scans, decides each image, builds what needs building, exports task files, writes the manifest |
+| `flotilla publish` | Planned; the build output is written locally and not yet uploaded |
 | Harbor task loading and classification | Implemented as library modules behind `flotilla scan` |
 | `flotilla scan` | Implemented; classifies Harbor task directories against a capability report |
 | `flotilla gc` and `share` commands | Planned; supporting library functionality is partially implemented |
@@ -82,6 +83,23 @@ Image build helpers accept a complete output image reference and an optional `--
 images/anchor/build.sh '<your-registry>/flotilla:anchor-dev'
 images/probe/build.sh '<your-registry>/flotilla:probe-dev'
 ```
+
+## Building tasks
+
+`flotilla build` turns Harbor task directories into service images and one manifest per task. It scans first and
+skips rejected tasks, decides each service's image (reference an existing one by digest, mirror it, or build it),
+exports the task files the platform will mount, and writes `<out>/<build_key>/flotilla.manifest.json`. A task whose
+manifest already exists is skipped unless `--force` is given.
+
+```sh
+uv run flotilla build <task-dirs> \
+  --deployment deployments/local/opensandbox.toml \
+  --out build-output --report build.jsonl
+```
+
+The deployment file's `[build]` section names the registries the platform can pull from, the push target, any
+replacements for public base images, and an optional prebuilt-image reference. Building requires Docker with
+BuildKit on the machine; tasks that only reference existing images do not.
 
 ## Design documents
 

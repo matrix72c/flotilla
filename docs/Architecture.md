@@ -1268,6 +1268,8 @@ flotilla/
     build/
       images.py             镜像处置（link / mirror / build）、digest 解析与 mirror 复制
       prebuilt.py           预构建镜像的查找与与任务 Dockerfile 的一致性校验
+      files.py              任务文件导出：bind 源、卷种子、只读卷内容（§4.2 第 4、6 步）
+      driver.py             flotilla build 的驱动：按 §4.2 串起各步，逐任务报告
       meta.py               registry 的 image config → 清单的镜像元数据（USER 解析为数字）
       keys.py               构建键与内容哈希（与 FILES.json 同规则）
       builder.py            BuildKit 构建与派生层、镜像命名

@@ -1,6 +1,6 @@
 """flotilla 命令行入口（Architecture §16.3）。
 
-已实现：`probe`、`scan`。其余子命令（build / publish / gc / share）参数骨架在位，执行时报"尚未实现"，随对应模块落地。
+已实现：`probe`、`scan`、`build`。其余子命令（publish / gc / share）参数骨架在位，执行时报"尚未实现"，随对应模块落地。
 
 平台凭证只从配置 `opensandbox.credential_env` 指定的环境变量读取（原则 8）。
 """
@@ -16,10 +16,13 @@ from collections import Counter
 from collections.abc import Sequence
 from pathlib import Path
 
+from flotilla.build.docker import DockerBuilder, DockerImageExport, DockerRegistry
+from flotilla.build.driver import BuildContext, BuildOutcome, build_task, write_report
 from flotilla.capabilities import CapabilityReport
 from flotilla.compose.task import TaskError, find_tasks, load_task
 from flotilla.config import ConfigError, FlotillaConfig
 from flotilla.core.anchor import Anchor
+from flotilla.manifest import Resources
 from flotilla.platform.clock import SystemClock
 from flotilla.platform.opensandbox import build
 from flotilla.probe import Declared, ProbeSettings, probe
@@ -29,7 +32,13 @@ from flotilla.scan import scan_task
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="flotilla", description="Compose 环境 → 一组 sandbox 的编排层")
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("build", help="离线构建并写任务清单（第 4 节）")
+    b = sub.add_parser("build", help="离线构建并写任务清单（第 4 节）")
+    b.add_argument("tasks", nargs="+", type=Path, help="Harbor 任务目录，或包含它们的上级目录")
+    b.add_argument("--deployment", required=True, type=Path, help="部署配置（提供 [build] 与能力报告路径）")
+    b.add_argument("--out", required=True, type=Path, help="输出目录：<out>/<build_key>/ 下是清单与任务文件")
+    b.add_argument("--docker", default="docker", help="docker 可执行与前置参数，空格分隔")
+    b.add_argument("--force", action="store_true", help="已有同键的清单也重建")
+    b.add_argument("--report", type=Path, help="逐任务的构建报告，每行一个 JSON")
     sub.add_parser("publish", help="上传任务文件并把清单标为已发布（§4.7）")
     s = sub.add_parser("scan", help="逐字段归类报告（第 13 节）")
     s.add_argument("tasks", nargs="+", type=Path, help="Harbor 任务目录，或包含任务目录的上级目录（递归找 task.toml）")
@@ -136,6 +145,38 @@ def _scan(args: argparse.Namespace) -> int:
     return 0
 
 
+def _build(args: argparse.Namespace) -> int:
+    """逐任务构建（§4.2）。单个任务失败不中止，照实记入报告；有失败时退出码非 0。"""
+    cfg = FlotillaConfig.load(args.deployment)
+    docker_cmd = tuple(args.docker.split())
+    ctx = BuildContext(
+        settings=cfg.build.settings(),
+        caps=cfg.load_report().to_capabilities(),
+        registry=DockerRegistry(docker_cmd=docker_cmd),
+        builder=DockerBuilder(docker_cmd=docker_cmd),
+        image_export=DockerImageExport(docker_cmd=docker_cmd),
+        resources={name: Resources(cpu=r.cpu, memory=r.memory) for name, r in cfg.resources.defaults.items()},
+    )
+    outcomes: list[BuildOutcome] = []
+    for path in find_tasks(args.tasks):
+        try:
+            task = load_task(path)
+        except TaskError as exc:
+            outcomes.append(BuildOutcome(path.name, "failed", reason=f"无法读取任务目录：{exc}"))
+            continue
+        outcome = build_task(task, args.out, ctx, force=args.force)
+        outcomes.append(outcome)
+        print(f"{outcome.status:9s} {outcome.task}" + (f"  {outcome.reason}" if outcome.reason else ""), flush=True)
+    counts = Counter(o.status for o in outcomes)
+    print(f"共 {len(outcomes)} 个任务：" + "，".join(f"{k} {v}" for k, v in sorted(counts.items())))
+    pending = sum(1 for o in outcomes if o.needs_publish)
+    if pending:
+        print(f"其中 {pending} 个导出了任务文件，运行前须先 flotilla publish（尚未实现）")
+    if args.report is not None:
+        write_report(outcomes, args.report)
+    return 1 if counts["failed"] else 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -147,6 +188,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 2
     if args.command == "scan":
         return _scan(args)
+    if args.command == "build":
+        try:
+            return _build(args)
+        except ConfigError as exc:
+            print(exc, file=sys.stderr)
+            return 2
     print(f"子命令 {args.command!r} 尚未实现", file=sys.stderr)
     return 2
 

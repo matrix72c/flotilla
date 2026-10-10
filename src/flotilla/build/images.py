@@ -154,6 +154,10 @@ class Registry(Protocol):
         """`pinned`（`repo@sha256:…`）的 image config 的 `config` 段（§4.2 第 5 步），只读 manifest 与 config blob。"""
         ...
 
+    def image_history(self, pinned: str) -> Sequence[Mapping[str, Any]]:
+        """镜像的构建 history（校验预构建镜像用，`prebuilt.verify`）。"""
+        ...
+
     def copy(self, source: str, target: str) -> None:
         """把 `source`（`repo@sha256:…`）按 digest 复制到 `target`（`repo:tag`），保持 digest 不变。"""
         ...
