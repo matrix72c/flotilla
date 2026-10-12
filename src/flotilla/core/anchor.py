@@ -40,6 +40,34 @@ log = logging.getLogger(__name__)
 # 锚点命令的环境：只够找到镜像自带的工具（§2.3：进程环境恰好是 ProcessSpec.env）。
 _ENV = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"}
 
+#: `ls -l` 权限位串 → 数值 mode。锚点镜像的 busybox 没有 `stat`，元数据只能从 `ls -ln` 解。
+_LS_MODES = {"r": 4, "w": 2, "x": 1, "s": 1, "t": 1, "-": 0, "S": 0, "T": 0}
+
+
+def _mode_from_ls(field: str) -> int:
+    """`drwxr-xr-x` / `-rw-r--r--` → 数值 mode。只取后九位，忽略文件类型与 setuid/setgid/粘滞位。"""
+    if len(field) < 10:
+        raise ValueError(f"无法解析的 ls 权限串：{field!r}")
+    bits = field[1:10]
+    mode = 0
+    for index, char in enumerate(bits):
+        weight = _LS_MODES.get(char)
+        if weight is None:
+            raise ValueError(f"无法解析的 ls 权限串：{field!r}")
+        # 每三位一组（属主 / 组 / 其他），组基准分别是 6、3、0；权重本身已含组内偏移。
+        mode |= weight << (6 - 3 * (index // 3))
+    return mode
+
+
+@dataclass(frozen=True)
+class FileStat:
+    """共享存储上一个条目的元数据（`Anchor.stat`）。"""
+
+    mode: int
+    uid: int
+    gid: int
+    size: int
+
 
 @dataclass(frozen=True)
 class AnchorSettings:
@@ -205,11 +233,23 @@ class Anchor:
             raise at_stage(exc, stage) from exc
 
     async def rename(self, src_key: str, dest_key: str, *, stage: Stage) -> None:
-        """原子改名（§4.7 第 2 步：staging → 正式目录）。目标已存在时失败，不覆盖。"""
+        """原子改名（§4.7 第 2 步：staging → 正式目录）。目标已存在时失败，不覆盖。
+
+        `mv -n` 在目标已存在时**静默成功**（退出码 0，什么都不移动；BusyBox 1.36 实测），所以退出码不足以
+        判定，移动后必须核对源已消失。否则并发下第二个发布者会以为改名成功，拿自己的摘要去写清单，
+        而正式目录里其实是别人的内容。
+        """
         if not src_key or not dest_key:
             raise ValueError("rename 的两端都不能是共享根目录本身")
         # `mv -T` 把目标当文件而不是"移进目录里"；`-n` 不覆盖已存在的目标。
         await self._run(("mv", "-Tn", "--", self._path(src_key), self._path(dest_key)), stage)
+        if await self.exists(src_key, stage=stage):
+            raise FlotillaError(
+                f"rename 未生效：{src_key} 仍在（目标 {dest_key} 已存在）",
+                stage=stage,
+                category=ErrorCategory.INVALID,
+                retryable=False,
+            )
 
     async def exists(self, key: str, *, stage: Stage) -> bool:
         """`key` 是否存在。
@@ -246,6 +286,41 @@ class Anchor:
     async def chmod(self, key: str, mode: int, *, stage: Stage) -> None:
         """设置 `key` 的权限位（§4.7 第 2 步恢复 mode）。"""
         await self._run(("chmod", f"{mode:04o}", "--", self._path(key)), stage)
+
+    async def stat(self, key: str, *, stage: Stage) -> FileStat:
+        """读 `key` 的元数据（mode、属主、大小）。
+
+        `download` 只回字节，`Platform` 没有元数据接口，所以经 `ls -ln` 取：`-n` 出数字 uid/gid，
+        `-d` 只列条目本身而不展开目录内容。`flotilla share verify` 用它比对 mode。
+
+        已知局限：一次 exec 一个路径，大发布下是 N 次调用；真实发布只有少量条目，够用。
+        将来条目变多时换成 `ls -lnR` 一次取全树。
+        """
+        result = await self._run(("ls", "-ln", "-d", "--", self._path(key)), stage)
+        line = result.stdout.decode(errors="replace").splitlines()
+        if not line:
+            raise FlotillaError(
+                f"锚点 ls -ln {self._path(key)} 没有输出",
+                stage=stage,
+                category=ErrorCategory.TRANSIENT,
+                retryable=True,
+            )
+        parts = line[0].split()
+        # ls -ln 的列：mode links uid gid size date…；文件名可能含空格，所以只取前五列。
+        if len(parts) < 5:
+            raise FlotillaError(
+                f"锚点 ls -ln {self._path(key)} 输出无法解析：{line[0][:200]!r}",
+                stage=stage,
+                category=ErrorCategory.TRANSIENT,
+                retryable=True,
+            )
+        mode_field, _, uid, gid, size = parts[:5]
+        return FileStat(
+            mode=_mode_from_ls(mode_field),
+            uid=int(uid),
+            gid=int(gid),
+            size=int(size),
+        )
 
     async def listdir(self, key: str, *, stage: Stage) -> list[str]:
         result = await self._run(("ls", "-1A", "--", self._path(key)), stage)

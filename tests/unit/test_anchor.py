@@ -10,7 +10,7 @@ import pytest
 from flotilla.core import labels
 from flotilla.core.anchor import Anchor, AnchorSettings
 from flotilla.platform.base import ErrorCategory, ExecResult, FlotillaError, InstanceStatus, ProcessSpec
-from flotilla.platform.fake import FakePlatform, ManualClock
+from flotilla.platform.fake import FakePlatform, ManualClock, SharedTree
 
 SETTINGS = AnchorSettings(image="anchor@sha256:abc")
 
@@ -268,6 +268,51 @@ async def test_failed_command_is_transient_at_stage(platform: FakePlatform, cloc
         await anchor.mkdir("launches/L1", stage="prepare")
     assert exc.value.stage == "prepare" and exc.value.category is ErrorCategory.TRANSIENT
     assert "No space left" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_rename_reports_conflict_when_target_exists(
+    platform: FakePlatform, clock: ManualClock, tree: SharedTree
+) -> None:
+    """目标已存在时 `mv -n` 静默成功（退出码 0），所以必须靠"源仍在"来判定并发冲突。
+
+    真实 BusyBox 1.36 实测：`mv -Tn src dest` 在 dest 已存在时返回 0 且什么都不移动。
+    """
+    anchor = await _started(platform, clock)
+    tree.dirs.update({"share", "share/staging", "share/staging/a", "share/releases", "share/releases/a"})
+    with pytest.raises(FlotillaError) as exc:
+        await anchor.rename("share/staging/a", "share/releases/a", stage="prepare")
+    assert exc.value.category is ErrorCategory.INVALID and not exc.value.retryable
+    assert "rename 未生效" in str(exc.value)
+    assert "share/staging/a" in tree.dirs  # 源没被搬走
+    assert "mv share/staging/a share/releases/a" not in tree.events
+
+
+@pytest.mark.asyncio
+async def test_rename_moves_when_target_absent(platform: FakePlatform, clock: ManualClock, tree: SharedTree) -> None:
+    anchor = await _started(platform, clock)
+    tree.dirs.update({"share/staging/a", "share/releases"})
+    await anchor.rename("share/staging/a", "share/releases/a", stage="prepare")
+    assert "share/releases/a" in tree.dirs and "share/staging/a" not in tree.dirs
+
+
+@pytest.mark.asyncio
+async def test_stat_reads_mode_owner_and_size(platform: FakePlatform, clock: ManualClock, tree: SharedTree) -> None:
+    """`ls -ln -d` 解析出的 mode/uid/gid/size —— `share verify` 比 mode 靠它。"""
+    anchor = await _started(platform, clock)
+    tree.files.add("share/releases/r1/bin/busybox")
+    tree.modes["share/releases/r1/bin/busybox"] = "0755"
+    tree.owners["share/releases/r1/bin/busybox"] = "0:0"
+    platform.tree_contents["share/releases/r1/bin/busybox"] = b"x" * 17
+    info = await anchor.stat("share/releases/r1/bin/busybox", stage="run")
+    assert info.mode == 0o755 and info.uid == 0 and info.gid == 0 and info.size == 17
+
+
+@pytest.mark.asyncio
+async def test_stat_reports_missing_as_error(platform: FakePlatform, clock: ManualClock, tree: SharedTree) -> None:
+    anchor = await _started(platform, clock)
+    with pytest.raises(FlotillaError):
+        await anchor.stat("share/releases/nope", stage="run")
 
 
 @pytest.mark.asyncio

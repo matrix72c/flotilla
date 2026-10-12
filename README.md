@@ -20,7 +20,8 @@ flotilla translates service dependencies, networks, shared volumes, health check
 | `flotilla publish` | Implemented; uploads task files through a temporary anchor and marks the manifest published |
 | Harbor task loading and classification | Implemented as library modules behind `flotilla scan` |
 | `flotilla scan` | Implemented; classifies Harbor task directories against a capability report |
-| `flotilla gc` and `share` commands | Planned; supporting library functionality is partially implemented |
+| `flotilla gc` | Implemented; drains residual launches through a temporary anchor. `--launch` skips the two-observation wait and refuses while that launch's anchor still exists. `--images` is not implemented |
+| `flotilla share publish` / `verify` / `gc` | Implemented; assembles a release under `share/staging`, renames it into `share/releases/<release>` atomically, verifies the pinned `RELEASE.json` digest plus every file, and deletes releases outside the configured pin and `--keep`. Publishing re-uploads every file: reuse by hard link is not implemented, and `gc` lists stale `share/staging` entries without reclaiming them |
 | XTuner `FlotillaProvider` and Harbor environment adapter | Design only; adapter modules are placeholders |
 
 The design documents describe the intended system, including features that are not implemented yet. They are not a statement of release completeness or a certification of any deployment.

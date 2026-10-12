@@ -381,8 +381,12 @@ share 只放与任务无关、agent 需要的内容，不承载入口进程：
 
 - **挂载点固定、来源按发布号区分**：conda、node 的 shebang 与 prefix 写死了安装路径，挂载点对所有发布都是 `/.flotilla`，不同发布只是不同的子目录。
   share 的内容不能指向挂载点之外（软链接跨出 `/.flotilla` 即失效），构建发布时检查。
-- **发布不可变**：`flotilla share publish` 经锚点（7.2 节）在 `share/staging/` 下组装新发布，未改动的组件用硬链接复制（`cp -al`），
-  写出 `RELEASE.json` 后原子 `rename` 到 `share/releases/<release>`。provider 配置钉住发布号与 `RELEASE.json` 的 sha256；旧发布由 `flotilla share gc` 删除。
+- **发布不可变**：`flotilla share publish` 经锚点（7.2 节）在 `share/staging/` 下组装新发布，
+  写出 `RELEASE.json` 后原子 `rename` 到 `share/releases/<release>`，并核对落到正式位置的就是本次内容。
+  provider 配置钉住发布号与 `RELEASE.json` 的 sha256；旧发布由 `flotilla share gc` 删除。
+  发布号已存在且内容不同时拒绝，不覆盖：换了内容就换发布号。
+  未改动组件的复用（`cp -al` 硬链接）尚未实现，目前每次发布都全量上传 —— 能力上是可行的（`cp -l` 内建于 `cp`，
+  不需要外部 `ln`），只是现有发布只有少量文件，复用没有收益。
 - **只放与任务无关的内容**：数据集、`tests/`、flag、verifier、bind 源与卷种子一律不进 share。
 - **完整性**：share 的安全依赖"没有不可信代码能写共享根目录"，即平台不向实例自动挂载未声明的可写目录（C8 第 5 条，安全类 `no_auto_mount`）。
   flotilla 为每个单元声明 share 卷；provider `start` 时经锚点核对 `RELEASE.json` 与文件清单（大小、mtime），全量 sha256 由 `flotilla share verify` 按需执行；
@@ -1280,7 +1284,7 @@ flotilla/
     scan.py                 扫描器（第 13 节）
     share/
       publish.py            任务发布：FILES.json、经锚点上传、原子改名、清单标为已发布（§4.7）
-      （share 发布布局与 verify / gc 待实现，3.3 节）
+      release.py            share 发布布局、RELEASE.json 的读写、publish / verify / gc（§3.3）
     manifest.py             清单 schema（带 schema 版本，4.5 节）
     config.py               FlotillaConfig：所有运行期配置的唯一入口（16.3 节）；不调用平台的启动校验与到各设置的翻译
     capabilities.py         能力报告 schema 与判定（必需项、安全缺口、到 Capabilities 的投影；Platform_Requirements 第 5 节）
@@ -1432,7 +1436,7 @@ agent = { cpu = "2", memory = "4Gi" }
 | 命令 | 使用者 | 作用 |
 |---|---|---|
 | `flotilla probe --deployment <配置> --declared <声明> --image <repo@sha256:…>` | 部署者 | 对一个部署运行契约测试，写出能力报告（第 14 节、`Platform_Requirements.md` 附录 A）。首版测单服务所需项，其余取自声明文件（来源 `declared`）；测试本身出错时不写报告 |
-| `flotilla share publish <dir>` / `verify` / `gc` | 部署者 | 发布、全量校验、删除无引用的旧发布（3.3 节） |
+| `flotilla share publish <dir>` / `verify` / `gc [--keep <发布号>…] [--dry-run]` | 部署者 | 发布、全量校验、删除配置钉住的发布与 `--keep` 之外的旧发布（3.3 节）。`gc` **不**检查运行中引用，别的实验钉着某个旧发布号就要用 `--keep` 保住它 |
 | `flotilla build <tasks…>` | 数据集构建者 | 构建并写清单（第 4 节） |
 | `flotilla publish <manifests…>` | 数据集发布者 | 上传任务文件并把清单标为已发布（4.7 节） |
 | `flotilla scan <tasks…> --capabilities <报告>` | 数据集构建者 | 逐字段归类报告（第 13 节） |

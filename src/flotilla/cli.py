@@ -1,6 +1,6 @@
 """flotilla 命令行入口（Architecture §16.3）。
 
-已实现：`probe`、`scan`、`build`、`publish`。其余子命令（gc / share）参数骨架在位，执行时报"尚未实现"，随对应模块落地。
+已实现：`probe`、`scan`、`build`、`publish`、`gc`、`share`。
 
 平台凭证只从配置 `opensandbox.credential_env` 指定的环境变量读取（原则 8）。
 """
@@ -22,13 +22,33 @@ from flotilla.capabilities import CapabilityReport
 from flotilla.compose.task import TaskError, find_tasks, load_task
 from flotilla.config import ConfigError, FlotillaConfig
 from flotilla.core.anchor import Anchor
+from flotilla.core.deletion import Deleter
+from flotilla.core.gc import Gc, GcReport
+from flotilla.core.volumes import LAUNCHES
 from flotilla.manifest import Manifest, Resources
-from flotilla.platform.base import FlotillaError
+from flotilla.platform.base import Capabilities, FlotillaError
 from flotilla.platform.clock import SystemClock
-from flotilla.platform.opensandbox import build
+from flotilla.platform.opensandbox import OpenSandboxPlatform, build
 from flotilla.probe import Declared, ProbeSettings, probe
 from flotilla.scan import scan_task
 from flotilla.share.publish import PublishError, mark_published, publish_task_files
+from flotilla.share.release import ReleaseError, VerifyReport, gc_releases, publish_release, verify_release
+
+
+def _platform(cfg: FlotillaConfig, clock: SystemClock, caps: Capabilities) -> OpenSandboxPlatform:
+    """构造后端平台。`caps` 由调用方给出：`probe` 用声明文件的引导能力，其余用能力报告。"""
+    return build(
+        endpoint=cfg.opensandbox.endpoint,
+        credential=cfg.credential(),
+        clock=clock,
+        settings=cfg.network_settings(),
+        storage=cfg.storage_settings(),
+        caps=caps,
+        execd=cfg.execd_settings(),
+        extensions=cfg.opensandbox.extensions,
+        create_fields=cfg.opensandbox.create_fields,
+        group_extension=cfg.opensandbox.group_extension,
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -50,14 +70,31 @@ def _build_parser() -> argparse.ArgumentParser:
     s.add_argument("--capabilities", required=True, type=Path, help="目标部署的能力报告（flotilla probe 的产物）")
     s.add_argument("--out", type=Path, help="逐任务的报告，每行一个 JSON；缺省只打印汇总")
     s.add_argument("--top", type=int, default=15, help="汇总中列出的拒绝原因条数")
-    sub.add_parser("gc", help="清理残留，经临时锚点（§5.6）")
+    g = sub.add_parser("gc", help="清理残留，经临时锚点（§5.6）")
+    g.add_argument("--deployment", required=True, type=Path, help="部署配置（提供共享存储与锚点镜像）")
+    g.add_argument("--launch", help="只处理指定的 launch，跳过两次观察的等待（操作者确认其进程已退出）")
     p = sub.add_parser("probe", help="对部署运行契约测试，写出能力报告（第 14 节）")
     p.add_argument("--deployment", required=True, type=Path, help="部署配置（FlotillaConfig 的 TOML）")
     p.add_argument("--declared", required=True, type=Path, help="部署者的声明文件（probe 不测的项，JSON）")
     p.add_argument("--image", required=True, help="被测单元的镜像（repo@sha256:…，须有 /bin/sh 与常见工具）")
     p.add_argument("--out", type=Path, help="能力报告的写出路径；缺省为配置中的 opensandbox.capabilities")
     p.add_argument("--hosts-recheck", type=float, default=30.0, help="写入 /etc/hosts 后隔多久再读（验收为 600）")
-    sub.add_parser("share", help="share 发布 / 校验 / gc（§3.3）")
+    sh = sub.add_parser("share", help="share 发布 / 校验 / gc（§3.3）")
+    share_sub = sh.add_subparsers(dest="share_command", required=True)
+    sp = share_sub.add_parser("publish", help="把一个目录发布为不可变的 share 发布")
+    sp.add_argument("dir", type=Path, help="发布内容的根目录（其下即 /.flotilla 的内容）")
+    sp.add_argument("--deployment", required=True, type=Path, help="部署配置（提供共享存储与锚点镜像）")
+    sp.add_argument("--release", help="发布号；缺省为配置里的 share.release")
+    sp.add_argument("--declared", type=Path, help="部署者声明文件；首次发布时用它引导，尚无能力报告")
+    sp.add_argument("--component", action="append", default=[], help="组件版本，形如 name=version，可给多次")
+    sv = share_sub.add_parser("verify", help="按配置钉住的摘要全量校验一次发布")
+    sv.add_argument("--deployment", required=True, type=Path, help="部署配置（提供共享存储、发布号与摘要）")
+    sv.add_argument("--release", help="要校验的发布号；给定时必须同时给 --sha256")
+    sv.add_argument("--sha256", help="该发布 RELEASE.json 的 sha256；与 --release 成对使用")
+    sg = share_sub.add_parser("gc", help="删除配置与 --keep 之外的旧发布")
+    sg.add_argument("--deployment", required=True, type=Path, help="部署配置（其 share.release 一定保留）")
+    sg.add_argument("--keep", action="append", default=[], help="额外保留的发布号，可给多次")
+    sg.add_argument("--dry-run", action="store_true", help="只列出将删除的发布，不真的删")
     return parser
 
 
@@ -65,18 +102,7 @@ async def _probe(args: argparse.Namespace) -> int:
     cfg = FlotillaConfig.load(args.deployment)
     declared = Declared.model_validate_json(args.declared.read_bytes())
     clock = SystemClock()
-    platform = build(
-        endpoint=cfg.opensandbox.endpoint,
-        credential=cfg.credential(),
-        clock=clock,
-        settings=cfg.network_settings(),
-        storage=cfg.storage_settings(),
-        caps=declared.bootstrap_capabilities(),
-        execd=cfg.execd_settings(),
-        extensions=cfg.opensandbox.extensions,
-        create_fields=cfg.opensandbox.create_fields,
-        group_extension=cfg.opensandbox.group_extension,
-    )
+    platform = _platform(cfg, clock, declared.bootstrap_capabilities())
     # 临时锚点（§5.6）：自己的 launch_id，挂共享根目录做目录操作，命令结束时删除；只在 launches/<id> 下建目录。
     anchor = Anchor(platform, clock, f"probe-{uuid.uuid4().hex[:12]}", cfg.anchor_settings())
     try:
@@ -195,18 +221,7 @@ async def _publish(args: argparse.Namespace) -> int:
         print(f"{args.out} 下没有可发布的构建输出", file=sys.stderr)
         return 2
     clock = SystemClock()
-    platform = build(
-        endpoint=cfg.opensandbox.endpoint,
-        credential=cfg.credential(),
-        clock=clock,
-        settings=cfg.network_settings(),
-        storage=cfg.storage_settings(),
-        caps=cfg.load_report().to_capabilities(),
-        execd=cfg.execd_settings(),
-        extensions=cfg.opensandbox.extensions,
-        create_fields=cfg.opensandbox.create_fields,
-        group_extension=cfg.opensandbox.group_extension,
-    )
+    platform = _platform(cfg, clock, cfg.load_report().to_capabilities())
     anchor = Anchor(platform, clock, f"publish-{uuid.uuid4().hex[:12]}", cfg.anchor_settings())
     failed = 0
     try:
@@ -236,6 +251,135 @@ async def _publish_one(anchor: Anchor, key: str, directory: Path, storage_root: 
     return f"{verb} → {result.task_files}"
 
 
+async def _gc(args: argparse.Namespace) -> int:
+    """清理残留 launch（§5.6）。
+
+    一次性进程没有常驻锚点，所以像 `publish` 一样起一个临时锚点执行目录操作。它**不**创建
+    `launches/<自己的 id>`，因此不会成为 gc 的候选。`--launch` 跳过两次观察的等待，由操作者确认该 launch
+    的进程已退出；目标锚点仍在时 `Gc.collect` 拒绝。
+    """
+    cfg = FlotillaConfig.load(args.deployment)
+    clock = SystemClock()
+    platform = _platform(cfg, clock, cfg.load_report().to_capabilities())
+    anchor = Anchor(platform, clock, f"gc-{uuid.uuid4().hex[:12]}", cfg.anchor_settings())
+    try:
+        await anchor.start()
+        # `Gc.run_once` 第一件事是列出 `launches/`；目录还不存在时 `ls` 非零退出会让整轮放弃。
+        await anchor.mkdir(LAUNCHES, stage="prepare")
+        gc = Gc(platform, clock, anchor, Deleter(platform, clock), window_s=cfg.reaper.gc_window)
+        if args.launch:
+            try:
+                done = await gc.collect(args.launch)
+            except FlotillaError as exc:
+                print(f"拒绝清理 {args.launch}：{exc}", file=sys.stderr)
+                return 1
+            print(f"{args.launch}：{'已删尽' if done else '未能删尽，下一轮再来'}")
+            return 0 if done else 1
+        window = cfg.reaper.gc_window
+        print(f"第一轮观察（候选需隔 {window:.0f}s 的第二次观察才删除）")
+        first = await gc.run_once()
+        _print_gc(first)
+        await clock.sleep(window)
+        print("第二轮观察")
+        second = await gc.run_once()
+        _print_gc(second)
+        return 1 if second.pending else 0
+    finally:
+        await anchor.close()
+        await platform.aclose()
+
+
+def _print_gc(report: GcReport) -> None:
+    print(
+        f"  存活 {sorted(report.alive)}；候选 {sorted(report.candidates)}；"
+        f"已删除 {sorted(report.removed)}；未删尽 {sorted(report.pending)}"
+    )
+
+
+async def _share(args: argparse.Namespace) -> int:
+    """share 发布的 publish / verify / gc（§3.3）。都经临时锚点操作共享存储。"""
+    cfg = FlotillaConfig.load(args.deployment)
+    clock = SystemClock()
+    # 先把纯本地的参数校验做完再连平台：`--component` 写错时不该先看到一个凭证错误。
+    components: dict[str, str] = {}
+    if args.share_command == "publish":
+        for pair in args.component:
+            name, sep, value = pair.partition("=")
+            if not sep or not name:
+                print(f"--component 要写成 name=version：{pair!r}", file=sys.stderr)
+                return 2
+            components[name] = value
+    if args.share_command == "verify":
+        expected = args.sha256 or cfg.share.release_sha256
+        if args.release and not args.sha256:
+            # 配置钉的是别的发布号，它的摘要对不上这个发布，验了也没有意义。
+            print("指定 --release 时必须同时指定该发布的 --sha256（不能拿配置里另一个发布的摘要来验）", file=sys.stderr)
+            return 2
+        caps = cfg.load_report().to_capabilities()
+    elif args.share_command == "publish" and args.declared is not None:
+        # 首次发布时还没有能力报告（probe 需要已备好的 share 发布），用声明文件的引导能力打破这个环。
+        caps = Declared.model_validate_json(args.declared.read_bytes()).bootstrap_capabilities()
+        expected = ""
+    else:
+        caps = cfg.load_report().to_capabilities()
+        expected = ""
+    platform = _platform(cfg, clock, caps)
+    anchor = Anchor(platform, clock, f"share-{uuid.uuid4().hex[:12]}", cfg.anchor_settings())
+    try:
+        await anchor.start()
+        if args.share_command == "publish":
+            return await _share_publish(args, cfg, anchor, components)
+        if args.share_command == "verify":
+            release = args.release or cfg.share.release
+            report = await verify_release(anchor, release, expected_sha256=expected)
+            _print_verify(report)
+            return 0 if report.ok else 1
+        keep = {cfg.share.release, *args.keep}
+        gc_report = await gc_releases(anchor, keep=keep, dry_run=args.dry_run)
+        verb = "将删除" if args.dry_run else "已删除"
+        print(f"保留 {sorted(gc_report.kept)}（钉住的发布 {cfg.share.release} 与 --keep）")
+        print(f"{verb} {sorted(gc_report.removed)}")
+        if gc_report.staging:
+            # staging 可能是另一个正在组装发布的进程，所以只列不删（§3.3）。
+            print(f"share/staging 下的条目未回收（可能是正在进行的发布）：{list(gc_report.staging)}")
+        return 0
+    finally:
+        await anchor.close()
+        await platform.aclose()
+
+
+async def _share_publish(
+    args: argparse.Namespace, cfg: FlotillaConfig, anchor: Anchor, components: dict[str, str]
+) -> int:
+    release = args.release or cfg.share.release
+    try:
+        result = await publish_release(anchor, release, args.dir, components=components)
+    except (ReleaseError, FlotillaError, OSError, ValueError) as exc:
+        print(f"发布失败：{type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+    verb = "已是最新，未上传" if result.skipped else f"上传 {result.uploaded} 个文件"
+    print(f"{release} {verb} → {result.path}")
+    print("把下面两行写进部署配置的 [share]（provider 启动时按 release_sha256 核对）：")
+    print(f'  release = "{release}"')
+    print(f'  release_sha256 = "{result.release_sha256}"')
+    return 0
+
+
+def _print_verify(report: VerifyReport) -> None:
+    if not report.manifest_ok:
+        print(f"RELEASE.json 摘要不符：实际 {report.actual_sha256}，配置钉的是 {report.expected_sha256}")
+        return
+    print(f"{report.release}：校验 {report.checked} 个文件；" + ("全部一致" if report.ok else "有不一致"))
+    for label, items in (
+        ("缺失", report.missing),
+        ("大小不符", report.size_mismatch),
+        ("内容不符", report.digest_mismatch),
+        ("权限不符", report.mode_mismatch),
+    ):
+        if items:
+            print(f"  {label}：{list(items)}")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -256,6 +400,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "publish":
         try:
             return asyncio.run(_publish(args))
+        except ConfigError as exc:
+            print(exc, file=sys.stderr)
+            return 2
+    if args.command == "gc":
+        try:
+            return asyncio.run(_gc(args))
+        except ConfigError as exc:
+            print(exc, file=sys.stderr)
+            return 2
+    if args.command == "share":
+        try:
+            return asyncio.run(_share(args))
         except ConfigError as exc:
             print(exc, file=sys.stderr)
             return 2

@@ -28,9 +28,10 @@ host_path = "/srv/flotilla"
 # root_subpath = "flotilla"
 
 [share]
-# Prepare this immutable release before running probe; publication is not implemented.
+# Publish this immutable release before running probe: `flotilla share publish <dir> --declared <file>`
+# writes RELEASE.json, uploads it, and prints the two lines below to paste back.
 release = "example-release"
-# Replace with the SHA256 of the prepared release's RELEASE.json.
+# Replace with the SHA256 of the published release's RELEASE.json.
 release_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
 
 [network]

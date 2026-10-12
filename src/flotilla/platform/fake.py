@@ -79,6 +79,14 @@ def _default_exec_handler(iid: str, proc: ProcessSpec) -> ExecResult:
     return ExecResult(exit_code=0, stdout=b"", stderr=b"")
 
 
+def _has_short_flag(argv: tuple[str, ...], flag: str) -> bool:
+    """argv 里有没有短选项 `flag`（`-l`、`-dl`、`-ln` 都算）。
+
+    真实工具把短选项聚成一簇（`ls -ln`、`mv -Tn`），所以不能拿 `"-l" in argv` 直接比。
+    """
+    return any(arg.startswith("-") and not arg.startswith("--") and flag in arg[1:] for arg in argv)
+
+
 class ManualClock:
     """虚拟时钟：时间只在 `await advance()` 时前进，`sleep` 挂在虚拟时间上。
 
@@ -592,11 +600,16 @@ class SharedTree:
             self.dirs.update(dest + d[len(src) :] for d in list(self.dirs) if d.startswith(src + "/"))
             self.events.append(f"cp {src} {dest}")
             return ExecResult(exit_code=0, stdout=b"", stderr=b"")
-        if op == "mv":  # mv -Tn -- <src> <dest>：目标存在时不覆盖
+        if op == "mv":  # mv -Tn -- <src> <dest>
             src, dest = self._rel(proc.argv[-2]), self._rel(proc.argv[-1])
             if src not in self.dirs and src not in self.files:
                 return missing
             if dest in self.dirs or dest in self.files:
+                # 真实 BusyBox 1.36 的 `-n`：目标已存在时**退出码 0 且什么都不移动**（实测），
+                # 不是报错。`Anchor.rename` 靠"移动后源仍在"来发现这种情况，所以这里必须照实模拟，
+                # 否则那条检查永远走不到。
+                if _has_short_flag(proc.argv, "n"):
+                    return ExecResult(exit_code=0, stdout=b"", stderr=b"")
                 return ExecResult(exit_code=1, stdout=b"", stderr=b"File exists")
             self._move(src, dest)
             self.events.append(f"mv {src} {dest}")
@@ -619,15 +632,38 @@ class SharedTree:
             self.files = {f for f in self.files if f != path and not f.startswith(path + "/")}
             self.events.append(f"rm {path}")
         elif op == "ls":
-            if "-d" in proc.argv:  # ls -d -- <path>：只问存在性（真实 busybox 的行为）
+            if _has_short_flag(proc.argv, "d"):
                 found = path in self.dirs or path in self.files
-                return ExecResult(exit_code=0 if found else 1, stdout=b"", stderr=b"" if found else missing.stderr)
+                if not found:
+                    return ExecResult(exit_code=1, stdout=b"", stderr=missing.stderr)
+                if _has_short_flag(proc.argv, "l"):
+                    return ExecResult(exit_code=0, stdout=f"{self._ls_line(path)}\n".encode(), stderr=b"")
+                # ls -d -- <path>：只问存在性（真实 busybox 的行为）
+                return ExecResult(exit_code=0, stdout=b"", stderr=b"")
             if path not in self.dirs:
                 return missing
             entries = {*self.dirs, *self.files}
             children = sorted({e[len(path) + 1 :].split("/")[0] for e in entries if e.startswith(path + "/")})
             return ExecResult(exit_code=0, stdout="".join(f"{c}\n" for c in children).encode(), stderr=b"")
         return ExecResult(exit_code=0, stdout=b"", stderr=b"")
+
+    def _ls_line(self, path: str) -> str:
+        """`ls -ln -d` 的一行：mode、links、uid、gid、size。
+
+        与真实 busybox 的列序一致，好让 `Anchor.stat` 的解析在 fake 与真机上走同一条路径。
+        """
+        mode = self.modes.get(path, "0755" if path in self.dirs else "0644")
+        numeric = int(mode, 8)
+        kind = "d" if path in self.dirs else "-"
+        chars = []
+        for shift in (6, 3, 0):  # 属主 / 组 / 其他
+            bits = (numeric >> shift) & 0o7
+            chars.append("r" if bits & 4 else "-")
+            chars.append("w" if bits & 2 else "-")
+            chars.append("x" if bits & 1 else "-")
+        uid, _, gid = self.owners.get(path, "0:0").partition(":")
+        size = len(self._platform.tree_contents.get(path, b""))
+        return f"{kind}{''.join(chars)} 1 {uid or 0} {gid or 0} {size}"
 
     def _move(self, src: str, dest: str) -> None:
         """把 `src`（及其子树）改名为 `dest`，连带属主、mode、链接与文件内容。"""

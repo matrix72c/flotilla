@@ -331,7 +331,15 @@ class FlotillaConfig(_Model):
     @classmethod
     def load(cls, path: str | Path) -> FlotillaConfig:
         path = Path(path)
-        data = tomllib.loads(path.read_text())
+        try:
+            text = path.read_text()
+        except OSError as exc:
+            # 配置文件读不出来是操作者的用法问题，按配置错误报，不带 traceback 摊到终端上。
+            raise ConfigError([f"读不出部署配置 {path}：{exc.strerror or exc}"]) from exc
+        try:
+            data = tomllib.loads(text)
+        except tomllib.TOMLDecodeError as exc:
+            raise ConfigError([f"{path} 不是合法的 TOML：{exc}"]) from exc
         return cls.model_validate({**data, "base_dir": path.resolve().parent})
 
     @classmethod
