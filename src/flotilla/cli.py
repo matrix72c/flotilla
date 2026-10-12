@@ -338,7 +338,7 @@ async def _share(args: argparse.Namespace) -> int:
         gc_report = await gc_releases(anchor, keep=keep, dry_run=args.dry_run)
         verb = "将删除" if args.dry_run else "已删除"
         print(f"保留 {sorted(gc_report.kept)}（钉住的发布 {cfg.share.release} 与 --keep）")
-        print(f"{verb} {sorted(gc_report.removed)}")
+        print(f"{verb} {sorted(gc_report.would_remove if args.dry_run else gc_report.removed)}")
         if gc_report.staging:
             # staging 可能是另一个正在组装发布的进程，所以只列不删（§3.3）。
             print(f"share/staging 下的条目未回收（可能是正在进行的发布）：{list(gc_report.staging)}")

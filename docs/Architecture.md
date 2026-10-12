@@ -385,6 +385,11 @@ share 只放与任务无关、agent 需要的内容，不承载入口进程：
   写出 `RELEASE.json` 后原子 `rename` 到 `share/releases/<release>`，并核对落到正式位置的就是本次内容。
   provider 配置钉住发布号与 `RELEASE.json` 的 sha256；旧发布由 `flotilla share gc` 删除。
   发布号已存在且内容不同时拒绝，不覆盖：换了内容就换发布号。
+  发布源必须是可读取的现有目录；文件和目录符号链接都明确拒绝。清单和上传共用一次扫描结果，上传前核对文件
+  内容仍与清单一致，失败则清理本次 staging。锚点以 root 上传，再恢复源文件的 uid/gid 与 mode，避免源文件
+  属主没有 staging 写权限时上传失败。`share gc --dry-run` 列出与实际删除相同的候选发布，但不删除它们。
+  锚点镜像还须包含最小的 `/etc/passwd` 与 `/etc/group`；current execd 查询附加组时会拒绝缺少用户数据库的镜像，
+  包括 uid 0 的上传。`images/anchor/build.sh` 负责生成它们，旧镜像需重建并更新部署中的 digest。
   未改动组件的复用（`cp -al` 硬链接）尚未实现，目前每次发布都全量上传 —— 能力上是可行的（`cp -l` 内建于 `cp`，
   不需要外部 `ln`），只是现有发布只有少量文件，复用没有收益。
 - **只放与任务无关的内容**：数据集、`tests/`、flag、verifier、bind 源与卷种子一律不进 share。
@@ -497,7 +502,7 @@ agent 攻破任一服务后可以绕过任务的权限边界，reward 可能失�
 |---|---|
 | 输入 | Harbor 任务目录：`environment/docker-compose.yaml`（或单服务的 `environment/Dockerfile`）、`task.toml` |
 | 输出 | 推送到镜像仓库的服务镜像；每个任务一份任务清单 `flotilla.manifest.json`；本地任务文件；扫描报告（第 13 节） |
-| 幂等 | 按"构建上下文内容哈希 + Compose 规范化结果 + flotilla 构建器版本 + 影响构建产物的部署输入"得到构建键；键不变则跳过。部署输入目前只有入口包装是否需要 `/bin/sh`（第 2 步，4.2 节第 7 步），取自目标部署的能力报告；同一任务为两种部署构建时得到两个键，清单记录所用的值，provider `open` 时与本部署不符则报 `invalid`。内容哈希与 `FILES.json`（4.7 节）规则相同：逐条目计入路径、类型、mode、uid/gid、文件内容、符号链接目标；不计 mtime、xattr、ACL |
+| 幂等 | 构建键包含任务名、完整 `environment` 内容哈希、Compose 规范化结果、固定 digest 的源镜像（含预构建和派生基础镜像）、flotilla 构建器版本、构建配置、服务有效资源配置，以及入口包装是否需要 `/bin/sh`。先解析源镜像 tag 再检查缓存，键不变则跳过。link 与预构建任务的待导出 bind 同样计入内容哈希，不因跳过 Dockerfile 构建而漏掉。内容哈希与 `FILES.json`（4.7 节）规则相同：逐条目计入路径、类型、mode、uid/gid、文件内容、符号链接目标；不计 mtime、xattr、ACL。清单记录入口包装要求，provider `open` 时与本部署不符则报 `invalid` |
 
 构建在离线构建机上用 Docker（BuildKit）完成，训练侧不构建任何东西。
 
@@ -510,7 +515,8 @@ agent 攻破任一服务后可以绕过任务的权限边界，reward 可能失�
    合并时与 Harbor 一样，在任务文件之前叠加 agent 服务的保活覆盖（3.5 节），任务文件可以覆盖它。
 2. **扫描**：逐字段归类（4.6 节），按目标部署的能力报告判断；有拒绝项的任务不再构建。
 3. **确定每个服务的镜像**：按下表把每个服务归到一种处置，都以 digest 写入清单（C15）。tag → digest 只查
-   registry 的 manifest 接口（`Docker-Content-Digest`），不下载镜像层；钉的是 tag 指向的那个 digest（多架构镜像即其 index 的 digest）：
+   registry 的 manifest 接口（`Docker-Content-Digest`），不下载镜像层；按完整的仓库名与 tag 去重，显式 digest 不填入 tag 缓存。
+   钉的是 tag 指向的那个 digest（多架构镜像即其 index 的 digest）：
 
    | 处置 | 条件 | 做法 |
    |---|---|---|
@@ -519,7 +525,8 @@ agent 攻破任一服务后可以绕过任务的权限边界，reward 可能失�
    | **build / derive** | 有 `build`，或第 7 步需要改镜像 | BuildKit 构建（`build` 从 Dockerfile；改现成镜像时 `FROM` 它派生一层），推送后引用其 digest |
 
    **预构建镜像**：数据集常常已把每个任务的环境构建好推到仓库（例如 TB2 的 `<repo>:<task>-<date>`）。配置
-   `[build.prebuilt].reference`（带 `{task}` 占位）后，这类任务按任务名引用现成镜像、解析 digest 即为 link，不再构建。
+   `[build.prebuilt].reference`（带 `{task}` 占位）后，这类任务按任务名引用现成镜像，先固定 digest，再用同一 digest 校验 history。
+   不需要第 7 步改动时直接 link；需要时以该 digest 为基础派生，跳过原 Dockerfile 的构建。
    **必须校验镜像与任务 Dockerfile 一致**：比对镜像 history 的尾部与 Dockerfile 的指令序列（任务的指令是在基础镜像之上
    最后加的），不一致以 `invalid` 拒绝该任务，不静默使用。校验比的是指令序列，不是文件内容——同名而内容不同的 COPY
    源查不出来，所以清单同时记下镜像 digest 使其可追溯。history 是 Docker 的摘要而非原文，几处有损（`COPY --from` 丢标志、
@@ -536,6 +543,7 @@ agent 攻破任一服务后可以绕过任务的权限边界，reward 可能失�
 6. **导出任务文件**：bind 源（`binds/<n>`）、共享卷的初始内容（`seeds/<volume>.tar`，7.3 节）、全部引用只读的卷的内容（`_volumes/<volume>/`），
    写入本地输出目录 `<out>/<build_key>/files/`。构建机离线、没有平台凭证，**不写共享存储**；这些文件由任务发布（4.7 节）上传。
 7. **镜像改动**：服务镜像只在以下情况改动（即第 3 步归到 build / derive）：第 4 步写入目标路径的 bind、7.3 节的 `nocopy` 清空、镜像中没有 `/bin/sh` 而部署声明需要它（3.4 节）。
+   bind 与 `nocopy` 派生统一应用于原 Dockerfile 的构建结果、现成镜像与预构建镜像，以 root 准备文件后恢复基础镜像的 `USER`，继承原 `ENTRYPOINT` / `CMD`。
    不需要这些改动的 `image` 服务按原 digest link 或 mirror，不产生衍生镜像。
 8. **推送并写清单**：镜像以 digest 引用；`task_files` 标为"待发布"（4.7 节）。
 

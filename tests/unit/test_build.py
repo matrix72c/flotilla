@@ -168,6 +168,7 @@ def test_derive_dockerfile_clears_then_copies() -> None:
     )
     lines = df.splitlines()
     assert lines[0] == "FROM r.io/base@sha256:ab"
+    assert lines[1] == lines[-1] == "USER 0:0"  # 无 passwd/group 的精简镜像也可构建。
     assert any("rm -rf /var/cache/*" in x for x in lines)
     # bind 写入前先删目标，使目录遮蔽成立（§4.4）；COPY 用 exec 形式。
     assert lines.index('RUN ["/bin/sh", "-c", "rm -rf /secret/entrypoint.sh"]') < lines.index(

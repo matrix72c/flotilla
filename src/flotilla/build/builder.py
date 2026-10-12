@@ -129,22 +129,29 @@ class Builder(Protocol):
     def build(self, request: BuildRequest) -> str: ...
 
 
-def derive_dockerfile(base: str, *, copy: Sequence[tuple[str, str]] = (), clear: Sequence[str] = ()) -> str:
+def derive_dockerfile(
+    base: str, *, copy: Sequence[tuple[str, str]] = (), clear: Sequence[str] = (), user: str = "0:0"
+) -> str:
     """派生层的 Dockerfile（§4.2 第 7 步）。
 
     - `clear`：`nocopy` 卷的挂载点——清空镜像中该路径下的原有内容，保留目录本身（§7.3）；
     - `copy`：(上下文内的源, 镜像内的目标)——bind 写入镜像目标路径。写入前先删除目标原有内容，使"目录遮蔽"
       也成立（§4.4）。
 
-    删除与写入都用 exec 形式，不经镜像的 shell；镜像没有 `/bin/sh` 时 `clear` 用不了（那种镜像先补 shell 层）。
+    文件准备用 root 执行，RUN 显式调用 `/bin/sh`；没有它的镜像须先补 shell 层。
     """
-    lines = [f"FROM {base}"]
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+(?::[A-Za-z0-9_.-]+)?", user):
+        raise ImageError(f"派生镜像的 USER 不合法：{user!r}")
+    # 文件准备需要 root，但最终 USER 必须恢复；其余镜像配置通过 FROM 原样继承。
+    # 显式 gid 避免精简镜像没有 /etc/passwd 时，BuildKit 为 uid 0 查询默认组失败。
+    lines = [f"FROM {base}", "USER 0:0"]
     for target in clear:
         quoted = shlex.quote(target)
-        lines.append(_run(f"rm -rf {quoted}/* {quoted}/.[!.]* 2>/dev/null; mkdir -p {quoted}"))
+        lines.append(_run(f"mkdir -p {quoted} && rm -rf {quoted}/* {quoted}/.[!.]* {quoted}/..?*"))
     for source, target in copy:
         lines.append(_run(f"rm -rf {shlex.quote(target)}"))
         lines.append(f"COPY [{json.dumps(source)}, {json.dumps(target)}]")
+    lines.append(f"USER {user}")
     return "\n".join(lines) + "\n"
 
 

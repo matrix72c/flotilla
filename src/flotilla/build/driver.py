@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 from flotilla.build.builder import (
@@ -35,6 +35,8 @@ from flotilla.build.images import (
     ImageRef,
     Registry,
     ServiceImage,
+    image_changes,
+    pin_images,
     plan_images,
     resolve_images,
 )
@@ -112,14 +114,19 @@ def build_task(task: HarborTask, out_dir: Path, ctx: BuildContext, *, force: boo
 
 def _build(task: HarborTask, out_dir: Path, ctx: BuildContext, result: ScanResult, *, force: bool) -> BuildOutcome:
     project = task.project
-    plans = _plan(task, ctx)
-    to_build = [p.service for p in plans if p.disposition == "build"]
-
-    contexts = {name: task.env_dir for name in to_build}
+    plans = pin_images(_plan(task, ctx), ctx.registry)
+    resources = {name: ctx.resources.get(name, DEFAULT_RESOURCES) for name in project.services}
     key = build_key(
+        task=task.name,
         project=project,
-        context_hashes={name: tree_hash(path) for name, path in sorted(contexts.items())},
-        deployment_inputs={"requires_shell": ctx.requires_shell},
+        # 预构建与 link 也可能导出 bind，整个 environment 都参与，不随镜像处置丢掉输入。
+        context_hashes={"environment": tree_hash(task.env_dir)} if task.env_dir.exists() else {},
+        source_images={p.service: p.ref.pinned(p.ref.digest) for p in plans if p.ref is not None and p.ref.digest},
+        deployment_inputs={
+            "requires_shell": ctx.requires_shell,
+            "build": asdict(ctx.settings),
+            "resources": {name: r.model_dump() for name, r in resources.items()},
+        },
     )
     target_dir = out_dir / key
     manifest_path = target_dir / MANIFEST_NAME
@@ -132,8 +139,9 @@ def _build(task: HarborTask, out_dir: Path, ctx: BuildContext, result: ScanResul
 
     resolution = resolve_images(plans, ctx.settings, ctx.registry)
     images = dict(resolution.images)
-    for service in resolution.to_build:
-        images[service] = _build_one(task, service, key, ctx)
+    for plan in plans:
+        if plan.disposition == "build":
+            images[plan.service] = _build_one(task, plan, key, ctx)
 
     files_dir = target_dir / FILES_DIR
     exported = export_task_files(project, task.env_dir, files_dir, images=images, image_export=ctx.image_export)
@@ -145,7 +153,7 @@ def _build(task: HarborTask, out_dir: Path, ctx: BuildContext, result: ScanResul
         project=project,
         images=images,
         meta=meta,
-        resources={name: ctx.resources.get(name, DEFAULT_RESOURCES) for name in project.services},
+        resources=resources,
         users=users,
         seeds=exported.seeds,
     )
@@ -164,7 +172,7 @@ def _build(task: HarborTask, out_dir: Path, ctx: BuildContext, result: ScanResul
 
 
 def _plan(task: HarborTask, ctx: BuildContext) -> list[ServiceImage]:
-    """每个服务的镜像处置；agent 服务有预构建镜像且校验通过时改为 link（§4.2 第 3 步）。
+    """每个服务的镜像处置；agent 服务的预构建镜像校验通过时作为 link 或派生基础（§4.2 第 3 步）。
 
     预构建镜像是整个任务环境的产物，对应 Harbor 的 agent 服务（`main`）；只在它本来要构建时替换。
     引用模板不见得覆盖所有数据集：**该任务没有预构建镜像时回退到正常构建**，不让整个任务失败。
@@ -172,30 +180,42 @@ def _plan(task: HarborTask, ctx: BuildContext) -> list[ServiceImage]:
     """
     plans = plan_images(task.project, ctx.settings)
     prebuilt = ctx.settings.prebuilt.ref_for(task.path.name)
-    dockerfile = task.env_dir / "Dockerfile"
-    if prebuilt is None or not dockerfile.is_file():
+    svc = task.project.services.get(MAIN)
+    if prebuilt is None or svc is None or svc.build is None:
         return plans
-    if not any(p.service == MAIN and p.disposition == "build" for p in plans):
+    dockerfile = task.env_dir / svc.build.context / (svc.build.dockerfile or "Dockerfile")
+    if not dockerfile.is_file():
         return plans
+    ref = ImageRef.parse(prebuilt)
     try:
-        history = ctx.registry.image_history(prebuilt)
+        (pinned,) = pin_images([ServiceImage(MAIN, "link", ref)], ctx.registry)
+        assert pinned.ref is not None and pinned.ref.digest is not None
+        history = ctx.registry.image_history(pinned.ref.pinned(pinned.ref.digest))
     except ImageError:
         return plans  # 没有这个任务的预构建镜像：照常构建
     if ctx.settings.prebuilt.verify:
         verify(dockerfile.read_text(), history)
-    ref = ImageRef.parse(prebuilt)
-    return [replace(p, disposition="link", ref=ref) if p.service == MAIN else p for p in plans]
+    # 预构建只替代原 Dockerfile 构建；Compose 要求的 bind/nocopy 改动仍须派生。
+    if MAIN in image_changes(task.project):
+        pinned = replace(pinned, disposition="build")
+    return [pinned if p.service == MAIN else p for p in plans]
 
 
-def _build_one(task: HarborTask, service: str, key: str, ctx: BuildContext) -> str:
+def _build_one(task: HarborTask, plan: ServiceImage, key: str, ctx: BuildContext) -> str:
     """构建或派生一个服务的镜像，返回 `repo@sha256:…`。"""
+    service = plan.service
     if ctx.builder is None:
         raise ImageError(f"服务 {service} 需要构建，但没有提供构建器")
     if not ctx.settings.target:
         raise ImageError(f"服务 {service} 需要构建，但 [build].target 未配置")
     tag = image_tag(ctx.settings.target, task.name, service, key)
     svc = task.project.services[service]
-    if svc.build is not None:
+    derive = service in image_changes(task.project)
+    if plan.ref is not None:
+        assert plan.ref.digest is not None
+        base = plan.ref.pinned(plan.ref.digest)
+    else:
+        assert svc.build is not None
         dockerfile = svc.build.dockerfile or "Dockerfile"
         text = (task.env_dir / svc.build.context / dockerfile).read_text()
         missing = unreplaced_bases(text, ctx.settings)
@@ -203,26 +223,25 @@ def _build_one(task: HarborTask, service: str, key: str, ctx: BuildContext) -> s
             raise ImageError(f"服务 {service} 的基础镜像既无替换也不可拉：{missing}（见 [build].image_replacements）")
         request = BuildRequest(
             service=service,
-            tag=tag,
+            tag=image_tag(ctx.settings.target, f"{task.name}-base", service, key) if derive else tag,
             context=task.env_dir / svc.build.context,
             dockerfile=dockerfile,
             args=svc.build.args,
             contexts=build_contexts(text, ctx.settings),
         )
-    else:
-        request = BuildRequest(
-            service=service, tag=tag, context=task.env_dir, dockerfile_text=_derive(task, service, ctx)
-        )
-    digest = ctx.builder.build(request)
-    return f"{ctx.settings.target}@{digest}"
+        base = f"{ctx.settings.target}@{ctx.builder.build(request)}"
+    if not derive:
+        return base
+    config = ctx.registry.image_config(base)
+    user = str(config.get("User") or "0:0")
+    request = BuildRequest(
+        service=service, tag=tag, context=task.env_dir, dockerfile_text=_derive(task, service, base, user=user)
+    )
+    return f"{ctx.settings.target}@{ctx.builder.build(request)}"
 
 
-def _derive(task: HarborTask, service: str, ctx: BuildContext) -> str:
-    """派生层：把该服务的 `image` 作为基础，加上写入镜像的 bind 与 `nocopy` 清空（§4.2 第 7 步）。"""
-    svc = task.project.services[service]
-    if svc.image is None:
-        raise ImageError(f"服务 {service} 既没有 image 也没有 build，无法派生")
-    base = ctx.settings.replace(svc.image)
+def _derive(task: HarborTask, service: str, base: str, *, user: str) -> str:
+    """以固定 digest 的镜像为基础，统一应用 bind 与 nocopy，不受原镜像来源影响。"""
     layout = classify(task.project.services)
     copy = [
         (source, target)
@@ -238,7 +257,7 @@ def _derive(task: HarborTask, service: str, ctx: BuildContext) -> str:
         for unit, target, _ in volume.references
         if unit == service
     ]
-    return derive_dockerfile(base, copy=copy, clear=clear)
+    return derive_dockerfile(base, copy=copy, clear=clear, user=user)
 
 
 def _metadata(

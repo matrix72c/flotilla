@@ -215,13 +215,20 @@ class Anchor:
         await self._run(("cp", "-a", "--", self._path(src_key), self._path(dest_key)), stage)
 
     async def upload(self, key: str, data: bytes, *, mode: int, uid: int, gid: int, stage: Stage) -> None:
-        """把 `data` 写到共享存储的 `key`（§4.7 任务文件上传）。父目录须已存在。"""
+        """管理型上传：以 root 写入，再恢复目标属主与 mode。父目录须已存在。
+
+        平台的 uid/gid 是实际写入身份，不能直接用本地属主向 root 创建的 staging 写入。
+        chown 可能清除 setuid/setgid，所以最后再 chmod。
+        """
         self.ensure_alive(stage)
         assert self._handle is not None
         try:
-            await self._platform.write_file(self._handle, self._path(key), data, mode=mode, uid=uid, gid=gid)
+            await self._platform.write_file(self._handle, self._path(key), data, mode=mode, uid=0, gid=0)
         except FlotillaError as exc:
             raise at_stage(exc, stage) from exc
+        if (uid, gid) != (0, 0):
+            await self.chown(key, uid, gid, stage=stage)
+            await self.chmod(key, mode, stage=stage)
 
     async def download(self, key: str, *, stage: Stage) -> bytes:
         """读回共享存储上的 `key`（§4.7 核对 FILES.json）。"""

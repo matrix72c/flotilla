@@ -41,12 +41,16 @@ echo "$BUSYBOX_SHA256  $ctx/busybox" | sha256sum -c --quiet
 rm "$ctx/$APK"
 
 # rootfs：/.flotilla/bin/busybox；/bin 下的 applet 链接（入口包装要 /bin/sh，bootstrap.sh 经 PATH 用
-# mkdir、touch、dirname、tr、id；常驻入口 /bin/sleep）；/tmp 1777。
+# mkdir、touch、dirname、tr、id；常驻入口 /bin/sleep）；/tmp 1777；execd 身份路由需要的用户数据库。
 root="$ctx/rootfs"
 install -D -m 0755 "$ctx/busybox" "$root/.flotilla/bin/busybox"
 rm "$ctx/busybox"
-mkdir -p "$root/bin" "$root/tmp"
+mkdir -p "$root/bin" "$root/tmp" "$root/etc"
 chmod 1777 "$root/tmp"
+# current execd 先查询 uid 的附加组；缺少 passwd/group 会作为身份解析失败拒绝上传（包括 uid 0）。
+printf 'root:x:0:0:root:/:/bin/sh\n' > "$root/etc/passwd"
+printf 'root:x:0:\n' > "$root/etc/group"
+chmod 0644 "$root/etc/passwd" "$root/etc/group"
 for applet in sh sleep mkdir rm ls chown chmod tar cp mv touch dirname tr id cat env true; do
   ln -s /.flotilla/bin/busybox "$root/bin/$applet"
 done

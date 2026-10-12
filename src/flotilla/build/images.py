@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal, Protocol
 
 from flotilla.build.prebuilt import PrebuiltSettings
@@ -100,7 +100,7 @@ class BuildSettings:
 class ServiceImage:
     service: str
     disposition: Disposition
-    ref: ImageRef | None  # build 服务为 None（镜像由 BuildKit 产出，这里还没有引用）
+    ref: ImageRef | None  # None：从 Dockerfile 构建；build + ref：在该基础镜像上派生
 
 
 def image_changes(project: Project) -> frozenset[str]:
@@ -133,11 +133,13 @@ def plan_image(service: str, svc: Service, settings: BuildSettings, *, needs_cha
 
     `needs_change`：§4.2 第 7 步，镜像需要被改动（bind 写入、`nocopy` 清空、补 `/bin/sh`）——这类必须 build/derive。
     """
-    if svc.build is not None or needs_change:
+    if svc.build is not None:
         return ServiceImage(service, "build", None)
     if svc.image is None:
         raise ImageError(f"服务 {service} 既没有 image 也没有 build")
     ref = ImageRef.parse(settings.replace(svc.image))
+    if needs_change:
+        return ServiceImage(service, "build", ref)
     if settings.mirror_images or not settings.pullable(ref):
         return ServiceImage(service, "mirror", ref)
     return ServiceImage(service, "link", ref)
@@ -170,6 +172,31 @@ class ImageResolution:
     to_build: tuple[str, ...]  # 需要 BuildKit 的服务（§4.2 第 3 步 build/derive；本模块不产出镜像）
 
 
+def pin_images(plans: Sequence[ServiceImage], registry: Registry) -> list[ServiceImage]:
+    """只读解析全部源镜像（包括派生层的基础镜像），不复制或构建，供计算缓存键。
+
+    tag 按完整引用去重；显式 digest 不写入 tag 缓存。返回值再次传入不会重新查询 registry。
+    """
+    resolved: dict[tuple[str, str], str] = {}
+    pinned: list[ServiceImage] = []
+    for plan in plans:
+        ref = plan.ref
+        if ref is None:
+            pinned.append(plan)
+            continue
+        digest = ref.digest
+        if digest is None:
+            key = (ref.name, ref.tag or "latest")
+            digest = resolved.get(key)
+            if digest is None:
+                digest = registry.digest(*key)
+                resolved[key] = digest
+        if not _DIGEST.fullmatch(digest):
+            raise ImageError(f"服务 {plan.service} 的镜像 digest 解析异常：{digest!r}")
+        pinned.append(replace(plan, ref=replace(ref, tag=None, digest=digest)))
+    return pinned
+
+
 def resolve_images(
     plans: Sequence[ServiceImage],
     settings: BuildSettings,
@@ -183,19 +210,16 @@ def resolve_images(
     images: dict[str, str] = {}
     dispositions: dict[str, Disposition] = {}
     to_build: list[str] = []
-    resolved: dict[str, str] = {}  # 源 name → digest（去重）
     mirrored: dict[str, str] = {}  # 源 pinned → 目标 pinned（去重）
-    for plan in plans:
+    for plan in pin_images(plans, registry):
         dispositions[plan.service] = plan.disposition
         if plan.disposition == "build":
             to_build.append(plan.service)
             continue
         assert plan.ref is not None
         ref = plan.ref
-        digest = ref.digest or resolved.get(ref.name) or registry.digest(ref.name, ref.tag or "latest")
-        if not _DIGEST.fullmatch(digest):
-            raise ImageError(f"服务 {plan.service} 的镜像 digest 解析异常：{digest!r}")
-        resolved[ref.name] = digest
+        digest = ref.digest
+        assert digest is not None
         source = ref.pinned(digest)
         if plan.disposition == "link":
             images[plan.service] = source

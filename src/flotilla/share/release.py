@@ -27,7 +27,7 @@ import os
 import posixpath
 import stat
 import uuid
-from collections.abc import Mapping, Set
+from collections.abc import Mapping, Sequence, Set
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -81,6 +81,7 @@ class GcReleasesReport:
 
     kept: frozenset[str]
     removed: frozenset[str]
+    would_remove: frozenset[str]
     staging: tuple[str, ...] = ()
     dry_run: bool = False
 
@@ -93,16 +94,24 @@ def release_entries(root: Path) -> list[tuple[str, os.stat_result]]:
 
     符号链接一律拒绝而不是跳过：锚点镜像没有 `ln`，静默跳过会让发布上去的内容与源不一致。
     """
+    if not root.is_dir():
+        raise ReleaseError(f"发布源不是存在的目录：{root}")
+
+    def fail(exc: OSError) -> None:
+        raise ReleaseError(f"无法读取发布目录 {exc.filename}：{exc.strerror}") from exc
+
     out: list[tuple[str, os.stat_result]] = []
-    for current, dirs, names in os.walk(root):
+    for current, dirs, names in os.walk(root, onerror=fail):
         dirs.sort()
         base = Path(current)
-        for name in sorted(names):
+        for name in sorted([*dirs, *names]):
             path = base / name
             info = path.lstat()
             rel = str(path.relative_to(root))
             if stat.S_ISLNK(info.st_mode):
                 raise ReleaseError(f"{rel} 是符号链接，share 发布不支持（锚点镜像没有 ln）")
+            if stat.S_ISDIR(info.st_mode):
+                continue
             if not stat.S_ISREG(info.st_mode):
                 raise ReleaseError(f"{rel} 不是普通文件，share 发布不支持")
             if rel == RELEASE_JSON:
@@ -118,8 +127,14 @@ def release_json(release: str, root: Path, components: Mapping[str, str]) -> tup
 
     序列化方式与 AFS 上的真实发布逐字节一致，所以同一份内容总能算出同一个摘要。
     """
+    return _release_json(release, root, components, release_entries(root))
+
+
+def _release_json(
+    release: str, root: Path, components: Mapping[str, str], entries: Sequence[tuple[str, os.stat_result]]
+) -> tuple[bytes, str]:
     files: dict[str, object] = {}
-    for rel, info in release_entries(root):
+    for rel, info in entries:
         files[rel] = {
             "mode": f"{stat.S_IMODE(info.st_mode):04o}",
             "sha256": _sha256(root / rel),
@@ -143,7 +158,8 @@ async def publish_release(
     未改动的组件重新上传（能力上可行：busybox 的 `cp -l` 内建于 `cp`，不需要外部 `ln`，但真实发布只有少量
     文件，复用的收益为零）。
     """
-    blob, digest = release_json(release, root, components)
+    entries = release_entries(root)
+    blob, digest = _release_json(release, root, components, entries)
     target = f"{RELEASES}/{release}"
     if await anchor.exists(f"{target}/{RELEASE_JSON}", stage="prepare"):
         if hashlib.sha256(await anchor.download(f"{target}/{RELEASE_JSON}", stage="prepare")).hexdigest() == digest:
@@ -152,7 +168,7 @@ async def publish_release(
     staging = f"{STAGING}/{release}.{uuid.uuid4().hex[:12]}"
     await anchor.mkdir(staging, stage="prepare")
     try:
-        uploaded = await _upload_tree(anchor, root, staging)
+        uploaded = await _upload_tree(anchor, root, staging, entries, json.loads(blob)["files"])
         await anchor.upload(f"{staging}/{RELEASE_JSON}", blob, mode=0o644, uid=0, gid=0, stage="prepare")
         await anchor.mkdir(RELEASES, stage="prepare")
         await anchor.rename(staging, target, stage="prepare")
@@ -170,11 +186,27 @@ async def publish_release(
     return ReleaseResult(release, target, digest, uploaded, False)
 
 
-async def _upload_tree(anchor: Anchor, root: Path, staging: str) -> int:
+async def _upload_tree(
+    anchor: Anchor,
+    root: Path,
+    staging: str,
+    entries: Sequence[tuple[str, os.stat_result]],
+    manifest_files: Mapping[str, Mapping[str, object]],
+) -> int:
     """上传目录树：先建各级目录，再传文件。`upload` 要求父目录已存在。"""
     uploaded = 0
     created: set[str] = set()
-    for rel, info in release_entries(root):
+    for rel, info in entries:
+        path = root / rel
+        # 清单和上传共用条目；本地文件在两者之间变化时拒绝，不能发布摘要与内容不符的树。
+        if path.is_symlink():
+            raise ReleaseError(f"发布源 {rel} 在扫描后变成了符号链接")
+        data = path.read_bytes()
+        if (
+            len(data) != manifest_files[rel]["size"]
+            or hashlib.sha256(data).hexdigest() != manifest_files[rel]["sha256"]
+        ):
+            raise ReleaseError(f"发布源 {rel} 在生成清单后内容发生变化")
         parent = posixpath.dirname(rel)
         if parent and parent not in created:
             await anchor.mkdir(f"{staging}/{parent}", stage="prepare")
@@ -182,7 +214,7 @@ async def _upload_tree(anchor: Anchor, root: Path, staging: str) -> int:
         key = f"{staging}/{rel}"
         await anchor.upload(
             key,
-            (root / rel).read_bytes(),
+            data,
             mode=stat.S_IMODE(info.st_mode),
             uid=info.st_uid,
             gid=info.st_gid,
@@ -260,6 +292,7 @@ async def gc_releases(anchor: Anchor, *, keep: Set[str], dry_run: bool) -> GcRel
     return GcReleasesReport(
         kept=frozenset(present) - frozenset(removed),
         removed=frozenset() if dry_run else frozenset(removed),
+        would_remove=frozenset(removed),
         staging=tuple(staging),
         dry_run=dry_run,
     )

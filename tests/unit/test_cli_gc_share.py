@@ -7,10 +7,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 
 from flotilla.cli import main
+from flotilla.platform.fake import FakePlatform, ManualClock, SharedTree
 from tests.unit.reports import report
 
 SHA = "0" * 64
@@ -129,3 +131,30 @@ def test_parser_exposes_gc_and_share_flags() -> None:
     assert pub.component == ["a=1", "b=2"] and pub.release is None
     ver = parser.parse_args(["share", "verify", "--deployment", "d.toml"])
     assert ver.release is None and ver.sha256 is None
+
+
+@pytest.mark.asyncio
+async def test_share_gc_preview_matches_real_deletion(
+    tmp_path: Path,
+    platform: FakePlatform,
+    clock: ManualClock,
+    tree: SharedTree,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from flotilla import cli
+
+    cfg = _deployment(tmp_path)
+    tree.dirs.update({"share/releases", "share/releases/2026-10-07.1", "share/releases/stale"})
+    monkeypatch.setattr(cli, "SystemClock", lambda: clock)
+    monkeypatch.setattr(cli, "_platform", lambda *_: platform)
+    monkeypatch.setattr(platform, "aclose", AsyncMock(), raising=False)
+    argv = ["share", "gc", "--deployment", str(cfg)]
+    parser = cli._build_parser()
+    assert await clock.run(cli._share(parser.parse_args([*argv, "--dry-run"]))) == 0
+    assert "将删除 ['stale']" in capsys.readouterr().out
+    assert "share/releases/stale" in tree.dirs
+    assert await clock.run(cli._share(parser.parse_args(argv))) == 0
+    assert "已删除 ['stale']" in capsys.readouterr().out
+    assert "share/releases/stale" not in tree.dirs
+    assert "share/releases/2026-10-07.1" in tree.dirs

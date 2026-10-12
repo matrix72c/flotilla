@@ -90,7 +90,10 @@ images/probe/build.sh '<your-registry>/flotilla:probe-dev'
 `flotilla build` turns Harbor task directories into service images and one manifest per task. It scans first and
 skips rejected tasks, decides each service's image (reference an existing one by digest, mirror it, or build it),
 exports the task files the platform will mount, and writes `<out>/<build_key>/flotilla.manifest.json`. A task whose
-manifest already exists is skipped unless `--force` is given.
+manifest already exists is skipped unless `--force` is given. The cache key includes the task name, the full
+environment tree (including exported bind sources), resolved source-image digests, build settings, and effective
+service resources. Tags are resolved before checking the cache, so a moved tag invalidates it. Writable single-use
+binds and local `nocopy` volumes are applied to Dockerfile builds, existing images, and prebuilt images alike.
 
 ```sh
 uv run flotilla build <task-dirs> \

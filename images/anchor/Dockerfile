@@ -5,7 +5,8 @@
 # 与平台入口包装要的 /bin/sh 都由同一个 busybox 的 applet 提供。不含任何任务代码。
 #
 # rootfs 由 build.sh 在构建上下文里组装（busybox 取自 Alpine busybox-static，校验哈希；/bin 下是指向它的
-# applet 链接），这里只整体复制：FROM scratch 里没有 shell，不能 RUN。
+# applet 链接，/etc/passwd 与 /etc/group 含 root，供 execd 身份路由查组），这里只整体复制：
+# FROM scratch 里没有 shell，不能 RUN。
 FROM scratch
 COPY rootfs/ /
 ENV PATH=/bin

@@ -10,6 +10,7 @@ from flotilla.build.images import (
     ImageRef,
     Registry,
     image_changes,
+    pin_images,
     plan_image,
     plan_images,
     resolve_images,
@@ -191,3 +192,41 @@ def test_resolver_rejects_bad_digest_from_registry() -> None:
     plans = [plan_image("db", _svc("db", image="registry.h.pjlab.org.cn/ns/pg:16"), s, needs_change=False)]
     with pytest.raises(ImageError):
         resolve_images(plans, s, reg)
+
+
+def test_different_tags_in_same_repository_resolve_independently() -> None:
+    settings = BuildSettings(pullable_registries=("r.io",))
+    registry = FakeRegistry({"r.io/app:1": DIGEST, "r.io/app:2": DIGEST2})
+    plans = [
+        plan_image(name, _svc(name, image=f"r.io/app:{tag}"), settings, needs_change=False)
+        for name, tag in (("a", "1"), ("b", "2"), ("c", "1"))
+    ]
+    result = resolve_images(plans, settings, registry)
+    assert result.images == {"a": f"r.io/app@{DIGEST}", "b": f"r.io/app@{DIGEST2}", "c": f"r.io/app@{DIGEST}"}
+    assert registry.resolved == [("r.io/app", "1"), ("r.io/app", "2")]
+
+
+@pytest.mark.parametrize("pinned_first", [True, False])
+def test_explicit_digest_does_not_replace_tag_resolution(pinned_first: bool) -> None:
+    settings = BuildSettings(pullable_registries=("r.io",))
+    registry = FakeRegistry({"r.io/app:latest": DIGEST2})
+    refs = {"pinned": f"r.io/app@{DIGEST}", "tagged": "r.io/app"}
+    plans = [plan_image(name, _svc(name, image=ref), settings, needs_change=False) for name, ref in refs.items()]
+    result = resolve_images(plans if pinned_first else plans[::-1], settings, registry)
+    assert result.images == {"pinned": f"r.io/app@{DIGEST}", "tagged": f"r.io/app@{DIGEST2}"}
+    assert registry.resolved == [("r.io/app", "latest")]
+
+
+def test_pinning_does_not_copy_and_also_pins_derive_bases() -> None:
+    settings = BuildSettings(target="t.io/out")
+    registry = FakeRegistry({"r.io/app:1": DIGEST})
+    plans = [
+        plan_image("a", _svc("a", image="r.io/app:1"), settings, needs_change=False),
+        plan_image("b", _svc("b", image="r.io/app:1"), settings, needs_change=True),
+    ]
+    pinned = pin_images(plans, registry)
+    assert all(p.ref is not None and p.ref.digest == DIGEST for p in pinned)
+    assert registry.copied == []
+    resolve_images(pinned, settings, registry)
+    assert registry.resolved == [("r.io/app", "1")]
+    assert len(registry.copied) == 1

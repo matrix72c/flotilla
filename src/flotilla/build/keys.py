@@ -1,7 +1,7 @@
 """构建键与内容哈希（Architecture §4.1 幂等）。
 
-构建键 = "构建上下文内容哈希 + Compose 规范化结果 + flotilla 构建器版本 + 影响构建产物的部署输入"。键不变则跳过
-构建。同一任务为两种部署构建时得到两个键，清单记录所用的值。
+构建键包含任务身份、environment 内容哈希、Compose 规范化结果、固定 digest 的源镜像、构建器版本和影响
+产物的配置。键不变则跳过构建；部署输入不同得到不同的键，清单记录所用的值。
 
 内容哈希的规则与任务发布的 `FILES.json`（§4.7）相同：逐条目计入**路径、类型、mode、uid / gid、文件内容、
 符号链接目标**；不计 mtime、xattr、ACL。目录条目也计入（空目录是有意义的）。遍历按路径排序，跨机器可复现。
@@ -22,7 +22,7 @@ from flotilla import __version__
 from flotilla.compose.model import Project
 
 #: 构建器版本：影响构建产物的实现变化要手动提升它（`__version__` 只跟 git tag 走，发布不一定带构建改动）。
-BUILDER_VERSION = 1
+BUILDER_VERSION = 2
 
 _CHUNK = 1 << 20
 
@@ -41,10 +41,8 @@ def _walk(root: Path, skip: set[str]) -> Iterator[tuple[str, os.stat_result]]:
     stack = [root]
     while stack:
         current = stack.pop()
-        try:
-            entries = sorted(os.scandir(current), key=lambda e: e.name)
-        except OSError:
-            continue
+        with os.scandir(current) as scanned:
+            entries = sorted(scanned, key=lambda e: e.name)
         for entry in entries:
             rel = str(Path(entry.path).relative_to(root))
             if rel.split("/")[0] in skip:
@@ -88,17 +86,22 @@ def build_key(
     project: Project,
     context_hashes: Mapping[str, str],
     deployment_inputs: Mapping[str, Any],
+    task: str = "",
+    source_images: Mapping[str, str] | None = None,
 ) -> str:
     """任务的构建键（§4.1）。
 
-    - `context_hashes`：服务 → 该服务构建上下文的 `tree_hash`（只有 `build` 的服务有）；
-    - `deployment_inputs`：影响构建产物的部署输入，目前只有"入口包装是否需要 /bin/sh"（§4.2 第 7 步）。
-      两种部署的输入不同即得到两个键。
+    - `task`：任务身份，防止相同环境的不同任务复用带着另一个任务名的清单；
+    - `context_hashes`：输入目录的内容哈希，含构建上下文与待导出的 bind，不限于需要 BuildKit 的服务；
+    - `source_images`：服务 → 实际选中且固定 digest 的源镜像（含预构建与派生基础镜像）；
+    - `deployment_inputs`：影响产物的构建配置、有效资源配置与入口包装要求。
     """
     payload = {
         "builder": BUILDER_VERSION,
         "flotilla": __version__.split("+")[0],  # 本地构建的 `+dirty` 之类不参与键
         "project": _canonical(project),
+        "task": task,
+        "source_images": dict(sorted((source_images or {}).items())),
         "contexts": dict(sorted(context_hashes.items())),
         "deployment": dict(sorted(deployment_inputs.items())),
     }

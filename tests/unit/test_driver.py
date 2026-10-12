@@ -8,53 +8,77 @@ from __future__ import annotations
 import json
 import tarfile
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from flotilla.build.driver import BuildContext, build_task, write_report
+from flotilla.build.builder import BuildRequest
+from flotilla.build.driver import BuildContext, BuildOutcome, build_task, write_report
 from flotilla.build.files import ExportError, export_task_files
 from flotilla.build.images import BuildSettings
 from flotilla.build.prebuilt import PrebuiltMismatch, PrebuiltSettings
 from flotilla.compose.task import load_task
+from flotilla.manifest import Manifest, Resources
 from flotilla.platform.base import Capabilities
 
 DIGEST = "sha256:" + "ab" * 32
+DIGEST2 = "sha256:" + "cd" * 32
 PULLABLE = ("r.io",)
 
 
 class FakeRegistry:
-    def __init__(self, *, history: Sequence[Mapping[str, Any]] = (), missing: Sequence[str] = ()) -> None:
+    def __init__(
+        self,
+        *,
+        history: Sequence[Mapping[str, Any]] = (),
+        missing: Sequence[str] = (),
+        digests: Mapping[str, str] | None = None,
+        user: str = "0:0",
+    ) -> None:
         self._history = list(history)
         self._missing = set(missing)
         self.configs = 0
+        self.digests = dict(digests or {})
+        self.user = user
+        self.resolved: list[tuple[str, str]] = []
+        self.copied: list[tuple[str, str]] = []
+        self.histories: list[str] = []
 
     def digest(self, name: str, reference: str) -> str:
-        return DIGEST
+        from flotilla.build.images import ImageError
+
+        ref = f"{name}:{reference}"
+        if any(m in ref for m in self._missing):
+            raise ImageError(f"not found: {ref}")
+        self.resolved.append((name, reference))
+        return self.digests.get(ref, DIGEST)
 
     def image_config(self, pinned: str) -> Mapping[str, Any]:
         self.configs += 1
-        return {"Cmd": ["/bin/bash"], "WorkingDir": "/app", "User": "0:0"}
+        return {"Cmd": ["/bin/bash"], "WorkingDir": "/app", "User": self.user}
 
     def image_history(self, pinned: str) -> Sequence[Mapping[str, Any]]:
         from flotilla.build.images import ImageError
 
         if any(m in pinned for m in self._missing):
             raise ImageError(f"not found: {pinned}")
+        self.histories.append(pinned)
         return self._history
 
     def copy(self, source: str, target: str) -> None:
-        pass
+        self.copied.append((source, target))
 
 
 class FakeBuilder:
-    def __init__(self) -> None:
-        self.requests: list[Any] = []
+    def __init__(self, *, digests: Sequence[str] = ()) -> None:
+        self.requests: list[BuildRequest] = []
+        self._digests = iter(digests)
 
-    def build(self, request: Any) -> str:
+    def build(self, request: BuildRequest) -> str:
         self.requests.append(request)
-        return DIGEST
+        return next(self._digests, DIGEST)
 
 
 class FakeExport:
@@ -393,3 +417,131 @@ def test_manifest_declares_seed_when_image_has_content(tmp_path: Path) -> None:
     manifest = json.loads(out.manifest_path.read_text())  # type: ignore[union-attr]
     (volume,) = manifest["trial_volumes"]
     assert volume["seed"] == "seeds/data.tar"
+
+
+def _manifest(outcome: BuildOutcome) -> Manifest:
+    assert outcome.status in ("built", "skipped"), outcome.reason
+    assert outcome.manifest_path is not None
+    return Manifest.load_json(outcome.manifest_path.read_bytes())
+
+
+def test_prebuilt_tasks_keep_distinct_manifests_and_images(tmp_path: Path) -> None:
+    registry = FakeRegistry(digests={"r.io/pre:alpha": DIGEST, "r.io/pre:beta": DIGEST2})
+    ctx = _ctx(registry=registry)
+    ctx = replace(ctx, settings=replace(ctx.settings, prebuilt=PrebuiltSettings(reference="r.io/pre:{task}")))
+    outcomes = [
+        build_task(load_task(_task(tmp_path, name, Dockerfile="FROM r.io/base:1\n")), tmp_path / "out", ctx)
+        for name in ("alpha", "beta")
+    ]
+    assert [o.status for o in outcomes] == ["built", "built"]
+    assert outcomes[0].build_key != outcomes[1].build_key
+    assert [_manifest(o).task for o in outcomes] == ["ds/alpha", "ds/beta"]
+    assert [_manifest(o).units["main"].image for o in outcomes] == [f"r.io/pre@{DIGEST}", f"r.io/pre@{DIGEST2}"]
+    assert registry.histories == [f"r.io/pre@{DIGEST}", f"r.io/pre@{DIGEST2}"]
+
+
+def test_same_environment_does_not_reuse_another_task_identity(tmp_path: Path) -> None:
+    ctx = _ctx()
+    outcomes = [
+        build_task(
+            load_task(_task(tmp_path, name, toml='[environment]\ndocker_image="r.io/app:1"')),
+            tmp_path / "out",
+            ctx,
+        )
+        for name in ("alpha", "beta")
+    ]
+    assert outcomes[0].build_key != outcomes[1].build_key
+    assert [_manifest(o).task for o in outcomes] == ["ds/alpha", "ds/beta"]
+
+
+def test_readonly_bind_change_invalidates_cache(tmp_path: Path) -> None:
+    path = _task(
+        tmp_path,
+        "bind",
+        compose="services:\n  main:\n    image: r.io/app:1\n    volumes:\n"
+        "      - {type: bind, source: ./shared, target: /data, read_only: true}\n",
+        shared__value="before",
+    )
+    ctx = _ctx()
+    first = build_task(load_task(path), tmp_path / "out", ctx)
+    (path / "environment/shared/value").write_text("after")
+    second = build_task(load_task(path), tmp_path / "out", ctx)
+    assert first.build_key != second.build_key and second.status == "built"
+    assert second.manifest_path is not None
+    assert (second.manifest_path.parent / "files/binds/0/value").read_text() == "after"
+
+
+def test_tag_movement_invalidates_cache_and_cache_hit_does_not_mirror(tmp_path: Path) -> None:
+    task = load_task(_task(tmp_path, "tags", toml='[environment]\ndocker_image="r.io/app:1"'))
+    registry = FakeRegistry(digests={"r.io/app:1": DIGEST})
+    ctx = _ctx(registry=registry, settings=BuildSettings(target="r.io/out", mirror_images=True))
+    first = build_task(task, tmp_path / "out", ctx)
+    assert first.status == "built" and len(registry.copied) == 1
+    assert build_task(task, tmp_path / "out", ctx).status == "skipped"
+    assert len(registry.copied) == 1
+    registry.digests["r.io/app:1"] = DIGEST2
+    second = build_task(task, tmp_path / "out", ctx)
+    assert second.build_key != first.build_key and second.status == "built"
+    assert _manifest(second).units["main"].image == f"r.io/out@{DIGEST2}"
+
+
+@pytest.mark.parametrize("change", ["target", "replacement", "resources", "prebuilt"])
+def test_effective_build_configuration_invalidates_cache(tmp_path: Path, change: str) -> None:
+    task = load_task(_task(tmp_path, "config", Dockerfile="FROM r.io/base:1\n"))
+    ctx = _ctx()
+    first = build_task(task, tmp_path / "out", ctx)
+    if change == "target":
+        other = replace(ctx, settings=replace(ctx.settings, target="r.io/other"))
+    elif change == "replacement":
+        other = replace(ctx, settings=replace(ctx.settings, image_replacements={"r.io/base:1": "r.io/base:2"}))
+    elif change == "resources":
+        other = replace(ctx, resources={"main": Resources(cpu="4", memory="8Gi")})
+    else:
+        other = replace(ctx, settings=replace(ctx.settings, prebuilt=PrebuiltSettings(reference="r.io/pre:{task}")))
+    second = build_task(task, tmp_path / "out", other)
+    assert first.status == second.status == "built", second.reason
+    assert first.build_key != second.build_key
+    if change == "resources":
+        assert _manifest(second).units["main"].resources == Resources(cpu="4", memory="8Gi")
+
+
+@pytest.mark.parametrize("source", ["build", "image", "prebuilt"])
+@pytest.mark.parametrize("mount", ["bind", "nocopy"])
+def test_all_image_sources_apply_compose_derivation(tmp_path: Path, source: str, mount: str) -> None:
+    origin = "image: r.io/base:1" if source == "image" else "build: {context: .}"
+    volume = (
+        "{type: bind, source: ./payload, target: /data}"
+        if mount == "bind"
+        else "{type: volume, source: cache, target: /data, volume: {nocopy: true}}"
+    )
+    path = _task(
+        tmp_path,
+        "derive",
+        compose=f"services:\n  main:\n    {origin}\n    volumes:\n      - {volume}\nvolumes:\n  cache: {{}}\n",
+        Dockerfile="FROM r.io/base:1\n",
+        payload__value="payload",
+    )
+    if source == "image":
+        # Harbor 的 main_build 覆盖在存在 Dockerfile 时会替换 main 的 image。
+        (path / "environment/Dockerfile").unlink()
+    builder = FakeBuilder(digests=[DIGEST, DIGEST2] if source == "build" else [DIGEST2])
+    ctx = _ctx(builder=builder, registry=FakeRegistry(user="1000:1001"))
+    if source == "prebuilt":
+        ctx = replace(ctx, settings=replace(ctx.settings, prebuilt=PrebuiltSettings(reference="r.io/pre:{task}")))
+    outcome = build_task(load_task(path), tmp_path / "out", ctx)
+    manifest = _manifest(outcome)
+    assert len(builder.requests) == (2 if source == "build" else 1)
+    last = builder.requests[-1]
+    text = last.dockerfile_text
+    assert text is not None and f"@{DIGEST}" in text.splitlines()[0]
+    assert text.splitlines()[1] == "USER 0:0" and text.splitlines()[-1] == "USER 1000:1001"
+    if mount == "bind":
+        assert 'COPY ["payload", "/data"]' in text
+    else:
+        assert "rm -rf /data/*" in text
+    assert manifest.units["main"].image == f"r.io/ns/out@{DIGEST2}"
+    assert manifest.units["main"].mounts == []
+    assert not outcome.needs_publish
+    assert manifest.units["main"].context.uid == 1000
+    assert manifest.units["main"].command == ["sh", "-c", "sleep infinity"]  # 保留 Harbor 的 agent 命令覆盖
+    assert "CMD " not in text and "ENTRYPOINT " not in text

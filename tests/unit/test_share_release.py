@@ -11,6 +11,7 @@ import json
 import os
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -290,7 +291,10 @@ async def test_gc_dry_run_removes_nothing(anchor: Anchor, tmp_path: Path) -> Non
     await publish_release(anchor, "r1", _tree(tmp_path / "r1"), components={})
     report = await gc_releases(anchor, keep=set(), dry_run=True)
     assert report.removed == frozenset() and report.dry_run
+    assert report.would_remove == frozenset({"r1"})
     assert sorted(await anchor.listdir(RELEASES, stage="run")) == ["r1"]
+    actual = await gc_releases(anchor, keep=set(), dry_run=False)
+    assert actual.removed == actual.would_remove == report.would_remove
 
 
 @pytest.mark.asyncio
@@ -307,3 +311,64 @@ async def test_gc_never_touches_staging(anchor: Anchor, tree: SharedTree, tmp_pa
 async def test_gc_without_releases_prefix_is_empty(anchor: Anchor) -> None:
     report = await gc_releases(anchor, keep=set(), dry_run=False)
     assert report.kept == frozenset() and report.removed == frozenset()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["missing", "file", "directory-link"])
+async def test_invalid_release_source_fails_before_remote_changes(
+    anchor: Anchor, tree: SharedTree, tmp_path: Path, source: str
+) -> None:
+    root = tmp_path / "src"
+    if source == "file":
+        root.write_bytes(b"not a directory")
+    elif source == "directory-link":
+        _tree(root)
+        runtime = tmp_path / "runtime"
+        runtime.mkdir()
+        (runtime / "python").write_bytes(b"python")
+        (root / "runtime").symlink_to(runtime, target_is_directory=True)
+    events = list(tree.events)
+    with pytest.raises(ReleaseError):
+        await publish_release(anchor, "invalid", root, components={})
+    assert tree.events == events
+    assert not any(p.startswith(f"{RELEASES}/invalid") for p in tree.dirs)
+
+
+@pytest.mark.asyncio
+async def test_unreadable_directory_is_not_silently_skipped(
+    anchor: Anchor, tree: SharedTree, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _tree(tmp_path / "src")
+    blocked = root / "private"
+    blocked.mkdir()
+    original = os.scandir
+
+    def scan(path: Any) -> Any:
+        if path == str(blocked):
+            raise PermissionError(13, "Permission denied", str(blocked))
+        return original(path)
+
+    monkeypatch.setattr(os, "scandir", scan)
+    events = list(tree.events)
+    with pytest.raises(ReleaseError, match="Permission denied"):
+        await publish_release(anchor, "invalid", root, components={})
+    assert tree.events == events
+
+
+@pytest.mark.asyncio
+async def test_changed_source_does_not_publish_an_inconsistent_manifest(
+    anchor: Anchor, tree: SharedTree, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _tree(tmp_path / "src")
+    original = anchor.mkdir
+
+    async def mkdir(key: str, **kwargs: Any) -> None:
+        await original(key, **kwargs)
+        if key.startswith(STAGING):
+            (root / "bin/busybox").write_bytes(b"changed")
+
+    monkeypatch.setattr(anchor, "mkdir", mkdir)
+    with pytest.raises(ReleaseError, match="内容发生变化"):
+        await publish_release(anchor, "changed", root, components={})
+    assert f"{RELEASES}/changed" not in tree.dirs
+    assert not any(p.startswith(f"{STAGING}/changed.") for p in tree.dirs)

@@ -9,7 +9,7 @@ import pytest
 
 from flotilla.core import labels
 from flotilla.core.anchor import Anchor, AnchorSettings
-from flotilla.platform.base import ErrorCategory, ExecResult, FlotillaError, InstanceStatus, ProcessSpec
+from flotilla.platform.base import ErrorCategory, ExecResult, FlotillaError, InstanceHandle, InstanceStatus, ProcessSpec
 from flotilla.platform.fake import FakePlatform, ManualClock, SharedTree
 
 SETTINGS = AnchorSettings(image="anchor@sha256:abc")
@@ -313,6 +313,40 @@ async def test_stat_reports_missing_as_error(platform: FakePlatform, clock: Manu
     anchor = await _started(platform, clock)
     with pytest.raises(FlotillaError):
         await anchor.stat("share/releases/nope", stage="run")
+
+
+@pytest.mark.asyncio
+async def test_upload_writes_as_root_and_restores_owner_before_mode(
+    platform: FakePlatform, clock: ManualClock, tree: SharedTree, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    anchor = await _started(platform, clock)
+    try:
+        await anchor.mkdir("staging/bin", stage="prepare")
+        original = platform.write_file
+        operations: list[str] = []
+
+        async def write(handle: InstanceHandle, path: str, data: bytes, *, mode: int, uid: int, gid: int) -> None:
+            # staging 属于 root，指定非 root 写入身份在 current execd 上会 Permission denied。
+            assert (uid, gid) == (0, 0)
+            operations.append("write")
+            await original(handle, path, data, mode=mode, uid=uid, gid=gid)
+
+        def execute(iid: str, proc: ProcessSpec) -> ExecResult:
+            operations.append(proc.argv[0])
+            result = tree._exec(iid, proc)
+            if proc.argv[0] == "chown":
+                tree.modes["staging/bin/tool"] = "0755"  # 内核清掉 setuid/setgid
+            return result
+
+        monkeypatch.setattr(platform, "write_file", write)
+        platform.set_exec_handler(execute)
+        await anchor.upload("staging/bin/tool", b"tool", uid=1001, gid=1002, mode=0o6755, stage="prepare")
+        assert operations == ["write", "chown", "chmod"]
+        assert tree.content("staging/bin/tool") == b"tool"
+        assert tree.owners["staging/bin/tool"] == "1001:1002"
+        assert tree.modes["staging/bin/tool"] == "6755"
+    finally:
+        await anchor.close()
 
 
 @pytest.mark.asyncio
