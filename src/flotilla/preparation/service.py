@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from flotilla._io import owned_io
-from flotilla.compose.task import HarborTask
+from flotilla.compose.task import HarborTask, load_environment
 from flotilla.config import FlotillaConfig
 from flotilla.core.anchor import Anchor
 from flotilla.manifest import Manifest
@@ -48,6 +48,12 @@ def definitions(path: str | Path) -> tuple[EnvironmentDefinition, ...]:
 
 def inspect(cfg: FlotillaConfig, path: str | Path) -> tuple[EnvironmentInspection, ...]:
     return tuple(_inspect_task(cfg, task) for task in task_environments(Path(path).resolve()))
+
+
+def inspect_environment(cfg: FlotillaConfig, definition: EnvironmentDefinition) -> EnvironmentInspection:
+    """Inspect exactly the effective context supplied to open_environment."""
+    task = load_environment(definition.task_root, definition.directory, definition.config, name=definition.name)
+    return _inspect_task(cfg, task)
 
 
 def _inspect_task(cfg: FlotillaConfig, task: HarborTask) -> EnvironmentInspection:

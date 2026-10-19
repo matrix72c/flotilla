@@ -31,9 +31,9 @@ from flotilla.platform.base import ErrorCategory, FlotillaError
 from flotilla.platform.clock import SystemClock
 from flotilla.platform.opensandbox import build
 from flotilla.runtime.types import Task
+from flotilla.testing.environments import FixtureRequest as RunRequest
+from flotilla.testing.environments import open_fixture
 from tests.e2e.web_app_db import web_app_db
-from tests.support.environments import FixtureRequest as RunRequest
-from tests.support.environments import open_fixture
 
 
 def fixture(image: str, *, single: bool = False, waiting: bool = False) -> Task:

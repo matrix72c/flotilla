@@ -9,8 +9,8 @@ import pytest
 
 import flotilla
 from flotilla.config import FlotillaConfig
-from tests.support.platform import FakePlatform, SharedTree
-from tests.support.runtime import deployment as deployment
+from flotilla.testing.platform import FakePlatform, SharedTree
+from flotilla.testing.runtime import deployment as deployment
 
 ROOT = Path(__file__).resolve().parents[2]
 

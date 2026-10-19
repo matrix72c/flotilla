@@ -20,7 +20,7 @@ from flotilla.platform.base import (
     InstanceStatus,
     Resources,
 )
-from tests.support.platform import FakePlatform, ManualClock, SharedTree
+from flotilla.testing.platform import FakePlatform, ManualClock, SharedTree
 
 ANCHOR = AnchorSettings(image="anchor@sha256:abc")
 SETTINGS = ReaperSettings()

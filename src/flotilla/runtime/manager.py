@@ -33,7 +33,15 @@ from flotilla.platform.clock import SystemClock
 from flotilla.platform.execution import confirm_stopped
 from flotilla.platform.opensandbox import build
 from flotilla.runtime.planning import AgentOverlay, to_plan
-from flotilla.runtime.types import CleanupError, CleanupReport, EnvironmentInfo, RunRequest, RuntimeEvent, ServiceInfo
+from flotilla.runtime.types import (
+    ENVIRONMENT_RESERVATION_COPIES,
+    CleanupError,
+    CleanupReport,
+    EnvironmentInfo,
+    RunRequest,
+    RuntimeEvent,
+    ServiceInfo,
+)
 from flotilla.share.release import verify_release
 
 
@@ -193,7 +201,7 @@ class Manager:
         queued = time.monotonic()
         self.emit("queued", eid, request=request)
         plan = self.plan(request)
-        reservation = len(plan.units) * 2
+        reservation = len(plan.units) * ENVIRONMENT_RESERVATION_COPIES
         if reservation + 1 > self.cfg.limits.instance_budget:
             raise invalid("task exceeds instance_budget (includes startup retry reservations and anchor)")
         try:

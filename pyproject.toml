@@ -24,6 +24,7 @@ dependencies = [
 [project.optional-dependencies]
 # Install the Harbor adapter only for evaluation workloads.
 harbor = ["harbor==0.24.0"]
+testing = ["pytest>=8.3", "pytest-asyncio>=0.25"]
 
 [project.scripts]
 flotilla = "flotilla.cli:main"

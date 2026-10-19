@@ -11,7 +11,7 @@ from flotilla.platform.base import FlotillaError
 from flotilla.platform.opensandbox.address import parse_default_dev, parse_dev_ipv4, read_internal_address
 from flotilla.platform.opensandbox.execd import Execd, ExecdSettings
 from flotilla.platform.opensandbox.http import Http, RetryPolicy
-from tests.support.platform import ManualClock
+from flotilla.testing.platform import ManualClock
 
 Handler = Callable[[httpx.Request], httpx.Response]
 

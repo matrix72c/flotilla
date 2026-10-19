@@ -13,8 +13,8 @@ from unittest.mock import AsyncMock
 import pytest
 
 from flotilla.cli import main
-from tests.support.platform import FakePlatform, ManualClock, SharedTree
-from tests.support.reports import report
+from flotilla.testing.platform import FakePlatform, ManualClock, SharedTree
+from flotilla.testing.reports import report
 
 SHA = "0" * 64
 

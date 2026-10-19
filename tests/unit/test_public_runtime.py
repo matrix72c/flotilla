@@ -15,11 +15,11 @@ from flotilla.core import labels
 from flotilla.platform.base import ErrorCategory, ExecResult, FlotillaError, ProcessSpec
 from flotilla.platform.clock import SystemClock
 from flotilla.runtime.manager import Manager
-from tests.support.environments import FixtureRequest as RunRequest
-from tests.support.environments import environment, open_fixture
-from tests.support.platform import FakePlatform, SharedTree
-from tests.support.runtime import deployment as deployment
-from tests.support.runtime import task
+from flotilla.testing.environments import FixtureRequest as RunRequest
+from flotilla.testing.environments import environment, open_fixture
+from flotilla.testing.platform import FakePlatform, SharedTree
+from flotilla.testing.runtime import deployment as deployment
+from flotilla.testing.runtime import task
 
 
 @pytest.mark.asyncio

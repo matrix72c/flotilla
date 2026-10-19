@@ -154,3 +154,23 @@ class EnvironmentInspection:
     status: str
     findings: tuple[dict[str, str], ...]
     resources: dict[str, dict[str, str]]
+
+    @property
+    def reservation(self) -> ResourceReservation:
+        return ResourceReservation(self.resources, copies=ENVIRONMENT_RESERVATION_COPIES)
+
+
+# One active generation plus one reserved generation for retries/deferred deletion.
+ENVIRONMENT_RESERVATION_COPIES = 2
+
+
+@dataclass(frozen=True)
+class ResourceReservation:
+    """Infrastructure admission budget; resources are per service before copies."""
+
+    resources: dict[str, dict[str, str]]
+    copies: int = 1
+
+    @property
+    def instances(self) -> int:
+        return len(self.resources) * self.copies

@@ -14,7 +14,7 @@ from pathlib import Path
 
 from flotilla.core import labels
 from flotilla.platform.base import ExecResult, InstanceHandle, ProcessSpec
-from tests.support.platform import FakePlatform
+from flotilla.testing.platform import FakePlatform
 
 
 def attach_local_files(platform: FakePlatform, root: Path) -> None:

@@ -9,7 +9,7 @@ from flotilla.build.driver import build_task
 from flotilla.build.keys import files_json
 from flotilla.compose.task import load_environment
 from flotilla.preparation.service import Preparer
-from tests.support.build import _ctx
+from flotilla.testing.build import _ctx
 
 
 async def fake_build_process(self: Preparer, request: Path) -> None:

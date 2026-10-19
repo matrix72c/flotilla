@@ -135,3 +135,7 @@ def _ctx(**kw: Any) -> BuildContext:
         "image_export": FakeExport(),
     }
     return BuildContext(**{**defaults, **kw})
+
+
+# Public factory for downstream neutral environment contracts.
+build_context = _ctx

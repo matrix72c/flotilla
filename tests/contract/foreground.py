@@ -27,8 +27,8 @@ from flotilla.platform.base import ErrorCategory, FlotillaError
 from flotilla.platform.clock import SystemClock
 from flotilla.platform.opensandbox import build
 from flotilla.runtime.types import Task
-from tests.support.environments import FixtureRequest as RunRequest
-from tests.support.environments import open_fixture
+from flotilla.testing.environments import FixtureRequest as RunRequest
+from flotilla.testing.environments import open_fixture
 
 
 async def run(deployment: Path, image: str, output: Path, *, services: int = 3, soak_seconds: int = 0) -> bool:

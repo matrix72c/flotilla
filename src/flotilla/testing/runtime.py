@@ -8,16 +8,17 @@ from pathlib import Path
 
 import pytest
 
+from flotilla import Flotilla
 from flotilla.config import FlotillaConfig
 from flotilla.core import labels
 from flotilla.manifest import Context, Manifest, Resources, Unit
 from flotilla.platform.base import ExecResult, ProcessSpec
 from flotilla.platform.clock import SystemClock
 from flotilla.runtime.manager import Manager
-from flotilla.runtime.types import Task
-from tests.support.config import config_data
-from tests.support.platform import FakePlatform, SharedTree
-from tests.support.reports import report
+from flotilla.runtime.types import CleanupReport, Task
+from flotilla.testing.config import config_data
+from flotilla.testing.platform import FakePlatform, SharedTree
+from flotilla.testing.reports import report
 
 
 @pytest.fixture
@@ -66,7 +67,7 @@ def deployment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Flotill
         return Manager(config, platform=platform, clock=clock)
 
     monkeypatch.setattr("flotilla.runtime.client.Manager", manager)
-    from tests.support.preparation import fake_build_process
+    from flotilla.testing.preparation import fake_build_process
 
     monkeypatch.setattr("flotilla.preparation.service.Preparer._build_process", fake_build_process)
     return cfg, platform, tree
@@ -87,3 +88,18 @@ def task() -> Task:
         },
     )
     return Task(manifest)
+
+
+async def set_cleanup_retry_window(client: Flotilla, seconds: float) -> None:
+    """Bound fake-backend deletion retries in downstream fault-injection tests."""
+
+    async def configure(manager: Manager) -> None:
+        manager.deleter.retry_deadline_s = seconds
+
+    await client._call(configure)
+
+
+async def retry_cleanup(client: Flotilla, report: CleanupReport, timeout: float = 2) -> None:
+    """Retry fake launch residuals after a test removes its deletion fault."""
+    for residual in report.remaining:
+        await client._release_environment(residual.environment_id, timeout)

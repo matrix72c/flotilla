@@ -33,7 +33,7 @@ from flotilla.platform.base import (
 from flotilla.platform.opensandbox import ExecdSettings, OpenSandboxPlatform, StorageSettings, build
 from flotilla.platform.opensandbox.network import NetworkSettings
 from flotilla.platform.opensandbox.platform import EXECD_TOKEN_HEADER, MANAGED_CREATE_FIELDS
-from tests.support.platform import ManualClock
+from flotilla.testing.platform import ManualClock
 
 Handler = Callable[[httpx.Request], httpx.Response]
 

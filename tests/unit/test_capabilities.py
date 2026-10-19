@@ -8,7 +8,7 @@ import pytest
 from pydantic import ValidationError
 
 from flotilla.capabilities import SCHEMA_VERSION, CapabilityReport
-from tests.support.reports import no, ok, report, report_data
+from flotilla.testing.reports import no, ok, report, report_data
 
 
 def test_round_trips_through_json() -> None:

@@ -92,3 +92,5 @@ Contributions are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md). Please report
 ## License
 
 Flotilla is licensed under the [Apache License 2.0](LICENSE). The anchor image includes BusyBox, which is licensed under GPLv2; see [third-party components](THIRD_PARTY.md).
+
+Downstream framework integration contracts: [inspection, resource reservations, process ownership and testing](docs/downstream.md).

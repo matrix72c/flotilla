@@ -17,10 +17,10 @@ from flotilla.config import FlotillaConfig
 from flotilla.core import labels
 from flotilla.integrations.harbor_source import task_environments
 from flotilla.platform.base import ErrorCategory, FlotillaError, InstanceSpec
-from tests.contract.harbor_local import attach_local_files
-from tests.support.build import _ctx
-from tests.support.platform import FakePlatform, SharedTree
-from tests.support.runtime import deployment as deployment
+from flotilla.testing.build import _ctx
+from flotilla.testing.harbor_local import attach_local_files
+from flotilla.testing.platform import FakePlatform, SharedTree
+from flotilla.testing.runtime import deployment as deployment
 
 
 @pytest.mark.filterwarnings("ignore:Task.checksum will be deprecated:DeprecationWarning")

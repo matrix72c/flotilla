@@ -15,7 +15,7 @@ from flotilla.compose.task import TaskError, find_tasks, load_task
 from flotilla.platform.base import Capabilities
 from flotilla.preparation.source import task_environments
 from flotilla.scan import scan_task
-from tests.support.reports import report
+from flotilla.testing.reports import report
 
 COMPOSE = """
 services:

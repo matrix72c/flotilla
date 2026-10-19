@@ -302,6 +302,36 @@ class Process:
 
         return await service._env._client._call(call)
 
+    async def wait(self, *, timeout: float | None = None, poll_interval: float = 0.2) -> ProcessStatus:
+        """Wait for exit. A waiter timeout does not terminate the remote process."""
+        if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
+            raise ValueError("timeout must be finite and positive")
+        if not math.isfinite(poll_interval) or poll_interval <= 0:
+            raise ValueError("poll_interval must be finite and positive")
+        async with asyncio.timeout(timeout):
+            while True:
+                result = await self.status()
+                if not result.running:
+                    return result
+                await asyncio.sleep(poll_interval)
+
+    async def stop(self) -> None:
+        """Confirm process stop, or reclaim its environment before returning.
+
+        Failure to confirm either is a cleanup error; callers must not score the
+        attempt. This operation never replays the original command.
+        """
+        service = self.service
+
+        async def call(manager: Manager) -> None:
+            run = manager.get(service._env.id)
+            assert run.ready is not None
+            await manager.cancel_execution(
+                service._env.id, run.ready.handles[service.name], ExecAttempt(sent=True, command_id=self.id)
+            )
+
+        await service._env._client._call(call, settle_cancel=True)
+
 
 def _args(argv: Sequence[str], timeout: float, env: Mapping[str, str] | None) -> tuple[str, ...]:
     if isinstance(argv, str) or not argv or any(not isinstance(a, str) or "\0" in a for a in argv):

@@ -35,7 +35,7 @@ from flotilla.platform.base import (
     Resources,
     Topology,
 )
-from tests.support.platform import FakePlatform, ManualClock, SharedTree
+from flotilla.testing.platform import FakePlatform, ManualClock, SharedTree
 
 CTX = ExecContext(env={"PATH": "/usr/bin:/bin"}, uid=0, gid=0, cwd="/")
 SETTINGS = TrialSettings(share_release="2026-09-28.1", external=ExternalPolicy(mode="any"))

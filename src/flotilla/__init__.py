@@ -14,6 +14,7 @@ from flotilla.runtime.types import (
     EnvironmentInspection,
     OpenOptions,
     PreparationResidual,
+    ResourceReservation,
     RuntimeEvent,
     ServiceInfo,
 )
@@ -34,6 +35,7 @@ __all__ = [
     "PreparationResidual",
     "Process",
     "ProcessStatus",
+    "ResourceReservation",
     "RuntimeEvent",
     "Service",
     "ServiceInfo",

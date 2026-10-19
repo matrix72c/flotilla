@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from flotilla.platform.base import Capabilities
-from tests.support.platform import FakePlatform, ManualClock, SharedTree
+from flotilla.testing.platform import FakePlatform, ManualClock, SharedTree
 
 
 @pytest.fixture

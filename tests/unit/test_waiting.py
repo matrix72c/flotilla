@@ -7,7 +7,7 @@ import asyncio
 import pytest
 
 from flotilla.core.waiting import Aborted, Backoff, Expired, RateLimiter, wait_all, within
-from tests.support.platform import ManualClock
+from flotilla.testing.platform import ManualClock
 
 
 @pytest.mark.asyncio
