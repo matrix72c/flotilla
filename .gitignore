@@ -1,0 +1,41 @@
+__pycache__/
+*.pyc
+.venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+dist/
+*.egg-info/
+.import_linter_cache/
+.uv-cache/
+.venv-*/
+/build/
+.coverage*
+htmlcov/
+*.log
+.env
+.env.*
+!.env.example
+
+# Local workspace: deployment settings, diagnostics, notes, and run artifacts.
+/internal/
+# Legacy local paths remain ignored to prevent accidental publication.
+deployments/local/
+deployments/*.json
+artifacts/
+
+# Local credentials and developer-tool state (not project source).
+/.aws/
+/.docker/
+/.codex/
+/.agents/
+/.cache/
+# Framework and experiment outputs.
+/runs/
+/jobs/
+/work_dir/
+/outputs/
+/checkpoints/
+/wandb/
+
+/trials/

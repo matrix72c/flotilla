@@ -1,0 +1,41 @@
+"""Public API for preparing and running Compose environments on sandbox platforms."""
+
+from __future__ import annotations
+
+from flotilla._version import __version__
+from flotilla.platform.base import ErrorCategory, ExecOutcomeUnknown, ExecResult, FlotillaError, ProcessStatus
+from flotilla.runtime.client import Flotilla
+from flotilla.runtime.environment import Environment, Process, Service
+from flotilla.runtime.types import (
+    CleanupError,
+    CleanupReport,
+    EnvironmentDefinition,
+    EnvironmentInfo,
+    EnvironmentInspection,
+    OpenOptions,
+    PreparationResidual,
+    RuntimeEvent,
+    ServiceInfo,
+)
+
+__all__ = [
+    "CleanupError",
+    "CleanupReport",
+    "Environment",
+    "EnvironmentDefinition",
+    "EnvironmentInfo",
+    "EnvironmentInspection",
+    "ErrorCategory",
+    "ExecOutcomeUnknown",
+    "ExecResult",
+    "Flotilla",
+    "FlotillaError",
+    "OpenOptions",
+    "PreparationResidual",
+    "Process",
+    "ProcessStatus",
+    "RuntimeEvent",
+    "Service",
+    "ServiceInfo",
+    "__version__",
+]

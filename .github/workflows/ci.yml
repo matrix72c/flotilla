@@ -1,0 +1,102 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      run_contracts:
+        description: Create isolated sandboxes on the configured contract runner
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  # Required PR checks use no deployment credentials or real platform resources.
+  fast:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # hatch-vcs derives versions from Git history.
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      - name: Sync
+        run: uv sync --all-groups --frozen
+      - name: Ruff lint
+        run: uv run ruff check
+      - name: Ruff format check
+        run: uv run ruff format --check
+      - name: Mypy (strict)
+        run: uv run mypy
+      - name: Import boundaries
+        run: uv run lint-imports
+      - name: Tests
+        run: uv run pytest
+      - name: Harbor adapter contracts (fake platform)
+        run: uv run --extra harbor --frozen pytest tests/unit/test_harbor_adapter.py tests/unit/test_harbor_trial.py
+
+      - name: Build public source and wheel distributions
+        run: uv build
+      - name: Inspect distributions
+        run: uv run python scripts/check_release.py dist
+      - name: Test extracted source distribution
+        run: |
+          mkdir /tmp/flotilla-source
+          tar -xf dist/*.tar.gz -C /tmp/flotilla-source --strip-components=1
+          cd /tmp/flotilla-source
+          uv sync --all-groups --extra harbor --frozen
+          uv run pytest
+      - name: Install base wheel without optional adapters
+        run: |
+          uv venv /tmp/flotilla-wheel --python 3.12
+          uv pip install --python /tmp/flotilla-wheel/bin/python dist/*.whl
+          cd /tmp
+          /tmp/flotilla-wheel/bin/python -c 'import flotilla; from importlib.util import find_spec; assert find_spec("harbor") is None'
+          /tmp/flotilla-wheel/bin/flotilla --help
+      - name: Install Harbor wheel extra
+        run: |
+          uv pip install --python /tmp/flotilla-wheel/bin/python 'harbor==0.24.0'
+          cd /tmp
+          /tmp/flotilla-wheel/bin/python -c 'from flotilla.integrations.harbor import FlotillaEnvironment'
+
+
+  # Opt-in: this runner owns its deployment file and dedicated sandbox credentials.
+  contract:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_contracts }}
+    runs-on: [self-hosted, sandbox-contract]
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        protocol: [current, legacy]
+    env:
+      FLOTILLA_CONTRACT_CREDENTIAL: ${{ secrets.FLOTILLA_CONTRACT_CREDENTIAL }}
+      FLOTILLA_DEPLOYMENT: ${{ matrix.protocol == 'current' && vars.FLOTILLA_CONTRACT_CURRENT_DEPLOYMENT || vars.FLOTILLA_CONTRACT_LEGACY_DEPLOYMENT }}
+      FLOTILLA_IMAGE: ${{ vars.FLOTILLA_CONTRACT_IMAGE }}
+      FLOTILLA_PROTOCOL: ${{ matrix.protocol }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --all-groups --frozen
+      - name: Check selected protocol
+        run: >-
+          uv run python -c 'import os; from flotilla.config import FlotillaConfig;
+          assert FlotillaConfig.load(os.environ["FLOTILLA_DEPLOYMENT"]).opensandbox.execd.protocol == os.environ["FLOTILLA_PROTOCOL"]'
+      - name: Foreground execution and lifecycle contract
+        run: >-
+          uv run python -m tests.contract.foreground
+          --deployment "$FLOTILLA_DEPLOYMENT"
+          --image "$FLOTILLA_IMAGE"
+          --out artifacts/foreground-contract.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: foreground-contract-${{ matrix.protocol }}
+          path: artifacts/foreground-contract.json
+          if-no-files-found: warn

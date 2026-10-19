@@ -1,0 +1,93 @@
+# Template only: replace every deployment-specific value before use.
+[opensandbox]
+# Server root; the backend appends /v1.
+endpoint = "https://sandbox.example.com"
+credential_env = "FLOTILLA_OPENSANDBOX_CREDENTIAL"
+capabilities = "capabilities.json"
+# Optional deployment extension: enable only when the backend supports sandboxGroup. It keeps
+# each multi-service trial in one cluster (one generated UUID per trial, not a node pin).
+# group_extension = "sandboxGroup"
+
+[opensandbox.network]
+# Default. For a deployment whose IP rules apply only to external
+# addresses, explicitly set link = "sandbox" (exact sandbox:<id> peer targets).
+# sandbox mode supports external = [] / allowlists. If required by the deployment,
+# enable group_extension above to avoid unsupported cross-cluster peer traffic.
+link = "cidr"
+sandbox_cidrs = ["10.42.0.0/16"]
+platform_cidrs = ["10.43.0.0/16", "169.254.169.254/32"]
+
+[opensandbox.execd]
+protocol = "current"
+wrapper = "/.flotilla/bin/busybox"
+
+[storage]
+volumes = "host"
+# Must be an allowed host path backed by shared storage on all worker nodes.
+host_path = "/srv/flotilla"
+# Alternatively, use an existing volume that every worker can mount read-write
+# (a ReadWriteMany PVC on Kubernetes):
+# volumes = "pvc"
+# claim_name = "flotilla-shared"
+# root_subpath = "flotilla"
+
+[share]
+# Publish this immutable release before running probe: `flotilla share publish <dir> --declared <file>`
+# writes RELEASE.json, uploads it, and prints the two lines below to paste back.
+release = "example-release"
+# Replace with the SHA256 of the published release's RELEASE.json.
+release_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+
+[network]
+external = []
+
+[security]
+accept_insecure = []
+
+[reaper]
+# Replace with the image digest produced by images/anchor/build.sh.
+anchor_image = "registry.example.com/flotilla@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+
+trial_ttl = 1800
+renew_before_s = 600
+renew_margin_s = 120
+
+[runtime]
+run_timeout_s = 21600
+exec_default_timeout_s = 300
+cancel_confirm_timeout_s = 15
+exec_output_limit_bytes = 8388608
+
+[limits]
+exec_timeout = 21600
+exec_concurrency = 64
+exec_rate = 500
+# Set these from measured CPU/memory and sandbox quotas. A three-service run
+# uses 3 live instances and reserves 6 slots for possible startup replacement.
+trial_concurrency = 32
+instance_budget = 193 # 32 * 6 + one anchor, per process
+
+[timeouts]
+close = 60
+
+[resources.default]
+cpu = "1"
+memory = "2Gi"
+
+# Explicit overrides (all in this file):
+# [resources.services.main]
+# cpu = "2"
+# memory = "4Gi"
+# [resources.tasks.example-task.services.db]
+# cpu = "4"
+# memory = "8Gi"
+
+# Opening a task prepares it automatically; this machine needs Docker/BuildKit and registry access.
+[preparation]
+concurrency = 4
+timeout_s = 3600
+# docker_command = ["sudo", "-n", "docker"]
+
+[build]
+pullable_registries = ["registry.example.com"]
+target = "registry.example.com/team/tasks"

@@ -1,0 +1,201 @@
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[project]
+name = "flotilla-compose"
+dynamic = ["version"]
+description = "Run Compose task environments as groups of sandboxes, one per service"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Programming Language :: Python :: 3.12",
+  "Operating System :: POSIX :: Linux",
+]
+dependencies = [
+  "httpx>=0.27,<1",
+  "pydantic>=2.10,<3",
+  "pyyaml>=6.0,<7",
+]
+
+[project.optional-dependencies]
+# Install the Harbor adapter only for evaluation workloads.
+harbor = ["harbor==0.24.0"]
+
+[project.scripts]
+flotilla = "flotilla.cli:main"
+
+[project.urls]
+Repository = "https://github.com/matrix72c/flotilla"
+Issues = "https://github.com/matrix72c/flotilla/issues"
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build]
+# Keep local work out of both source and wheel distributions.
+exclude = [
+  "/internal", "/deployments/local", "/artifacts", "/runs", "/jobs", "/work_dir",
+  "/outputs", "/checkpoints", "/wandb", "/trials", "**/.env", "**/.env.*",
+  "**/__pycache__", "**/*.pyc",
+]
+
+[tool.hatch.build.targets.sdist]
+# Only public source roots may enter a source release.
+include = [
+  "/src/flotilla", "/tests", "/docs", "/images", "/scripts", "/deployments/examples",
+  "/.github", "/.gitignore", "/README.md", "/CONTRIBUTING.md", "/LICENSE",
+  "/pyproject.toml", "/uv.lock", "/SECURITY.md", "/THIRD_PARTY.md", "/third_party",
+  "/CHANGELOG.md", "/CODE_OF_CONDUCT.md", "/RELEASING.md",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/flotilla"]
+
+[tool.uv]
+# The first release targets Linux x86_64.
+environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
+
+[[tool.uv.index]]
+url = "https://pypi.org/simple"
+default = true
+
+[dependency-groups]
+dev = [
+  "pytest>=8.3",
+  "pytest-asyncio>=0.25",
+  "ruff>=0.14",
+  "mypy>=1.13",
+  "import-linter>=2.0",
+  "types-pyyaml>=6.0",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+src = ["src", "tests"]
+# docs/ contains illustrative Python snippets that are not formatted or linted.
+extend-exclude = ["docs"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "TID251"]
+
+[tool.ruff.lint.per-file-ignores]
+# The banned APIs below apply only to core; other code (the real Clock, backend retry backoff, tests)
+# may use the wall clock.
+"!src/flotilla/core/**" = ["TID251"]
+
+# Core uses the injected Clock so timing invariants can be tested deterministically.
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"time".msg = "core must not use the wall clock; read time and wait through the injected Clock"
+"asyncio.sleep".msg = "core waits through the injected Clock.sleep"
+"asyncio.wait_for".msg = "event-loop timeouts use the wall clock; core times itself with Clock.sleep"
+"asyncio.timeout".msg = "event-loop timeouts use the wall clock; core times itself with Clock.sleep"
+"asyncio.timeout_at".msg = "event-loop timeouts use the wall clock; core times itself with Clock.sleep"
+"asyncio.get_running_loop".msg = "loop.time / call_later use the wall clock; core does not touch the event loop directly"
+"asyncio.get_event_loop".msg = "loop.time / call_later use the wall clock; core does not touch the event loop directly"
+"datetime.datetime.now".msg = "core reads time through the injected Clock.now"
+"datetime.datetime.utcnow".msg = "core reads time through the injected Clock.now"
+"datetime.datetime.today".msg = "core reads time through the injected Clock.now"
+"datetime.date.today".msg = "core reads time through the injected Clock.now"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src", "tests"]
+warn_unused_ignores = true
+mypy_path = ["src"]
+explicit_package_bases = true
+# mypy 2 defaults to an SQLite cache; SQLite file locking fails on some network filesystems
+# (disk I/O error), so use the plain file cache.
+sqlite_cache = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests/unit"]
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-q"
+# Warnings are errors: asyncio's "Task exception was never retrieved", "coroutine was never awaited",
+# and similar warnings indicate bugs.
+filterwarnings = ["error"]
+
+# Import boundaries are enforced in CI.
+
+[tool.importlinter]
+root_package = "flotilla"
+
+# The core list forbids every sibling package except platform.base, so it acts as an allowlist.
+# Add new top-level packages here.
+[[tool.importlinter.contracts]]
+name = "core depends only on platform.base"
+type = "forbidden"
+source_modules = ["flotilla.core"]
+forbidden_modules = [
+  "flotilla.platform.opensandbox",
+  "flotilla.compose",
+  "flotilla.build",
+  "flotilla.scan",
+  "flotilla.share",
+  "flotilla.manifest",
+  "flotilla.capabilities",
+  "flotilla.config",
+  "flotilla.probe",
+  "flotilla.integrations",
+  "flotilla.cli",
+  "flotilla.runtime",
+  "flotilla.preparation",
+]
+
+[[tool.importlinter.contracts]]
+name = "platform does not depend on core"
+type = "forbidden"
+source_modules = ["flotilla.platform"]
+forbidden_modules = ["flotilla.core"]
+
+# These may read capability report types from platform.base but never touch a backend; without a
+# backend they cannot construct a Platform instance.
+[[tool.importlinter.contracts]]
+name = "offline path (compose/build/scan) does not call the platform"
+type = "forbidden"
+source_modules = [
+  "flotilla.compose",
+  "flotilla.build",
+  "flotilla.scan",
+]
+forbidden_modules = [
+  "flotilla.platform.opensandbox",
+]
+
+[[tool.importlinter.contracts]]
+name = "integrations, probe, and cli are outermost and not imported by internal packages"
+type = "forbidden"
+source_modules = [
+  "flotilla.core",
+  "flotilla.platform",
+  "flotilla.compose",
+  "flotilla.build",
+  "flotilla.scan",
+  "flotilla.share",
+  "flotilla.manifest",
+  "flotilla.capabilities",
+  "flotilla.config",
+]
+forbidden_modules = [
+  "flotilla.integrations",
+  "flotilla.cli",
+  "flotilla.probe",
+]
+
+[[tool.importlinter.contracts]]
+name = "runtime does not import adapters"
+type = "forbidden"
+source_modules = ["flotilla.runtime"]
+forbidden_modules = ["flotilla.integrations", "flotilla.cli", "flotilla.probe"]
+
+[[tool.mypy.overrides]]
+module = ["harbor.*"]
+ignore_missing_imports = true
+follow_imports = "skip"
