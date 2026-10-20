@@ -4,7 +4,9 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
-Initial public release.
+## [0.1.1] - 2026-10-20
+
+Initial public release plus downstream orchestration contracts.
 
 ### Added
 
