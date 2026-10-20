@@ -16,9 +16,11 @@ These are local upper-bound calculations, not remote quota or schedulability che
 `process.wait(timeout=...)` polls for completion. A wait deadline or cancellation
 stops waiting and leaves the process owned by its environment.
 `process.stop()` requests confirmed termination using the platform's supported
-execution cancellation, or releases the service/environment when required for
-confirmation. It must not be treated as evidence that the rest of the environment
-remains usable: call `environment.check()` before continuing dependent work.
+execution cancellation; an already-exited process is confirmed without side
+effects. A vanished record or an unconfirmable stop invalidates the environment:
+`stop()` releases it and raises `ExecOutcomeUnknown`, like foreground
+cancellation. A return without error means the process is confirmed stopped;
+call `environment.check()` before continuing dependent work.
 
 `Environment.release()` and `Flotilla.close()` retain explicit cleanup results.
 Downstream code must check `CleanupReport.clean`; a verifier score does not make

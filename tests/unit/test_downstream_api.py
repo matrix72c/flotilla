@@ -7,6 +7,7 @@ import pytest
 
 from flotilla import EnvironmentDefinition, Flotilla
 from flotilla.config import FlotillaConfig
+from flotilla.platform.base import ExecOutcomeUnknown
 from flotilla.testing.environments import FixtureRequest, open_fixture
 from flotilla.testing.platform import FakePlatform, SharedTree
 from flotilla.testing.runtime import deployment as deployment
@@ -68,4 +69,37 @@ async def test_waiter_cancellation_preserves_process_ownership(
             await waiting
         assert (await process.status()).running
         await env.release()
+    assert not await platform.list({})
+
+
+@pytest.mark.asyncio
+async def test_stop_of_exited_process_confirms_without_side_effects(
+    deployment: tuple[FlotillaConfig, FakePlatform, SharedTree],
+) -> None:
+    cfg, platform, _ = deployment
+    async with Flotilla(deployment=cfg) as fleet:
+        env = await open_fixture(fleet, FixtureRequest(task(), "process"))
+        process = await env.agent.start_process(["sleep", "30"])
+        iid = next(i for i in platform.iids() if platform.pids(i))
+        platform.finish_process(iid, platform.pids(iid)[0], 0)  # The agent exited on its own.
+        await process.stop()
+        assert (await process.status()).exit_code == 0
+        await env.check()
+        assert (await env.agent.exec(["true"])).exit_code == 0
+        await env.release()
+    assert not await platform.list({})
+
+
+@pytest.mark.asyncio
+async def test_stop_after_record_loss_raises_and_releases_the_environment(
+    deployment: tuple[FlotillaConfig, FakePlatform, SharedTree],
+) -> None:
+    cfg, platform, _ = deployment
+    async with Flotilla(deployment=cfg) as fleet:
+        env = await open_fixture(fleet, FixtureRequest(task(), "process"))
+        process = await env.agent.start_process(["sleep", "30"])
+        iid = next(i for i in platform.iids() if platform.pids(i))
+        platform.lose_processes(iid)  # The exec daemon lost its records.
+        with pytest.raises(ExecOutcomeUnknown):
+            await process.stop()
     assert not await platform.list({})

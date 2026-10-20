@@ -318,8 +318,12 @@ class Process:
     async def stop(self) -> None:
         """Confirm process stop, or reclaim its environment before returning.
 
-        Failure to confirm either is a cleanup error; callers must not score the
-        attempt. This operation never replays the original command.
+        An already-exited process is confirmed without side effects. A vanished
+        record or an unconfirmable stop invalidates the environment: it is
+        released and `ExecOutcomeUnknown` is raised, like foreground
+        cancellation. Callers must not score the attempt or keep using the
+        environment afterwards. This operation never replays the original
+        command.
         """
         service = self.service
 
@@ -329,6 +333,11 @@ class Process:
             await manager.cancel_execution(
                 service._env.id, run.ready.handles[service.name], ExecAttempt(sent=True, command_id=self.id)
             )
+            if run.released:
+                raise ExecOutcomeUnknown(
+                    "process stop could not be confirmed; environment reclaimed",
+                    command_id=self.id,
+                ) from None
 
         await service._env._client._call(call, settle_cancel=True)
 
