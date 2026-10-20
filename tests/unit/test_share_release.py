@@ -29,7 +29,7 @@ from flotilla.share.release import (
     release_json,
     verify_release,
 )
-from tests.support.platform import FakePlatform, ManualClock, SharedTree
+from flotilla.testing.platform import FakePlatform, ManualClock, SharedTree
 
 SHA = "65ebd81fd085c1d7a6eb4398cb1b3b050a1f249ec68b6f91c8d1e43d4c48cd36"
 

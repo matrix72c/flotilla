@@ -13,7 +13,7 @@ from flotilla.core.anchor import Anchor, AnchorSettings
 from flotilla.core.deletion import Deleter
 from flotilla.core.gc import Gc
 from flotilla.platform.base import ErrorCategory, ExternalPolicy, FlotillaError, InstanceSpec, Resources
-from tests.support.platform import FakePlatform, ManualClock, SharedTree
+from flotilla.testing.platform import FakePlatform, ManualClock, SharedTree
 
 ANCHOR = AnchorSettings(image="anchor@sha256:abc")
 W = 180.0

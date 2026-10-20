@@ -19,7 +19,7 @@ from flotilla.build.files import ExportError, export_task_files
 from flotilla.build.images import BuildSettings
 from flotilla.compose.task import load_task
 from flotilla.manifest import Manifest
-from tests.support.build import DIGEST, DIGEST2, FakeBuilder, FakeExport, FakeRegistry, _ctx, _task
+from flotilla.testing.build import DIGEST, DIGEST2, FakeBuilder, FakeExport, FakeRegistry, _ctx, _task
 
 # ───────────────────────────── Exporting task files ─────────────────────────────
 

@@ -24,7 +24,7 @@ from flotilla.platform.base import (
     ProcessSpec,
     Resources,
 )
-from tests.support.platform import FakePlatform, ManualClock
+from flotilla.testing.platform import FakePlatform, ManualClock
 
 CTX = ExecContext(env={}, uid=0, gid=0, cwd="/")
 ANCHOR = AnchorSettings(image="anchor@sha256:abc")

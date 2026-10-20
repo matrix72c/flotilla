@@ -16,3 +16,7 @@ Initial public release.
 - OpenSandbox backend supporting the `current` and `legacy` execd protocols.
 - CLI: `inspect`, `probe`, `gc`, and `share publish|verify|gc`.
 - Optional Harbor 0.24.0 environment adapter (`flotilla.integrations.harbor:FlotillaEnvironment`).
+
+- Environment-specific inspection and public resource reservations, including per-client anchor overhead.
+- Process waits with bounded observation timeouts, and explicit stop with confirmed termination.
+- Public `flotilla.testing` helpers for downstream contract tests, separate from runtime imports.

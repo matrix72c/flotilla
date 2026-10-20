@@ -11,7 +11,7 @@ import asyncio
 
 import pytest
 
-from tests.support.platform import ManualClock
+from flotilla.testing.platform import ManualClock
 
 
 @pytest.mark.asyncio

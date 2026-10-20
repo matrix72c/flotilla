@@ -24,6 +24,7 @@ dependencies = [
 [project.optional-dependencies]
 # Install the Harbor adapter only for evaluation workloads.
 harbor = ["harbor==0.24.0"]
+testing = ["pytest>=8.3", "pytest-asyncio>=0.25"]
 
 [project.scripts]
 flotilla = "flotilla.cli:main"
@@ -147,6 +148,7 @@ forbidden_modules = [
   "flotilla.cli",
   "flotilla.runtime",
   "flotilla.preparation",
+  "flotilla.testing",
 ]
 
 [[tool.importlinter.contracts]]
@@ -170,7 +172,7 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
-name = "integrations, probe, and cli are outermost and not imported by internal packages"
+name = "integrations, probe, cli, and testing are outermost and not imported by internal packages"
 type = "forbidden"
 source_modules = [
   "flotilla.core",
@@ -182,18 +184,20 @@ source_modules = [
   "flotilla.manifest",
   "flotilla.capabilities",
   "flotilla.config",
+  "flotilla.preparation",
 ]
 forbidden_modules = [
   "flotilla.integrations",
   "flotilla.cli",
   "flotilla.probe",
+  "flotilla.testing",
 ]
 
 [[tool.importlinter.contracts]]
 name = "runtime does not import adapters"
 type = "forbidden"
 source_modules = ["flotilla.runtime"]
-forbidden_modules = ["flotilla.integrations", "flotilla.cli", "flotilla.probe"]
+forbidden_modules = ["flotilla.integrations", "flotilla.cli", "flotilla.probe", "flotilla.testing"]
 
 [[tool.mypy.overrides]]
 module = ["harbor.*"]

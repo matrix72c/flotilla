@@ -19,7 +19,7 @@ from flotilla.config import ResourceDefaults
 from flotilla.manifest import Manifest, Resources
 from flotilla.runtime.planning import to_plan
 from flotilla.scan import scan
-from tests.support.build import FakeBuilder, FakeExport, _caps, _ctx, _task
+from flotilla.testing.build import FakeBuilder, FakeExport, _caps, _ctx, _task
 
 
 def test_volume_name_never_controls_recursive_deletion(tmp_path: Path) -> None:
@@ -222,7 +222,7 @@ def test_resource_policy_is_task_scoped() -> None:
 
 def test_client_configuration_snapshot_cannot_be_mutated_via_public_accessor() -> None:
     from flotilla import Flotilla
-    from tests.support.config import config
+    from flotilla.testing.config import config
 
     original = config(runtime_params={"TOKEN": "original"})
     fleet = Flotilla(deployment=original)

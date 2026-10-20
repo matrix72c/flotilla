@@ -10,8 +10,8 @@ from pydantic import ValidationError
 
 from flotilla.config import ConfigError, FlotillaConfig
 from flotilla.platform.base import ExternalPolicy
-from tests.support.config import SHA, config, config_data
-from tests.support.reports import no, report
+from flotilla.testing.config import SHA, config, config_data
+from flotilla.testing.reports import no, report
 
 # ───────────────────────────── Loading ─────────────────────────────
 

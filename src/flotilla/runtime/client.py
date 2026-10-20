@@ -16,7 +16,7 @@ from types import TracebackType
 from typing import Any
 
 from flotilla.config import FlotillaConfig
-from flotilla.preparation.service import Preparer, inspect
+from flotilla.preparation.service import Preparer, inspect, inspect_environment
 from flotilla.runtime.environment import Environment
 from flotilla.runtime.events import EventDispatcher
 from flotilla.runtime.manager import Manager
@@ -28,6 +28,7 @@ from flotilla.runtime.types import (
     EnvironmentInspection,
     OpenOptions,
     PreparationResidual,
+    ResourceReservation,
     RunRequest,
     RuntimeEvent,
 )
@@ -111,6 +112,14 @@ class Flotilla:
 
     def inspect(self, task_path: str | Path) -> tuple[EnvironmentInspection, ...]:
         return inspect(self._deployment, task_path)
+
+    def inspect_environment(self, definition: EnvironmentDefinition) -> EnvironmentInspection:
+        return inspect_environment(self._deployment, definition)
+
+    def client_reservation(self) -> ResourceReservation:
+        """Per-client anchor overhead, in addition to environment reservations."""
+        resource = self._deployment.anchor_settings().resources
+        return ResourceReservation({"anchor": {"cpu": resource.cpu, "memory": resource.memory}})
 
     async def open_task(self, task_path: str | Path, options: OpenOptions | None = None) -> Environment:
         return await self._open_source(Path(task_path), options)

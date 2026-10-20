@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from flotilla.platform.base import Clock, ErrorCategory, InstanceStatus, Platform
-from tests.support.platform import FakePlatform, ManualClock
+from flotilla.testing.platform import FakePlatform, ManualClock
 
 
 def test_fake_platform_satisfies_protocol(platform: FakePlatform) -> None:

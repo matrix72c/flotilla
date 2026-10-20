@@ -21,7 +21,7 @@ from flotilla.platform.base import (
     ProcessSpec,
     Resources,
 )
-from tests.support.platform import FakePlatform, ManualClock
+from flotilla.testing.platform import FakePlatform, ManualClock
 
 CTX = ExecContext(env={"PATH": "/usr/bin:/bin", "APP": "1"}, uid=1000, gid=1000, cwd="/app")
 OK = ExecResult(exit_code=0, stdout=b"", stderr=b"")

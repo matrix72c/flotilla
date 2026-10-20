@@ -329,6 +329,10 @@ dependencies = [
 harbor = [
     { name = "harbor", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
 ]
+testing = [
+    { name = "pytest", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+    { name = "pytest-asyncio", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -345,9 +349,11 @@ requires-dist = [
     { name = "harbor", marker = "extra == 'harbor'", specifier = "==0.24.0" },
     { name = "httpx", specifier = ">=0.27,<1" },
     { name = "pydantic", specifier = ">=2.10,<3" },
+    { name = "pytest", marker = "extra == 'testing'", specifier = ">=8.3" },
+    { name = "pytest-asyncio", marker = "extra == 'testing'", specifier = ">=0.25" },
     { name = "pyyaml", specifier = ">=6.0,<7" },
 ]
-provides-extras = ["harbor"]
+provides-extras = ["harbor", "testing"]
 
 [package.metadata.requires-dev]
 dev = [

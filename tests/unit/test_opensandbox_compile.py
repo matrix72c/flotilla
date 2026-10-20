@@ -17,7 +17,7 @@ from flotilla.platform.opensandbox.http import Http, RetryPolicy, error_fields, 
 from flotilla.platform.opensandbox.network import NetworkSettings, compile_policy
 from flotilla.platform.opensandbox.storage import StorageSettings
 from flotilla.platform.opensandbox.volumes import compile_host_volumes, compile_pvc_volumes
-from tests.support.platform import ManualClock
+from flotilla.testing.platform import ManualClock
 
 NET = NetworkSettings(sandbox_cidrs=("10.0.0.0/16",), platform_cidrs=("192.168.0.0/24", "169.254.169.254/32"))
 NONE = ExternalPolicy(mode="none")

@@ -23,7 +23,7 @@ from flotilla.share.publish import (
     mark_published,
     publish_task_files,
 )
-from tests.support.platform import FakePlatform, ManualClock, SharedTree
+from flotilla.testing.platform import FakePlatform, ManualClock, SharedTree
 
 KEY = "a" * 64
 ROOT = "pvc:data/opt/flotilla"

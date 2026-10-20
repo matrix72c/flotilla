@@ -28,10 +28,10 @@ from flotilla.platform.opensandbox.http import Http, RetryPolicy
 from flotilla.preparation.service import Preparer
 from flotilla.runtime.events import EventDispatcher
 from flotilla.runtime.types import RuntimeEvent
-from tests.support.environments import FixtureRequest, open_fixture
-from tests.support.platform import FakePlatform, ManualClock, SharedTree
-from tests.support.runtime import deployment as deployment
-from tests.support.runtime import task
+from flotilla.testing.environments import FixtureRequest, open_fixture
+from flotilla.testing.platform import FakePlatform, ManualClock, SharedTree
+from flotilla.testing.runtime import deployment as deployment
+from flotilla.testing.runtime import task
 
 
 def test_binary_multipart_reselects_colliding_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -248,7 +248,7 @@ async def test_anchor_stat_preserves_special_permission_bits(
 
 @pytest.mark.asyncio
 async def test_unknown_fake_command_fails(platform: FakePlatform) -> None:
-    from tests.support.platform import _default_exec_handler
+    from flotilla.testing.platform import _default_exec_handler
 
     with pytest.raises(AssertionError, match="unconfigured"):
         _default_exec_handler("fixture", ProcessSpec(("unimplemented",), 0, 0, "/", {}, 1))

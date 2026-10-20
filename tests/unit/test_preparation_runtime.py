@@ -18,8 +18,8 @@ from flotilla import Flotilla, OpenOptions
 from flotilla.config import FlotillaConfig
 from flotilla.preparation.service import Operation, Preparer
 from flotilla.runtime.manager import Manager
-from tests.support.platform import FakePlatform, SharedTree
-from tests.support.runtime import deployment as deployment
+from flotilla.testing.platform import FakePlatform, SharedTree
+from flotilla.testing.runtime import deployment as deployment
 
 REAL_BUILD_PROCESS = Preparer._build_process
 

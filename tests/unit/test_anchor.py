@@ -10,7 +10,7 @@ import pytest
 from flotilla.core import labels
 from flotilla.core.anchor import Anchor, AnchorSettings
 from flotilla.platform.base import ErrorCategory, ExecResult, FlotillaError, InstanceHandle, InstanceStatus, ProcessSpec
-from tests.support.platform import FakePlatform, ManualClock, SharedTree
+from flotilla.testing.platform import FakePlatform, ManualClock, SharedTree
 
 SETTINGS = AnchorSettings(image="anchor@sha256:abc")
 

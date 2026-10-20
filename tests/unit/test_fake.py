@@ -22,7 +22,7 @@ from flotilla.platform.base import (
     Resources,
     Topology,
 )
-from tests.support.platform import FakePlatform, ManualClock
+from flotilla.testing.platform import FakePlatform, ManualClock
 
 
 def _spec(*, labels: dict[str, str] | None = None, timeout: int = 3600) -> InstanceSpec:

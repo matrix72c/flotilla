@@ -21,9 +21,9 @@ from flotilla.core import labels
 from flotilla.integrations.harbor import FlotillaEnvironment
 from flotilla.integrations.harbor_source import task_environments
 from flotilla.platform.base import ExecResult, FlotillaError, ProcessSpec
-from tests.support.platform import FakePlatform, SharedTree
-from tests.support.reports import report
-from tests.support.runtime import deployment as runtime_deployment
+from flotilla.testing.platform import FakePlatform, SharedTree
+from flotilla.testing.reports import report
+from flotilla.testing.runtime import deployment as runtime_deployment
 
 deployment = runtime_deployment
 
@@ -49,7 +49,7 @@ def test_scan_checks_verifier_context_and_continues_after_invalid_harbor_input(t
     caps = tmp_path / "caps.json"
     caps.write_text(report().dump_json())
     output = tmp_path / "scan.jsonl"
-    from tests.support.config import config_data
+    from flotilla.testing.config import config_data
 
     config = config_data()
     config["opensandbox"]["capabilities"] = str(caps)

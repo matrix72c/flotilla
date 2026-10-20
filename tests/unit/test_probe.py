@@ -16,7 +16,7 @@ from flotilla.capabilities import CapabilityReport, Item
 from flotilla.core.anchor import Anchor, AnchorSettings
 from flotilla.platform.base import ErrorCategory, ExecResult, FlotillaError, InstanceHandle, ProcessSpec
 from flotilla.probe import _INBOUND_TOKEN, PROBE_LABEL, Declared, ProbeSettings, _mounted_subdir, probe
-from tests.support.platform import FakePlatform, ManualClock, SharedTree
+from flotilla.testing.platform import FakePlatform, ManualClock, SharedTree
 
 SETTINGS = ProbeSettings(
     image="reg/unit@sha256:" + "b" * 64, share_release="r1", endpoint="http://os.test", hosts_recheck_s=5.0

@@ -16,7 +16,7 @@ import pytest
 from flotilla.platform.base import ErrorCategory, FlotillaError, InstanceStatus
 from flotilla.platform.opensandbox.http import Http, RetryPolicy
 from flotilla.platform.opensandbox.lifecycle import Lifecycle, metadata_filter, parse_state
-from tests.support.platform import ManualClock
+from flotilla.testing.platform import ManualClock
 
 Handler = Callable[[httpx.Request], httpx.Response]
 

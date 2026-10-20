@@ -10,8 +10,8 @@ from flotilla.core.anchor import Anchor, AnchorSettings
 from flotilla.core.deletion import Deleter
 from flotilla.core.waiting import wait_running
 from flotilla.platform.base import ErrorCategory, FlotillaError
-from tests.support.platform import FakePlatform, ManualClock, SharedTree
-from tests.support.runtime import deployment as deployment
+from flotilla.testing.platform import FakePlatform, ManualClock, SharedTree
+from flotilla.testing.runtime import deployment as deployment
 
 
 def denied() -> FlotillaError:

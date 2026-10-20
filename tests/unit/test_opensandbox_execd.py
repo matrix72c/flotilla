@@ -33,7 +33,7 @@ from flotilla.platform.opensandbox.execd import (
     wrap_argv,
 )
 from flotilla.platform.opensandbox.http import Http, RetryPolicy
-from tests.support.platform import ManualClock
+from flotilla.testing.platform import ManualClock
 
 Handler = Callable[[httpx.Request], httpx.Response]
 
