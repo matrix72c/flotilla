@@ -278,3 +278,18 @@ def test_platform_specific_target_is_not_an_external_hostname() -> None:
 def test_legacy_resource_role_defaults_are_rejected() -> None:
     with pytest.raises(ValueError, match="defaults"):
         config(resources={"defaults": {"agent": {"cpu": "2", "memory": "4Gi"}}})
+
+
+def test_ingress_extension_is_explicit_and_requires_sandbox_id_linking() -> None:
+    assert config().network_settings().ingress == "deployment"
+    data = config_data()
+    data["opensandbox"]["network"]["ingress"] = "sandbox"
+    with pytest.raises(ValueError, match="requires link = sandbox"):
+        FlotillaConfig.from_mapping(data)
+    data["opensandbox"]["network"]["link"] = "sandbox"
+    cfg = FlotillaConfig.from_mapping(data)
+    evidence = report(**{"network.inbound_isolation": {"ok": False, "source": "declared"}})
+    assert cfg.network_settings().ingress == "sandbox"
+    caps = cfg.platform_capabilities(evidence)
+    assert caps.supports_network_none and not caps.inbound_isolation
+    assert not evidence.network.inbound_isolation.ok  # opting in does not fabricate probe evidence

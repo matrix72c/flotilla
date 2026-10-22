@@ -171,7 +171,7 @@ async def _gc(args: argparse.Namespace) -> int:
     """
     cfg = FlotillaConfig.load(args.deployment)
     clock = SystemClock()
-    platform = _platform(cfg, clock, cfg.load_report().to_capabilities())
+    platform = _platform(cfg, clock, cfg.platform_capabilities())
     anchor = Anchor(platform, clock, f"gc-{uuid.uuid4().hex[:12]}", cfg.anchor_settings())
     try:
         await anchor.start()
@@ -229,13 +229,13 @@ async def _share(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 2
-        caps = cfg.load_report().to_capabilities()
+        caps = cfg.platform_capabilities()
     elif args.share_command == "publish" and args.declared is not None:
         # No report exists before the first publish (probe needs a share release); bootstrap from declarations.
         caps = Declared.model_validate_json(args.declared.read_bytes()).bootstrap_capabilities()
         expected = ""
     else:
-        caps = cfg.load_report().to_capabilities()
+        caps = cfg.platform_capabilities()
         expected = ""
     platform = _platform(cfg, clock, caps)
     anchor = Anchor(platform, clock, f"share-{uuid.uuid4().hex[:12]}", cfg.anchor_settings())

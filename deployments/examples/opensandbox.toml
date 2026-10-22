@@ -14,6 +14,9 @@ capabilities = "capabilities.json"
 # sandbox mode supports external = [] / allowlists. If required by the deployment,
 # enable group_extension above to avoid unsupported cross-cluster peer traffic.
 link = "cidr"
+# Default: deployment-provided inbound isolation. If the platform supports sandbox ingress,
+# select link = "sandbox" and ingress = "sandbox" together instead.
+ingress = "deployment"
 sandbox_cidrs = ["10.42.0.0/16"]
 platform_cidrs = ["10.43.0.0/16", "169.254.169.254/32"]
 

@@ -27,10 +27,10 @@ task/
 | `[environment].workdir` | `working_dir` of `main` |
 | `[environment].cpus` | CPU of `main` |
 | `[environment].memory` / `memory_mb` | Memory of `main` (set only one) |
-| `[environment].network_mode` | Only `"public"` is accepted |
-| `[environment].allow_internet` | `true` is accepted; `false` (no network) is rejected. Ignored when `allowed_hosts` is present |
+| `[environment].network_mode` | `"public"` or `"no-network"`; the latter removes external access from all services while preserving their Compose networks |
+| `[environment].allow_internet` | `false` selects `no-network`, `true` selects `public`. Explicit `network_mode` takes precedence; otherwise ignored when `allowed_hosts` is present |
 
-To run a task without outbound access, use `OpenOptions(disable_internet=True)` or Harbor's `no-network` policy instead.
+`OpenOptions(disable_internet=True)` and Harbor's `no-network` policy also remove external access. A task-level restriction survives preparation and cannot be relaxed by caller or deployment defaults. Cluster DNS may remain reachable as described below.
 
 ## Top-level keys
 
@@ -89,6 +89,10 @@ A missing bind source becomes an empty directory, as in Docker (warning), unless
 ## Networking
 
 Services that share a Compose network can reach each other by service name, aliases, `hostname`, and `container_name`. Services on at least one non-`internal` network get the outbound policy from the deployment's `[network].external`; services only on internal networks, or with `network_mode: none`, get no outbound access. `OpenOptions.disable_internet=True` removes outbound access for every service. Multi-service tasks need the deployment's `link` capability and must stay within `link_max_members`.
+
+Offline policies tolerate only explicitly declared cluster DNS resolvers on TCP/UDP port 53. The capability report must list their concrete IPs in `network.cluster_dns` and retain every exception in `network.implicit_egress`. Other implicit destinations, ports, and unrecognized declarations reject offline services during inspection and at runtime. This applies to task-level `no-network`, internal networks, Compose `none`, and the runtime option.
+
+Compose `network_mode: none` also excludes the service from peer links and requires inbound isolation: either the deployment's recorded capability or explicit sandbox ingress enforcement. It isolates service traffic while preserving declared cluster DNS and platform management access; it does not remove the sandbox's network interface. See [OpenSandbox network configuration](backends/opensandbox.md).
 
 ## Variable interpolation
 

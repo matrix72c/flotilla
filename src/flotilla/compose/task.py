@@ -71,7 +71,6 @@ def _load_task(path: Path) -> HarborTask:
         env_dir,
         _table(config, "environment"),
         name=_table(config, "task").get("name") or path.name,
-        findings=tuple(_network_policies(config)),
     )
 
 
@@ -88,6 +87,7 @@ def load_environment(
         raise TaskError("environment context escapes task directory")
     if not isinstance(name, str) or not name:
         raise TaskError("task.name must be a nonempty string")
+    findings = (*findings, *_network_policies({"environment": environment}))
     compose_path = confined(env_dir, COMPOSE_FILE)
     compose: dict[str, Any] = {}
     if compose_path.is_file():
@@ -108,6 +108,12 @@ def load_environment(
     variables = _dotenv(confined(env_dir, ".env"))
     _env_files(overlay, env_dir)
     project = normalize(overlay, variables)
+    if _network_mode(environment, baseline=True) == "no-network":
+        # Preserve peer topology while removing external access from every service. This survives
+        # compilation/publication and cannot be undone by a caller's deployment egress policy.
+        project = replace(
+            project, networks={name: replace(net, internal=True) for name, net in project.networks.items()}
+        )
     if MAIN in project.services:
         declared = dict(project.services[MAIN].resources)
         try:
@@ -138,7 +144,7 @@ def _network_policies(config: Mapping[str, Any]) -> Iterator[Finding]:
     phases = [("environment", _table(config, "environment"), True)]
     for where, table, baseline in phases:
         mode = _network_mode(table, baseline=baseline)
-        if mode is not None and mode != PUBLIC:
+        if mode is not None and mode not in (PUBLIC, "no-network"):
             yield Finding(
                 f"task.toml:{where}.network_mode",
                 "reject",

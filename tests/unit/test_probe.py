@@ -35,6 +35,7 @@ DECLARED = Declared(
     inbound_isolation=_item(False),
     external_forms=frozenset({"none", "allowlist"}),
     implicit_egress=("10.96.0.10:53/udp",),
+    cluster_dns=("10.96.0.10",),
     implicit_egress_declared=_item(True),
     shared_volume=_item(True),
     missing_subpath=_item(False),
@@ -160,6 +161,8 @@ async def test_declared_items_are_copied_verbatim(platform: FakePlatform, clock:
     report = await run_probe(platform, clock)
     assert report.network.link == DECLARED.link and report.runtime.exec_auth == DECLARED.exec_auth
     assert report.network.external_forms == DECLARED.external_forms
+    assert report.network.cluster_dns == DECLARED.cluster_dns
+    assert report.network.implicit_egress == DECLARED.implicit_egress
     assert report.lifecycle.list_visibility_s == 30.0
     assert report.security_gaps() == ["inbound_isolation", "exec_auth", "no_auto_mount"]
 

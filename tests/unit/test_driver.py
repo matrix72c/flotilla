@@ -220,14 +220,35 @@ def test_build_always_compiles_a_new_plan(tmp_path: Path) -> None:
 
 
 def test_build_reports_rejected_task_without_building(tmp_path: Path) -> None:
-    # no-network: rejected by the scan (the first release does not declare disable_internet), never reaches the build.
+    # Unknown network semantics must still be rejected before preparing images.
     task = load_task(
-        _task(tmp_path, "offline", toml='[environment]\ndocker_image = "r.io/a:1"\nnetwork_mode = "no-network"\n')
+        _task(tmp_path, "offline", toml='[environment]\ndocker_image = "r.io/a:1"\nnetwork_mode = "unknown"\n')
     )
     ctx = _ctx()
     out = build_task(task, tmp_path / "out", ctx)
     assert out.status == "rejected" and out.manifest_path is None
     assert ctx.builder.requests == []  # type: ignore[union-attr]
+
+
+@pytest.mark.parametrize("policy", ['network_mode = "no-network"', "allow_internet = false"])
+def test_build_preserves_no_network_and_peer_topology(tmp_path: Path, policy: str) -> None:
+    task = load_task(
+        _task(
+            tmp_path,
+            "offline",
+            toml=f'[environment]\ndocker_image = "r.io/a:1"\n{policy}\n',
+            compose=(
+                "services:\n  main: {}\n  db:\n    image: r.io/b:1\n"
+                "  init:\n    image: r.io/c:1\n    network_mode: none\n"
+            ),
+        )
+    )
+    result = build_task(task, tmp_path / "out", _ctx())
+    assert result.status == "built" and result.manifest_path is not None
+    manifest = Manifest.load_json(result.manifest_path.read_text())
+    assert manifest.external_units == []
+    assert manifest.networks["default"].internal
+    assert set(manifest.networks["default"].members) == {"main", "db"}
 
 
 def test_build_failure_is_reported_not_raised(tmp_path: Path) -> None:

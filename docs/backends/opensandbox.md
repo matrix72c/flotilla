@@ -25,6 +25,12 @@ Storage uses deployment-approved host paths or an existing shared PVC, with conf
 
 Validate the selected peer-target mode against the deployment: support for sandbox-ID policies does not establish support for raw peer-IP/CIDR policies. Record the mode and any required group extension with the capability evidence.
 
+Create uses the common top-level `networkPolicy` field; replacements use `PUT /v1/sandboxes/{id}/networkpolicy` on both upstream OpenSandbox and platforms implementing its compatibility route. Flotilla does not fall back to a provider-specific route or the sidecar API. Upstream's policy schema contains `defaultAction` and `egress`; provider extensions are explicitly selected.
+
+On an internal platform supporting sandbox ingress, set both `opensandbox.network.link="sandbox"` and `opensandbox.network.ingress="sandbox"`. Every instance starts with `ingress={"defaultAction":"allow","rules":[{"action":"deny","from":"sandbox:any","protocol":"ANY"}]}`. Explicit `protocol="ANY"` covers every protocol; the platform defaults an omitted protocol to TCP. Linking replaces both egress and ingress, adding only that service's exact peers to the ingress rule's `except` list. Services with Compose `network_mode: none` stay unlinked and keep the initial deny rule. Platform ingress, execd, and probes remain available. With the default `ingress="deployment"`, no ingress extension is sent; Compose `none` requires the recorded inbound isolation capability, even when the deployment otherwise accepts an inbound-isolation security waiver.
+
+No-network policies use `defaultAction="deny"` with no external allow rules. The only tolerated implicit egress is TCP/UDP 53 to the capability report's explicit `cluster_dns` IPs. Reports and probe declarations retain all `implicit_egress` entries; older reports without `cluster_dns` conservatively reject any implicit egress for offline tasks. Update declarations with resolver evidence and canonical destination strings, rather than deleting exceptions. Enabling an ingress extension does not promote old declarations to probed evidence; verify positive and negative connectivity controls against the actual deployment.
+
 `external="any"` does not mean sandbox subnets are reachable: unlinked sandbox and platform infrastructure ranges remain excluded. Consequently a failed sandbox-to-sandbox request cannot establish inbound isolation. Network test procedure and controls are maintained in [Network validation](../Network_Validation.md).
 
 ## Compatibility verification

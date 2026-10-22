@@ -21,10 +21,15 @@ class NetworkSettings:
     platform_cidrs: tuple[str, ...] = ()  # platform infrastructure (nodes, service ranges, metadata addresses, etc.)
     max_rules: int = 4096  # OPENSANDBOX_EGRESS_MAX_RULES
     link: Literal["cidr", "sandbox"] = "cidr"
+    ingress: Literal["deployment", "sandbox"] = "deployment"
 
     def __post_init__(self) -> None:
         if self.link not in ("cidr", "sandbox"):
             raise ValueError("link must be cidr or sandbox")
+        if self.ingress not in ("deployment", "sandbox"):
+            raise ValueError("ingress must be deployment or sandbox")
+        if self.ingress == "sandbox" and self.link != "sandbox":
+            raise ValueError("ingress = sandbox requires link = sandbox")
         if self.link == "cidr" and not self.sandbox_cidrs:
             raise ValueError("link = cidr requires sandbox_cidrs")
         for c in (*self.sandbox_cidrs, *self.platform_cidrs):
@@ -42,10 +47,12 @@ def compile_policy(
 
     Raises `invalid` when the rule count exceeds `max_rules` (at compile time, without sending a request).
     """
+    peers = tuple(sorted(set(peers)))
+    policy: dict[str, Any]
     if settings.link == "sandbox":
         if external.mode == "any":
             raise _invalid("link = sandbox does not support external = any; use an external allowlist")
-        rules = [{"action": "allow", "target": _sandbox_target(p)} for p in sorted(set(peers))]
+        rules = [{"action": "allow", "target": _sandbox_target(p)} for p in peers]
         if external.mode == "allowlist":
             rules += _allowlist_rules(external, settings)
         policy = {"defaultAction": "deny", "egress": rules}
@@ -67,6 +74,14 @@ def compile_policy(
         raise _invalid(
             f"networkPolicy rule count {len(policy['egress'])} exceeds the deployment limit {settings.max_rules}"
         )
+    if settings.ingress == "sandbox":
+        # Internal-platform extension: upstream accepts only defaultAction/egress. Initially no
+        # sandbox can connect; link replaces both directions using the same exact peer identities.
+        # The platform defaults omitted protocol to TCP, so ANY is required for UDP isolation too.
+        ingress_rule: dict[str, Any] = {"action": "deny", "from": "sandbox:any", "protocol": "ANY"}
+        if peers:
+            ingress_rule["except"] = [_sandbox_target(p) for p in peers]
+        policy["ingress"] = {"defaultAction": "allow", "rules": [ingress_rule]}
     return policy
 
 

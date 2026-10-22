@@ -57,7 +57,7 @@ def inspect_environment(cfg: FlotillaConfig, definition: EnvironmentDefinition) 
 
 
 def _inspect_task(cfg: FlotillaConfig, task: HarborTask) -> EnvironmentInspection:
-    scan = scan_task(task, cfg.load_report().to_capabilities())
+    scan = scan_task(task, cfg.platform_capabilities())
     return EnvironmentInspection(
         definition_of(task),
         scan.status,

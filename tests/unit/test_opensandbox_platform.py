@@ -165,6 +165,44 @@ async def test_create_merges_create_fields(clock: ManualClock, caps: Capabilitie
     assert body["networkPolicy"] == {"defaultAction": "deny", "egress": []}  # managed fields unaffected
 
 
+@pytest.mark.asyncio
+async def test_internal_ingress_blocks_isolated_service_and_preserves_peer_exceptions(
+    clock: ManualClock,
+    caps: Capabilities,
+) -> None:
+    policies: dict[str, Any] = {}
+    ids = iter(["sb-a", "sb-b", "sb-isolated"])
+    writes: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if request.method == "POST" and request.url.path == "/v1/sandboxes":
+            iid = next(ids)
+            policies[iid] = body["networkPolicy"]
+            return httpx.Response(200, json={"id": iid})
+        assert request.method == "PUT" and request.url.path.endswith("/networkpolicy")
+        iid = request.url.path.split("/")[3]
+        writes.append(iid)
+        policies[iid] = body
+        return httpx.Response(200, json={"status": "ok", "mode": "deny_all", "policy": body})
+
+    platform = _platform(handler, clock, caps=caps, settings=NetworkSettings(link="sandbox", ingress="sandbox"))
+    handles = {name: await clock.run(platform.create(_spec(name))) for name in ("a", "b", "isolated")}
+    deny = {"defaultAction": "allow", "rules": [{"action": "deny", "from": "sandbox:any", "protocol": "ANY"}]}
+    assert all(p == {"defaultAction": "deny", "egress": [], "ingress": deny} for p in policies.values())
+    members = {name: handles[name] for name in ("a", "b")}
+    await clock.run(platform.link(members, Topology(networks={"default": frozenset(members)})))
+    assert writes == ["sb-a", "sb-b"]
+    for iid, peer in [("sb-a", "sb-b"), ("sb-b", "sb-a")]:
+        assert policies[iid]["egress"] == [{"action": "allow", "target": f"sandbox:{peer}"}]
+        assert policies[iid]["ingress"]["rules"] == [
+            {"action": "deny", "from": "sandbox:any", "protocol": "ANY", "except": [f"sandbox:{peer}"]}
+        ]
+    assert policies["sb-isolated"] == {"defaultAction": "deny", "egress": [], "ingress": deny}
+    await clock.run(platform.link(members, Topology(networks={})))
+    assert all(p == {"defaultAction": "deny", "egress": [], "ingress": deny} for p in policies.values())
+
+
 @pytest.mark.parametrize("field", sorted(MANAGED_CREATE_FIELDS))
 def test_create_fields_cannot_override_managed_fields(clock: ManualClock, caps: Capabilities, field: str) -> None:
     # Otherwise deployment config could bypass guarantees such as initial isolation, TTL and keeping
