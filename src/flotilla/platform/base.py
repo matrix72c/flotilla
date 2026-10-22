@@ -232,6 +232,13 @@ class ExecAttempt:
     command_id: str | None = None
 
 
+class CommandBusy(FlotillaError):
+    """The exec channel explicitly rejected a command before accepting it. No automatic replay."""
+
+    def __init__(self, message: str, *, stage: Stage):
+        super().__init__(message, stage=stage, category=ErrorCategory.TRANSIENT, retryable=True)
+
+
 class ExecOutcomeUnknown(FlotillaError):
     """Execution may have taken effect. Never turn this into reward or replay it."""
 

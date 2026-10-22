@@ -15,6 +15,7 @@ from typing import Any, Literal
 from urllib.parse import quote
 
 from flotilla.platform.base import (
+    CommandBusy,
     ErrorCategory,
     ExecAttempt,
     ExecOutcomeUnknown,
@@ -272,7 +273,7 @@ class Execd:
                 try:
                     return fold_exec(parse_events(work.result()))
                 except FlotillaError as exc:
-                    if attempt.sent and exc.retryable:
+                    if attempt.sent and exc.retryable and not isinstance(exc, CommandBusy):
                         raise ExecOutcomeUnknown("command response was lost", command_id=attempt.command_id) from None
                     raise
             work.cancel()
@@ -302,7 +303,7 @@ class Execd:
                     attempt.command_id = str(event["text"])
                     return attempt.command_id
         except FlotillaError as error:
-            if not attempt.sent or not error.retryable:
+            if not attempt.sent or not error.retryable or isinstance(error, CommandBusy):
                 raise
         raise ExecOutcomeUnknown("background start outcome is unknown", command_id=attempt.command_id)
 

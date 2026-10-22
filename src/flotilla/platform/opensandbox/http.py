@@ -6,13 +6,22 @@ import asyncio
 import json as json_module
 import logging
 import re
+import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
 
-from flotilla.platform.base import Clock, ErrorCategory, ExecAttempt, ExecOutcomeUnknown, FlotillaError, Stage
+from flotilla.platform.base import (
+    Clock,
+    CommandBusy,
+    ErrorCategory,
+    ExecAttempt,
+    ExecOutcomeUnknown,
+    FlotillaError,
+    Stage,
+)
 
 log = logging.getLogger(__name__)
 
@@ -45,6 +54,10 @@ def error_fields(body: object) -> tuple[str | None, str | None]:
 
 def _str_or_none(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
+
+
+def _safe_id(value: str | None) -> str:
+    return value if value and re.fullmatch(r"[a-zA-Z0-9_-]{1,80}", value) else ""
 
 
 def map_status(status: int, code: str | None) -> tuple[ErrorCategory, bool]:
@@ -194,12 +207,36 @@ class Http:
         3 seconds, so the client read timeout never fires; only a total deadline ends a stream that never closes.
         """
         url = self._prefix + path
+        trace_id = uuid.uuid4().hex
+        background = isinstance(json, Mapping) and json.get("background") is True
+        started_at = self._clock.monotonic()
+        status: int | None = None
+        request_id = ""
+        outcome = "cancelled"
 
         async def read() -> httpx.Response:
+            nonlocal status, request_id
             headers = self._merged({"Accept": "text/event-stream"})
+            log.debug(
+                "execd request send trace_id=%s path=%r stage=%s background=%s monotonic_s=%.6f",
+                trace_id,
+                url,
+                stage,
+                background,
+                self._clock.monotonic(),
+            )
             if attempt is not None:
                 attempt.sent = True
             async with self._client.stream("POST", url, json=json, headers=headers) as response:
+                status = response.status_code
+                request_id = _safe_id(response.headers.get("x-request-id"))
+                log.debug(
+                    "execd response headers trace_id=%s status=%s request_id=%s monotonic_s=%.6f",
+                    trace_id,
+                    status,
+                    request_id,
+                    self._clock.monotonic(),
+                )
                 body = bytearray()
                 pending = bytearray()
                 async for chunk in response.aiter_bytes():
@@ -219,12 +256,55 @@ class Http:
                                 continue
                             if isinstance(event, dict) and event.get("type") == "init" and event.get("text"):
                                 attempt.command_id = str(event["text"])
-                return httpx.Response(response.status_code, content=bytes(body), request=response.request)
+                                log.debug(
+                                    "execd command init trace_id=%s command_id=%s monotonic_s=%.6f",
+                                    trace_id,
+                                    _safe_id(attempt.command_id),
+                                    self._clock.monotonic(),
+                                )
+                return httpx.Response(
+                    response.status_code,
+                    content=bytes(body),
+                    request=response.request,
+                    headers={"x-request-id": request_id},
+                )
 
         async def send() -> httpx.Response:
             return await self._bounded(read(), deadline_s)
 
-        return await self._run(send, lambda r: r.text, stage=stage, idempotent=False, method="POST", path=url)
+        try:
+            result = await self._run(
+                send,
+                lambda r: r.text,
+                stage=stage,
+                idempotent=False,
+                method="POST",
+                path=url,
+                command=path == "/command",
+            )
+            outcome = "response_complete"
+            return result
+        except Exception as exc:
+            outcome = type(exc).__name__
+            raise
+        finally:
+            finished_at = self._clock.monotonic()
+            log.log(
+                logging.DEBUG if outcome == "response_complete" else logging.WARNING,
+                "execd request end trace_id=%s path=%r stage=%s background=%s status=%s request_id=%s "
+                "command_id=%s outcome=%s started_monotonic_s=%.6f monotonic_s=%.6f duration_s=%.6f",
+                trace_id,
+                url,
+                stage,
+                background,
+                status,
+                request_id,
+                _safe_id(attempt.command_id) if attempt else "",
+                outcome,
+                started_at,
+                finished_at,
+                finished_at - started_at,
+            )
 
     async def _bounded(self, aw: Awaitable[httpx.Response], deadline_s: float) -> httpx.Response:
         """Finish `aw` within `deadline_s` on `Clock`, else cancel it and raise `httpx.TimeoutException` (transient)."""
@@ -255,6 +335,7 @@ class Http:
         idempotent: bool,
         method: str,
         path: str,
+        command: bool = False,
     ) -> T:
         """Retry/backoff skeleton: `send` issues the request and reads the body; `extract` gets the success result."""
         delay = self._retry.initial_s
@@ -272,7 +353,7 @@ class Http:
             else:
                 if response.is_success:
                     return extract(response)
-                error = self.error(response, stage=stage, method=method, path=path)
+                error = self.error(response, stage=stage, method=method, path=path, command=command)
                 retry_after = _retry_after(response)
             log.debug("%s %s failed (attempt %d): %s", method, path, attempt, error.category)
             if not idempotent or not _retryable(error.category) or attempt == self._retry.attempts:
@@ -283,20 +364,25 @@ class Http:
         raise AssertionError("unreachable")
 
     @staticmethod
-    def error(response: httpx.Response, *, stage: Stage, method: str, path: str) -> FlotillaError:
+    def error(
+        response: httpx.Response, *, stage: Stage, method: str, path: str, command: bool = False
+    ) -> FlotillaError:
         try:
             code, _detail = error_fields(response.json())
         except ValueError:
             code, _detail = None, None
         category, retryable = map_status(response.status_code, code)
         safe_code = code if code and re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", code) else None
-        request_id = response.headers.get("x-request-id", "")
-        safe_id = request_id if re.fullmatch(r"[a-zA-Z0-9_-]{1,80}", request_id) else ""
+        safe_id = _safe_id(response.headers.get("x-request-id"))
         message = f"{method} {path}: HTTP {response.status_code}"
         if safe_code:
             message += f" ({safe_code})"
         if safe_id:
             message += f" request_id={safe_id}"
+        # CONFLICT is the deployed execd's busy rejection. Other routes, unknown codes, and bare 409s
+        # keep their existing classification; a status alone does not prove a command was rejected as busy.
+        if command and method == "POST" and response.status_code == 409 and code == "CONFLICT":
+            return CommandBusy(message, stage=stage)
         return FlotillaError(message, stage=stage, category=category, retryable=retryable)
 
 

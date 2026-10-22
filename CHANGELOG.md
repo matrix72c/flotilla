@@ -9,6 +9,11 @@ All notable changes to this project are documented here. The format follows [Kee
 - Task-level `network_mode = "no-network"` and `allow_internet = false`, preserving service links while removing external access throughout preparation and execution.
 - Explicit cluster DNS declarations: offline policies tolerate only the declared resolver IPs on TCP/UDP 53 and reject every other implicit egress exception.
 - Opt-in sandbox ingress enforcement using the shared OpenSandbox lifecycle route. Compose `network_mode: none` now checks both outbound exceptions and inbound isolation; upstream requests retain the standard egress-only schema by default.
+- Correlated execd request timing logs for send, response headers, command ID, and stream closure, without command contents or credentials.
+
+### Fixed
+
+- Treat execd command-stream `409 CONFLICT` responses as explicit `CommandBusy` rejections: healthchecks skip that round, foreground and background calls preserve the rejection, and commands are never automatically replayed. Other conflicts retain their existing classification.
 
 ## [0.1.1] - 2026-10-20
 
