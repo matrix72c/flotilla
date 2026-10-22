@@ -8,6 +8,8 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Literal, Protocol, runtime_checkable
 
+from flotilla.platform.network import non_dns_egress
+
 # Error classification
 
 
@@ -107,6 +109,16 @@ class Capabilities:
     # Optional runtimes
     privileged_runtime: bool
     devices: frozenset[str]  # subset of {"fuse", "kvm"}
+    cluster_dns: tuple[str, ...] = ()  # explicitly declared resolver IPs; only TCP/UDP 53 may be implicit
+    sandbox_ingress: bool = False  # backend configured to enforce ingress using sandbox identity rules
+
+    @property
+    def supports_no_network(self) -> bool:
+        return "none" in self.external_forms and not non_dns_egress(self.implicit_egress, self.cluster_dns)
+
+    @property
+    def supports_network_none(self) -> bool:
+        return self.supports_no_network and (self.inbound_isolation or self.sandbox_ingress)
 
 
 # Creation parameters and value objects

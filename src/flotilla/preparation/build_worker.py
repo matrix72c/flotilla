@@ -37,7 +37,7 @@ def run(request: Path) -> None:
     exporter = DockerImageExport(docker_cmd=command, ownership_dir=Path(data["containers"]))
     context = BuildContext(
         settings=cfg.build.settings(),
-        caps=cfg.load_report().to_capabilities(),
+        caps=cfg.platform_capabilities(),
         registry=DockerRegistry(docker_cmd=command),
         builder=DockerBuilder(docker_cmd=command),
         image_export=exporter,

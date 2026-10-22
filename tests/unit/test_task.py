@@ -114,7 +114,9 @@ def test_harbor_fallback_only_when_optional_package_is_absent(
     [
         ("", []),
         ("[environment]\nallow_internet = true\n", []),
-        ("[environment]\nallow_internet = false\n", ["task.toml:environment.network_mode"]),
+        ("[environment]\nallow_internet = false\n", []),
+        ('[environment]\nnetwork_mode = "no-network"\n', []),
+        ('[environment]\nnetwork_mode = "allowlist"\n', ["task.toml:environment.network_mode"]),
         ('[environment]\nnetwork_mode = "public"\nallow_internet = false\n', []),  # explicit network_mode wins
         ('[agent]\nnetwork_mode = "allowlist"\nallowed_hosts = ["a.com"]\n', []),
         ('[verifier]\nnetwork_mode = "no-network"\n', []),
@@ -125,7 +127,7 @@ def test_harbor_fallback_only_when_optional_package_is_absent(
         ),
     ],
 )
-def test_network_policy_other_than_public_rejected(tmp_path: Path, toml: str, rejected: list[str]) -> None:
+def test_network_policy_supported_modes(tmp_path: Path, toml: str, rejected: list[str]) -> None:
     assert _rejects(_task(tmp_path, "n", toml)) == rejected
 
 
@@ -155,7 +157,7 @@ def test_separate_verifier_artifacts_are_supported(tmp_path: Path, toml: str, re
 
 
 def test_scan_task_merges_task_and_deployment_findings(tmp_path: Path, caps: Capabilities) -> None:
-    path = _task(tmp_path, "m", "[environment]\nallow_internet = false\n", compose=COMPOSE)
+    path = _task(tmp_path, "m", '[environment]\nnetwork_mode = "allowlist"\n', compose=COMPOSE)
     result = scan_task(load_task(path), caps)
     assert result.status == "rejected"
     assert result.services == ("db", "main")
@@ -190,7 +192,7 @@ def test_scan_cli_writes_one_line_per_task(tmp_path: Path, capsys: pytest.Captur
     assert {k: v["status"] for k, v in lines.items()} == {
         "broken": "rejected",
         "multi": "accepted",
-        "offline": "rejected",
+        "offline": "accepted",
         "solo": "accepted",
         "unknown-network": "rejected",
     }

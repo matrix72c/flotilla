@@ -8,6 +8,7 @@ import os
 import re
 import tomllib
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
@@ -22,7 +23,7 @@ from flotilla.core.reaper import ReaperSettings
 from flotilla.core.runtime import MonitorSettings
 from flotilla.core.trial import TrialSettings
 from flotilla.manifest import Manifest
-from flotilla.platform.base import ExternalPolicy, Resources
+from flotilla.platform.base import Capabilities, ExternalPolicy, Resources
 from flotilla.platform.opensandbox import ExecdSettings, NetworkSettings, StorageSettings
 
 #: Anchor renewal retry interval (`AnchorSettings.retry_interval_s`); the renew interval cannot be shorter.
@@ -50,6 +51,7 @@ class _Model(BaseModel):
 
 class OpenSandboxNetwork(_Model):
     link: Literal["cidr", "sandbox"] = "cidr"
+    ingress: Literal["deployment", "sandbox"] = "deployment"
     sandbox_cidrs: tuple[str, ...] = ()
     platform_cidrs: tuple[str, ...] = ()
     max_rules: PositiveInt = 4096
@@ -326,6 +328,8 @@ class FlotillaConfig(_Model):
     def _local(self) -> FlotillaConfig:
         problems = []
         net = self.opensandbox.network
+        if net.ingress == "sandbox" and net.link != "sandbox":
+            problems.append("ingress = sandbox requires link = sandbox")
         narrow = () if self.network.external == "any" else self.network.external
         if net.link == "cidr" and not net.sandbox_cidrs:
             problems.append("opensandbox.network.link = cidr requires sandbox_cidrs")
@@ -365,6 +369,11 @@ class FlotillaConfig(_Model):
 
     def load_report(self) -> CapabilityReport:
         return CapabilityReport.load_json(self.capabilities_path().read_bytes())
+
+    def platform_capabilities(self, report: CapabilityReport | None = None) -> Capabilities:
+        """Combine recorded evidence with explicitly configured backend enforcement, retaining the report."""
+        caps = (report or self.load_report()).to_capabilities()
+        return replace(caps, sandbox_ingress=self.opensandbox.network.ingress == "sandbox")
 
     def credential(self, environ: Mapping[str, str] | None = None) -> str:
         """Read the platform credential from the environment; the error names only the variable."""
@@ -459,7 +468,11 @@ class FlotillaConfig(_Model):
     def network_settings(self) -> NetworkSettings:
         n = self.opensandbox.network
         return NetworkSettings(
-            sandbox_cidrs=n.sandbox_cidrs, platform_cidrs=n.platform_cidrs, max_rules=n.max_rules, link=n.link
+            sandbox_cidrs=n.sandbox_cidrs,
+            platform_cidrs=n.platform_cidrs,
+            max_rules=n.max_rules,
+            link=n.link,
+            ingress=n.ingress,
         )
 
     def storage_settings(self) -> StorageSettings:

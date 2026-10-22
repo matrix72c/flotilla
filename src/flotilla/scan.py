@@ -89,6 +89,7 @@ def scan(
 
 def _deployment(project: Project, caps: Capabilities) -> Iterable[Finding]:
     members = [n for n, s in project.services.items() if s.networks]
+    external_networks = {name for name, net in project.networks.items() if not net.internal}
     if len(members) >= 2:
         if not caps.link:
             yield Finding(
@@ -101,6 +102,18 @@ def _deployment(project: Project, caps: Capabilities) -> Iterable[Finding]:
                 f"{len(members)} linked members exceed the deployment limit {caps.link_max_members}",
             )
     for name, svc in project.services.items():
+        if not external_networks.intersection(svc.networks) and not caps.supports_no_network:
+            yield Finding(
+                f"services.{name}.networks",
+                "reject",
+                "no-network requires deny-all egress with only declared cluster DNS exceptions",
+            )
+        if not svc.networks and not (caps.inbound_isolation or caps.sandbox_ingress):
+            yield Finding(
+                f"services.{name}.network_mode",
+                "reject",
+                "network_mode none requires inbound isolation or sandbox ingress enforcement",
+            )
         if svc.udp_ports and not caps.link_udp:
             yield Finding(f"services.{name}.ports", "reject", "UDP ports declared, but this deployment lacks link_udp")
         if svc.privileged and not caps.privileged_runtime:

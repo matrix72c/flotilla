@@ -23,6 +23,7 @@ Durations are in seconds. Relative paths are resolved against the directory cont
 | Key | Default | Meaning |
 |---|---|---|
 | `link` | `"cidr"` | How services reach each other: `"cidr"` (policies use sandbox IP ranges) or `"sandbox"` (policies use `sandbox:<id>` targets) |
+| `ingress` | `"deployment"` | Use deployment-provided inbound isolation, or opt into `"sandbox"` identity-based ingress rules on platforms supporting that extension. Requires `link = "sandbox"`; never sent by default to upstream OpenSandbox |
 | `sandbox_cidrs` | `[]` | Sandbox address ranges. Required when `link = "cidr"` |
 | `platform_cidrs` | `[]` | Platform infrastructure ranges excluded from `external = "any"`. Required for `external = "any"` with `link = "cidr"` |
 | `max_rules` | `4096` | Maximum rules in one network policy |
@@ -168,6 +169,7 @@ Precedence, lowest first: `[resources.default]`, resources declared in the Compo
 | `link_max_members` | Maximum number of sandboxes in one peer-linked group |
 | `external_forms` | Supported outbound policy forms: `"none"`, `"allowlist"`, `"any"` |
 | `implicit_egress` | Destinations the platform allows regardless of policy, as `target:port/protocol` strings |
+| `cluster_dns` | Optional concrete resolver IPs (default `[]`). Offline policies tolerate only matching `IP:53/udp`, `IP:53/tcp`, or comma-separated `tcp,udp` entries in `implicit_egress`; bracket IPv6 addresses, e.g. `[fd00::a]:53/udp`. Keep prose in evidence, not in these entries. No subnet, hostname, wildcard, or port-wide exception is accepted |
 | `devices` | Devices available to privileged services: `"fuse"`, `"kvm"` |
 | `notes` | Free-form notes copied into the report |
 

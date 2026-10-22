@@ -5,9 +5,10 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from flotilla.platform.base import Capabilities
+from flotilla.platform.network import cluster_dns_address
 
 SCHEMA_VERSION = 1
 
@@ -62,6 +63,12 @@ class Network(_Model):
     internal_address: Literal["api", "exec", "none"]  # how the internal address is obtained
     implicit_egress: tuple[str, ...]  # implicit egress declared by the deployment (target:port/proto)
     implicit_egress_declared: Item  # required: declaration is complete
+    cluster_dns: tuple[str, ...] = ()
+
+    @field_validator("cluster_dns")
+    @classmethod
+    def _cluster_dns(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        return tuple(cluster_dns_address(ip) for ip in value)
 
 
 class Storage(_Model):
@@ -160,6 +167,7 @@ class CapabilityReport(_Model):
             inbound_isolation=net.inbound_isolation.ok,
             external_forms=frozenset(net.external_forms),
             implicit_egress=net.implicit_egress,
+            cluster_dns=net.cluster_dns,
             internal_address=net.internal_address,
             shared_volume=self.storage.shared_volume.ok,
             volume_file=self.storage.volume_file.ok,

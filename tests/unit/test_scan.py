@@ -37,6 +37,28 @@ def test_multi_service_needs_link(caps: Capabilities) -> None:
     )
 
 
+@pytest.mark.parametrize("internal", [False, True])
+def test_offline_services_reject_non_dns_exceptions(caps: Capabilities, internal: bool) -> None:
+    project = _project(
+        {} if internal else {"init": {"image": "i", "network_mode": "none"}},
+        networks={"default": {"internal": internal}},
+    )
+    dns = replace(caps, cluster_dns=("10.96.0.10",), implicit_egress=("10.96.0.10:53/udp,tcp",))
+    assert scan("t", project, dns).status == "accepted"
+    extra = replace(dns, implicit_egress=(*dns.implicit_egress, "10.1.1.1:443/tcp"))
+    assert scan("t", project, extra).status == "rejected"
+
+
+def test_none_needs_ingress_but_no_network_preserves_peer_links(caps: Capabilities) -> None:
+    caps = replace(caps, inbound_isolation=False)
+    project = _project({"init": {"image": "i", "network_mode": "none"}})
+    assert scan("t", project, caps).status == "rejected"
+    assert scan("t", project, replace(caps, sandbox_ingress=True)).status == "accepted"
+    internal = _project({"db": {"image": "pg"}}, networks={"default": {"internal": True}})
+    result = scan("t", internal, caps)
+    assert result.status == "accepted" and result.external_units == ()
+
+
 def test_too_many_members(caps: Capabilities) -> None:
     services = {f"s{i}": {"image": "x"} for i in range(10)}
     r = scan("t", _project(services), caps)  # 10 + main = 11 > 10

@@ -42,6 +42,7 @@ def report_data(**overrides: Any) -> dict[str, Any]:
             "external_none": ok(),
             "internal_address": "exec",
             "implicit_egress": ["10.96.0.10:53/udp"],
+            "cluster_dns": ["10.96.0.10"],
             "implicit_egress_declared": ok("declared"),
         },
         "storage": {

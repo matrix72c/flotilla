@@ -81,7 +81,7 @@ class Manager:
             clock=self.clock,
             settings=cfg.network_settings(),
             storage=cfg.storage_settings(),
-            caps=report.to_capabilities(),
+            caps=cfg.platform_capabilities(report),
             execd=cfg.execd_settings(),
             command_gate=command_rate.acquire,
             extensions=cfg.opensandbox.extensions,
@@ -191,8 +191,10 @@ class Manager:
             raise invalid("deployment does not support shared trial volumes")
         if any(unit.privileged for unit in plan.units.values()) and not caps.privileged_runtime:
             raise invalid("deployment does not support privileged services")
-        if request.disable_internet and caps.implicit_egress:
-            raise invalid("strict no-network requires no implicit egress exceptions")
+        if (request.disable_internet or set(plan.units) - plan.external_units) and not caps.supports_no_network:
+            raise invalid("no-network requires deny-all egress with only declared cluster DNS exceptions")
+        if set(plan.units) - members and not caps.supports_network_none:
+            raise invalid("network_mode none requires inbound isolation or sandbox ingress enforcement")
         return plan
 
     async def open(self, eid: str, request: RunRequest, deadline: float) -> EnvironmentInfo:

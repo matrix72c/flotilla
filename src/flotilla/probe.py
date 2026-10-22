@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from flotilla import __version__
 from flotilla.capabilities import (
@@ -37,6 +37,7 @@ from flotilla.platform.base import (
     Resources,
     SharedVolume,
 )
+from flotilla.platform.network import cluster_dns_address
 
 PROBE_LABEL = "flotilla/probe"  # run id; with the launch and unit labels it identifies a probed instance
 _EXEC_TIMEOUT_S = 30.0
@@ -64,6 +65,7 @@ class Declared(BaseModel):
     external_forms: frozenset[ExternalForm]
     implicit_egress: tuple[str, ...]
     implicit_egress_declared: Item
+    cluster_dns: tuple[str, ...] = ()
     shared_volume: Item
     missing_subpath: Item
     no_auto_mount: Item
@@ -74,6 +76,11 @@ class Declared(BaseModel):
     devices: frozenset[Device] = frozenset()
     multi_container: Item
     notes: tuple[str, ...] = ()
+
+    @field_validator("cluster_dns")
+    @classmethod
+    def _cluster_dns(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        return tuple(cluster_dns_address(ip) for ip in value)
 
     @model_validator(mode="after")
     def _consistent(self) -> Declared:
@@ -116,6 +123,7 @@ class Declared(BaseModel):
             inbound_isolation=False,
             external_forms=frozenset({"none"}),
             implicit_egress=self.implicit_egress,
+            cluster_dns=self.cluster_dns,
             internal_address="exec",
             shared_volume=False,
             volume_file=False,
@@ -197,6 +205,7 @@ async def probe(
             external_none=external_none,
             internal_address="exec" if address.ok else "none",  # no address: report validation rejects link = True
             implicit_egress=declared.implicit_egress,
+            cluster_dns=declared.cluster_dns,
             implicit_egress_declared=declared.implicit_egress_declared,
         ),
         storage=Storage(

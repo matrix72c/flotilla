@@ -7,6 +7,7 @@
     "none"
   ],
   "implicit_egress": [],
+  "cluster_dns": [],
   "devices": [],
   "notes": [
     "Template only. Replace limits, targets, and all capability declarations with deployment evidence."

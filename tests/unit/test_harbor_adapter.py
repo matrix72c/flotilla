@@ -10,7 +10,7 @@ import pytest
 
 pytest.importorskip("harbor")
 import toml  # type: ignore[import-untyped]
-from harbor.models.task.config import EnvironmentConfig
+from harbor.models.task.config import EnvironmentConfig, NetworkPolicy
 from harbor.models.trial.paths import TrialPaths
 
 from flotilla import Flotilla
@@ -64,7 +64,13 @@ def test_scan_checks_verifier_context_and_continues_after_invalid_harbor_input(t
         assert task_environments(tasks / name)[1].project.rejected
 
 
-def adapter(tmp_path: Path, cfg: FlotillaConfig, fleet: Flotilla) -> FlotillaEnvironment:
+def adapter(
+    tmp_path: Path,
+    cfg: FlotillaConfig,
+    fleet: Flotilla,
+    *,
+    network_policy: NetworkPolicy | None = None,
+) -> FlotillaEnvironment:
     config = tmp_path / "deployment.toml"
     config.write_text(toml.dumps(cfg.model_dump(exclude_none=True, exclude={"base_dir"})))
     source = tmp_path / "dataset" / "task"
@@ -76,9 +82,47 @@ def adapter(tmp_path: Path, cfg: FlotillaConfig, fleet: Flotilla) -> FlotillaEnv
         session_id="harbor-test",
         trial_paths=TrialPaths(tmp_path / "trial"),
         task_env_config=EnvironmentConfig(docker_image="r.io/main:1"),
+        network_policy=network_policy,
         deployment=str(config),
         fleet=fleet,
     )
+
+
+@pytest.mark.parametrize("extra", [False, True])
+def test_harbor_advertises_no_network_only_for_declared_dns(
+    tmp_path: Path,
+    deployment: tuple[FlotillaConfig, FakePlatform, SharedTree],
+    extra: bool,
+) -> None:
+    cfg, _, _ = deployment
+    data = cfg.load_report().model_dump(mode="json", by_alias=True)
+    data["network"]["cluster_dns"] = ["10.96.0.10"]
+    data["network"]["implicit_egress"] = ["10.96.0.10:53/tcp,udp"]
+    if extra:
+        data["network"]["implicit_egress"].append("10.0.0.1:443/tcp")
+    cfg.capabilities_path().write_text(json.dumps(data))
+    env = adapter(tmp_path, cfg, Flotilla(deployment=cfg))
+    assert env.capabilities.disable_internet is not extra
+
+
+@pytest.mark.asyncio
+async def test_harbor_no_network_overrides_deployment_egress_with_dns_exception(
+    tmp_path: Path,
+    deployment: tuple[FlotillaConfig, FakePlatform, SharedTree],
+) -> None:
+    cfg, platform, _ = deployment
+    cfg = cfg.model_copy(update={"network": cfg.network.model_copy(update={"external": "any"})})
+    data = cfg.load_report().model_dump(mode="json", by_alias=True)
+    data["network"]["cluster_dns"] = ["10.96.0.10"]
+    data["network"]["implicit_egress"] = ["10.96.0.10:53/udp,tcp"]
+    cfg.capabilities_path().write_text(json.dumps(data))
+    platform.caps = cfg.platform_capabilities()
+    async with Flotilla(deployment=cfg) as fleet:
+        env = adapter(tmp_path, cfg, fleet, network_policy=NetworkPolicy(network_mode="no-network"))
+        await env.start()
+        info = await env._env().info()
+        assert platform.spec_of(info.services[0].instance_id).external.mode == "none"
+        await env.stop()
 
 
 @pytest.mark.asyncio

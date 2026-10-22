@@ -107,7 +107,7 @@ class FlotillaEnvironment(BaseEnvironment):  # type: ignore[misc]
     def capabilities(self) -> EnvironmentCapabilities:
         return EnvironmentCapabilities(
             docker_compose=True,
-            disable_internet=not self._cfg.load_report().network.implicit_egress,
+            disable_internet=self._cfg.platform_capabilities().supports_no_network,
         )
 
     @classmethod

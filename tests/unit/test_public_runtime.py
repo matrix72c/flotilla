@@ -234,7 +234,21 @@ async def test_explicit_development_acceptance_allows_operations_and_records_gap
     cfg.capabilities_path().write_text(json.dumps(capability_data))
     platform.caps = cfg.load_report().to_capabilities()
     cfg = cfg.model_copy(update={"security": cfg.security.model_copy(update={"accept_insecure": frozenset(gaps)})})
-    async with Flotilla(deployment=cfg) as fleet, environment(fleet, RunRequest(task(), "development")) as env:
+    from flotilla.manifest import Network
+    from flotilla.runtime.types import Task
+
+    # A general development waiver does not promise Compose network_mode: none isolation.
+    connected = Task(
+        task()
+        .manifest()
+        .model_copy(
+            update={
+                "networks": {"default": Network(internal=False, members=["main"], names={})},
+                "external_units": ["main"],
+            }
+        )
+    )
+    async with Flotilla(deployment=cfg) as fleet, environment(fleet, RunRequest(connected, "development")) as env:
         info = await env.info()
         assert set(info.security_gaps) == gaps
         assert set(info.accepted_security_gaps) == gaps
