@@ -14,6 +14,7 @@ from flotilla.core.plan import ExecContext, RestartPolicy, TrialPlan, Unit
 from flotilla.core.runtime import Monitor, MonitorSettings
 from flotilla.platform.base import (
     ErrorCategory,
+    ExecOutcomeUnknown,
     ExecResult,
     ExternalPolicy,
     FlotillaError,
@@ -323,6 +324,60 @@ async def test_check_transient_query_recovers_within_budget(
     err = await clock.run(monitor.check())  # does not raise
     assert platform.calls["get"] > gets
     assert err is None and monitor.lost is None
+    await monitor.stop()
+
+
+@pytest.mark.asyncio
+async def test_check_confirmed_noop_timeout_recovers_within_budget(
+    platform: FakePlatform, clock: ManualClock, anchor: Anchor
+) -> None:
+    monitor, handles, _ = await _ready(platform, clock, anchor, _plan())
+    attempts = 0
+
+    def execute(iid: str, proc: ProcessSpec) -> ExecResult:
+        nonlocal attempts
+        if iid == handles["db"].iid:
+            attempts += 1
+            if attempts == 1:
+                return ExecResult(-1, b"", b"", timed_out=True)
+        return ExecResult(0, b"", b"")
+
+    platform.set_exec_handler(execute)
+    assert await clock.run(monitor.check()) is None
+    assert attempts == 2 and monitor.lost is None
+    await monitor.stop()
+
+
+@pytest.mark.asyncio
+async def test_check_persistent_noop_timeouts_still_fail_closed(
+    platform: FakePlatform, clock: ManualClock, anchor: Anchor
+) -> None:
+    monitor, _, _ = await _ready(platform, clock, anchor, _plan())
+    platform.set_exec_handler(lambda iid, proc: ExecResult(-1, b"", b"", timed_out=True))
+    err = await clock.run(monitor.check())
+    assert isinstance(err, FlotillaError) and err.category is ErrorCategory.LOST
+    assert "could not confirm health within" in str(err)
+    await monitor.stop()
+
+
+@pytest.mark.asyncio
+async def test_check_unknown_noop_outcome_is_not_retried(
+    platform: FakePlatform, clock: ManualClock, anchor: Anchor
+) -> None:
+    monitor, handles, _ = await _ready(platform, clock, anchor, _plan())
+    attempts = 0
+
+    def execute(iid: str, proc: ProcessSpec) -> ExecResult:
+        nonlocal attempts
+        if iid == handles["db"].iid:
+            attempts += 1
+            raise ExecOutcomeUnknown("probe stop unconfirmed")
+        return ExecResult(0, b"", b"")
+
+    platform.set_exec_handler(execute)
+    err = await clock.run(monitor.check())
+    assert isinstance(err, FlotillaError) and err.category is ErrorCategory.LOST
+    assert attempts == 1 and isinstance(err.__cause__, ExecOutcomeUnknown)
     await monitor.stop()
 
 

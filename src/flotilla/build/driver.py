@@ -114,6 +114,10 @@ def _build(task: HarborTask, out_dir: Path, ctx: BuildContext, result: ScanResul
     exported = export_task_files(project, task.env_dir, files_dir, images=images, image_export=ctx.image_export)
 
     meta, users = _metadata(project, images, ctx)
+    # Capture task identity before changing the container's default user. The
+    # exec daemon needs root to initialize networking/files and switch identities;
+    # service commands and healthchecks still use the original manifest context.
+    runtime_built = _runtime_images(task, images, tag_key, target_dir / "runtime-context", ctx)
     manifest = build_manifest(
         task=task.name,
         build_key=key,
@@ -131,11 +135,42 @@ def _build(task: HarborTask, out_dir: Path, ctx: BuildContext, result: ScanResul
         "built",
         key,
         manifest_path,
-        resolution.dispositions,
-        tuple(resolution.to_build),
+        {**resolution.dispositions, **dict.fromkeys(runtime_built, "build")},
+        tuple(sorted(set(resolution.to_build) | runtime_built)),
         needs_publish=not exported.empty,
         scan=result,
     )
+
+
+def _runtime_images(task: HarborTask, images: dict[str, str], key: str, context: Path, ctx: BuildContext) -> set[str]:
+    """Give the exec daemon root without changing previously captured task metadata.
+
+    This also applies to linked and mirrored images, not just source builds or
+    file derivations. A config-only layer requires no shell in the base image.
+    """
+    changed: set[str] = set()
+    derived: dict[str, str] = {}
+    for service, image in images.items():
+        user = str(ctx.registry.image_config(image).get("User") or "")
+        if user in ("", "0", "0:0"):
+            continue
+        if ctx.builder is None or not ctx.settings.target:
+            raise ImageError(
+                f"service {service} has an image USER requiring a root exec daemon image; "
+                "configure a builder and [build].target"
+            )
+        if image not in derived:
+            context.mkdir(parents=True, exist_ok=True)
+            request = BuildRequest(
+                service=service,
+                tag=image_tag(ctx.settings.target, f"{task.name}-runtime", service, key),
+                context=context,
+                dockerfile_text=f"FROM {image}\nUSER 0:0\n",
+            )
+            derived[image] = f"{ctx.settings.target}@{ctx.builder.build(request)}"
+        images[service] = derived[image]
+        changed.add(service)
+    return changed
 
 
 def _build_one(task: HarborTask, plan: ServiceImage, key: str, ctx: BuildContext) -> str:

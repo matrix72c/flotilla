@@ -137,7 +137,7 @@ class Monitor:
             try:
                 return await self._check()
             except FlotillaError as exc:
-                if exc.category not in (ErrorCategory.TRANSIENT, ErrorCategory.RATE_LIMITED):
+                if not exc.retryable or exc.category not in (ErrorCategory.TRANSIENT, ErrorCategory.RATE_LIMITED):
                     raise
                 log.warning("transient health probe failure, retrying within check budget: %s", exc)
                 await self._clock.sleep(backoff.next())
@@ -174,10 +174,18 @@ class Monitor:
         result = await self._platform.exec(handle, process.own_spec((process.BUSYBOX, "true"), timeout_s=5.0))
         if unit in self._retired:
             return
-        if result.exit_code != 0 or result.timed_out:
-            self.mark_lost(
-                f"unit {unit} exec channel unavailable (no-op {'timed out' if result.timed_out else result.exit_code})"
+        if result.timed_out:
+            # The backend confirmed this read-only probe stopped. A single slow
+            # request is not proof that the exec channel is dead; retry within
+            # check()'s existing overall deadline, just like transport failures.
+            raise FlotillaError(
+                f"unit {unit} no-op probe timed out",
+                stage="run",
+                category=ErrorCategory.TRANSIENT,
+                retryable=True,
             )
+        if result.exit_code != 0:
+            self.mark_lost(f"unit {unit} exec channel unavailable (no-op {result.exit_code})")
             return
         pid = self._pids.get(unit)
         if pid is not None:
