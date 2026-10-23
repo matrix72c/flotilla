@@ -407,14 +407,15 @@ def test_all_image_sources_apply_compose_derivation(tmp_path: Path, source: str,
     if source == "image":
         # Harbor's main_build override replaces main's image when a Dockerfile exists.
         (path / "environment/Dockerfile").unlink()
-    builder = FakeBuilder(digests=[DIGEST, DIGEST2] if source == "build" else [DIGEST2])
+    runtime_digest = "sha256:" + "ef" * 32
+    builder = FakeBuilder(digests=[DIGEST, DIGEST2, runtime_digest] if source == "build" else [DIGEST2, runtime_digest])
     ctx = _ctx(builder=builder, registry=FakeRegistry(user="1000:1001"))
     if source == "prebuilt":
         (path / "task.toml").write_text('[environment]\ndocker_image="r.io/base:1"\n')
     outcome = build_task(load_task(path), tmp_path / "out", ctx)
     manifest = _manifest(outcome)
-    assert len(builder.requests) == (2 if source == "build" else 1)
-    last = builder.requests[-1]
+    assert len(builder.requests) == (3 if source == "build" else 2)
+    last = builder.requests[-2]
     text = last.dockerfile_text
     assert text is not None and f"@{DIGEST}" in text.splitlines()[0]
     assert text.splitlines()[1] == "USER 0:0" and text.splitlines()[-1] == "USER 1000:1001"
@@ -422,12 +423,71 @@ def test_all_image_sources_apply_compose_derivation(tmp_path: Path, source: str,
         assert 'COPY ["payload", "/data"]' in text
     else:
         assert "rm -rf /data/*" in text
-    assert manifest.units["main"].image == f"r.io/ns/out@{DIGEST2}"
+    assert manifest.units["main"].image == f"r.io/ns/out@{runtime_digest}"
+    assert builder.requests[-1].dockerfile_text == f"FROM r.io/ns/out@{DIGEST2}\nUSER 0:0\n"
     assert manifest.units["main"].mounts == []
     assert not outcome.needs_publish
     assert manifest.units["main"].context.uid == 1000
     assert manifest.units["main"].command == ["sh", "-c", "sleep infinity"]  # keep Harbor's agent command override
     assert "CMD " not in text and "ENTRYPOINT " not in text
+
+
+@pytest.mark.parametrize("mirror", [False, True])
+@pytest.mark.parametrize("compose_user", [None, "2000:2001"])
+def test_nonroot_image_keeps_task_context_with_root_daemon(
+    tmp_path: Path, mirror: bool, compose_user: str | None
+) -> None:
+    from flotilla.build.meta import ImageAccounts
+
+    class Registry(FakeRegistry):
+        def image_config(self, pinned: str) -> dict[str, object]:
+            return {
+                "User": "0:0" if pinned.endswith(DIGEST2) else "app:staff",
+                "WorkingDir": "/work",
+                "Env": ["MARKER=original"],
+                "Entrypoint": ["/entrypoint"],
+                "Cmd": ["original-cmd"],
+                "Healthcheck": {"Test": ["CMD", "/health"]},
+            }
+
+    identity = f"    user: '{compose_user}'\n" if compose_user else ""
+    task = load_task(
+        _task(
+            tmp_path,
+            "nonroot",
+            compose=f"services:\n  main:\n    image: r.io/app:1\n    command: null\n{identity}",
+        )
+    )
+    builder = FakeBuilder(digests=[DIGEST2])
+    ctx = _ctx(
+        registry=Registry(),
+        builder=builder,
+        settings=BuildSettings(pullable_registries=("r.io",), target="r.io/ns/out", mirror_images=mirror),
+        image_accounts=lambda _: ImageAccounts("app:x:1000:1001::/home/app:/bin/sh\n", "staff:x:1001:\n"),
+    )
+    outcome = build_task(task, tmp_path / "out", ctx)
+    unit = _manifest(outcome).units["main"]
+    assert (unit.context.uid, unit.context.gid) == ((2000, 2001) if compose_user else (1000, 1001))
+    assert unit.context.cwd == "/work" and unit.context.env == {"MARKER": "original"}
+    assert unit.command == ["/entrypoint", "original-cmd"]
+    assert unit.healthcheck is not None and unit.healthcheck.test == ["/health"]
+    assert unit.image == f"r.io/ns/out@{DIGEST2}"
+    assert outcome.dispositions == {"main": "build"} and outcome.built == ("main",)
+    (request,) = builder.requests
+    assert request.dockerfile_text is not None and request.dockerfile_text.endswith("\nUSER 0:0\n")
+    assert list(request.context.iterdir()) == []
+
+
+@pytest.mark.parametrize("missing", ["builder", "target"])
+def test_nonroot_runtime_image_reports_missing_build_requirements(tmp_path: Path, missing: str) -> None:
+    task = load_task(_task(tmp_path, "nonroot", toml='[environment]\ndocker_image="r.io/app:1"\n'))
+    ctx = _ctx(registry=FakeRegistry(user="1000:1001"))
+    ctx = (
+        replace(ctx, builder=None) if missing == "builder" else replace(ctx, settings=replace(ctx.settings, target=""))
+    )
+    outcome = build_task(task, tmp_path / "out", ctx)
+    assert outcome.status == "failed" and "root exec daemon image" in outcome.reason
+    assert outcome.manifest_path is None
 
 
 def test_concurrent_builds_keep_their_metadata_digest_when_output_tag_is_overwritten(tmp_path: Path) -> None:
