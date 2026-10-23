@@ -13,7 +13,7 @@ from flotilla.compose.layout import classify
 from flotilla.compose.model import Finding, Project
 from flotilla.compose.paths import confined
 from flotilla.compose.task import HarborTask
-from flotilla.platform.base import Capabilities
+from flotilla.platform.base import RESERVED_MOUNTS, Capabilities, overlaps
 
 SHARE_MOUNT = "/.flotilla"
 
@@ -102,6 +102,18 @@ def _deployment(project: Project, caps: Capabilities) -> Iterable[Finding]:
                 f"{len(members)} linked members exceed the deployment limit {caps.link_max_members}",
             )
     for name, svc in project.services.items():
+        try:
+            caps.require_filesystem(
+                svc.readonly_rootfs,
+                svc.tmpfs,
+                privileged=svc.privileged,
+                memory=svc.resources.get("memory"),
+                volume_paths=tuple(m.target for m in svc.volumes),
+            )
+            if svc.readonly_rootfs and not caps.shared_volume:
+                raise ValueError("readonly_rootfs requires shared storage for framework scratch space")
+        except ValueError as exc:
+            yield Finding(f"services.{name}.filesystem", "reject", str(exc))
         if not external_networks.intersection(svc.networks) and not caps.supports_no_network:
             yield Finding(
                 f"services.{name}.networks",
@@ -145,12 +157,19 @@ def _bind_sources(project: Project, env_dir: str, caps: Capabilities) -> Iterabl
 
 
 def _share_conflicts(project: Project) -> Iterable[Finding]:
-    """Reject service volumes, binds, tmpfs, or `working_dir` under `/.flotilla`: the share is mounted there."""
+    """Keep task mounts and working directories out of framework-owned paths."""
     for name, svc in project.services.items():
-        paths = [m.target for m in svc.volumes] + list(svc.tmpfs) + ([svc.working_dir] if svc.working_dir else [])
+        paths = [m.target for m in svc.volumes] + [m.mount_path for m in svc.tmpfs]
         for p in paths:
-            if p == SHARE_MOUNT or p.startswith(SHARE_MOUNT + "/"):
-                yield Finding(f"services.{name}", "reject", f"{p} conflicts with the share mount point {SHARE_MOUNT}")
+            for reserved in RESERVED_MOUNTS:
+                if overlaps(p, reserved):
+                    yield Finding(
+                        f"services.{name}", "reject", f"{p} conflicts with the reserved mount point {reserved}"
+                    )
+        if svc.working_dir and any(
+            svc.working_dir == p or svc.working_dir.startswith(p + "/") for p in RESERVED_MOUNTS
+        ):
+            yield Finding(f"services.{name}.working_dir", "reject", "working directory conflicts with a reserved mount")
 
 
 def _input_paths(project: Project, root: Path) -> Iterable[Finding]:

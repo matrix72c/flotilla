@@ -399,6 +399,16 @@ class FakePlatform:
     # ───────────────────────────── Platform ─────────────────────────────
 
     async def create(self, spec: InstanceSpec) -> InstanceHandle:
+        try:
+            self.caps.require_filesystem(
+                spec.readonly_rootfs,
+                spec.tmpfs_mounts,
+                privileged=spec.privileged,
+                memory=spec.resources.memory,
+                volume_paths=tuple(m.mount_path for m in spec.volumes),
+            )
+        except ValueError as exc:
+            raise FlotillaError(str(exc), stage="create", category=ErrorCategory.INVALID, retryable=False) from exc
         max_ttl = self.caps.max_ttl_seconds
         if spec.timeout_seconds <= 0 or (max_ttl is not None and spec.timeout_seconds > max_ttl):
             raise FlotillaError(
@@ -522,7 +532,26 @@ class FakePlatform:
         fault = await self._call("write_file")
         if fault is not None:
             raise fault.error
-        self._require(handle.iid).files[path] = data
+        inst = self._require(handle.iid)
+        if inst.spec.readonly_rootfs or inst.spec.tmpfs_mounts:
+
+            def under(target: str) -> bool:
+                return path == target or path.startswith(target.rstrip("/") + "/")
+
+            candidates = sorted((m for m in inst.spec.volumes if under(m.mount_path)), key=lambda m: -len(m.mount_path))
+            tmpfs = next((m for m in inst.spec.tmpfs_mounts if under(m.mount_path)), None)
+            writable = not candidates[0].read_only if candidates else not inst.spec.readonly_rootfs
+            if not writable and tmpfs is None and path != "/etc/hosts":
+                raise FlotillaError(
+                    "read-only file system", stage="run", category=ErrorCategory.INVALID, retryable=False
+                )
+            if tmpfs is not None:
+                used = sum(len(b) for p, b in inst.files.items() if p != path and p.startswith(tmpfs.mount_path + "/"))
+                if used + len(data) > tmpfs.size_bytes:
+                    raise FlotillaError(
+                        "no space left on device", stage="run", category=ErrorCategory.INVALID, retryable=False
+                    )
+        inst.files[path] = data
         tree = self.shared_tree
         if tree is not None and path.startswith(tree.mount):
             key = path[len(tree.mount) :]

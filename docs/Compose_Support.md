@@ -58,12 +58,12 @@ Top-level networks support `internal: true`. `driver` must be `bridge`, `ipam` m
 | `depends_on` | List or map. Conditions `service_started`, `service_healthy`, `service_completed_successfully`, and `required` are supported |
 | `healthcheck` | `test`, `interval`, `timeout`, `retries`, `start_period`, `start_interval`, `disable`. `test` must be given (inheriting the image's test is rejected); `["NONE"]` or `disable: true` turns the image's healthcheck off |
 | `volumes` | See [Volumes and bind mounts](#volumes-and-bind-mounts) |
-| `tmpfs`, `type: tmpfs` | Equivalent: the directory is emptied at build time, not mounted as tmpfs. Options such as `size` are rejected |
+| `tmpfs`, `type: tmpfs` | Native memory mounts; requires verified `native_tmpfs`. Short syntax supports size/mode/uid/gid; long syntax supports size/mode. No directory emulation |
 | `networks` | List or map with `aliases`. Static `ipv4_address`/`ipv6_address` are rejected |
 | `network_mode` | Only `none`. `host`, `bridge`, `service:*`, and `container:*` are rejected |
 | `ports`, `expose` | Equivalent: nothing is published, and services on a shared network reach every port. Port ranges and protocols other than TCP/UDP are rejected; UDP requires the deployment's `link_udp` capability |
 | `restart` | `no` is supported. `always` and `unless-stopped` are equivalent: services are not restarted, and the run is marked void if a service exits in a way Docker would have restarted. `on-failure` is rejected |
-| `read_only` | `false` only; `true` is rejected |
+| `read_only` | Service root filesystem protection; `true` requires verified `readonly_rootfs`. Independent of volume read-only flags |
 | `privileged` | Requires the deployment's `privileged_runtime` capability (warning when supported) |
 | `hostname`, `container_name` | Added as names other services can resolve. `hostname` is a warning: `gethostname()` inside the sandbox still returns the platform's name |
 | `cpus`, `mem_limit`, `deploy.resources.limits.{cpus,memory}` | Supported; if both forms are given they must agree. Memory units are binary (`g` = GiB) |
@@ -85,6 +85,8 @@ Flotilla decides how to provide each volume from how it is used:
 | Several references, at least one writable | A per-environment shared directory, seeded from the image or the bind source. Requires the deployment's `shared_volume` capability |
 
 A missing bind source becomes an empty directory, as in Docker (warning), unless `create_host_path: false`. Mounting a single file that is not copied into an image requires the `volume_file` capability.
+
+For read-only root filesystems, even single-service writable volumes/binds use real environment-owned mounts. Framework scratch space is mounted explicitly at `/.flotilla-runtime`; this path and `/.flotilla` are reserved. See [read-only rootfs and tmpfs](Readonly_Rootfs_and_Tmpfs.md) for deployment selection, supported syntax, limits, defaults and migration from directory emulation.
 
 ## Networking
 

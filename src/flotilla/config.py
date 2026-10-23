@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import ipaddress
+import json
 import logging
 import os
 import re
@@ -25,6 +27,7 @@ from flotilla.core.trial import TrialSettings
 from flotilla.manifest import Manifest
 from flotilla.platform.base import Capabilities, ExternalPolicy, Resources
 from flotilla.platform.opensandbox import ExecdSettings, NetworkSettings, StorageSettings
+from flotilla.platform.opensandbox.filesystem import FilesystemProtocol, FilesystemSettings
 
 #: Anchor renewal retry interval (`AnchorSettings.retry_interval_s`); the renew interval cannot be shorter.
 ANCHOR_RETRY_S = AnchorSettings(image="x").retry_interval_s
@@ -77,6 +80,7 @@ class OpenSandbox(_Model):
     privileged_extensions: dict[str, Any] = {}
     network: OpenSandboxNetwork = OpenSandboxNetwork()
     execd: OpenSandboxExecd = OpenSandboxExecd()
+    filesystem_protocol: FilesystemProtocol = "upstream"
     create_fields: dict[str, Any] = {}
     group_extension: str | None = (
         None  # `extensions` key for the placement group; unset if the deployment lacks group scheduling
@@ -372,8 +376,30 @@ class FlotillaConfig(_Model):
 
     def platform_capabilities(self, report: CapabilityReport | None = None) -> Capabilities:
         """Combine recorded evidence with explicitly configured backend enforcement, retaining the report."""
-        caps = (report or self.load_report()).to_capabilities()
-        return replace(caps, sandbox_ingress=self.opensandbox.network.ingress == "sandbox")
+        report = report or self.load_report()
+        caps = report.to_capabilities()
+        matched = report.filesystem_profile == self.filesystem_profile()
+        caps = replace(
+            caps,
+            sandbox_ingress=self.opensandbox.network.ingress == "sandbox",
+            readonly_rootfs=caps.readonly_rootfs and matched,
+            native_tmpfs=caps.native_tmpfs and matched,
+        )
+        return self.filesystem_settings().capabilities(caps)
+
+    def filesystem_settings(self) -> FilesystemSettings:
+        return FilesystemSettings(self.opensandbox.filesystem_protocol)
+
+    def filesystem_profile(self) -> str:
+        """Evidence applies to these creation/runtime settings, never just a hostname."""
+        settings = self.opensandbox
+        data = [
+            settings.filesystem_protocol,
+            settings.extensions,
+            settings.privileged_extensions,
+            settings.create_fields,
+        ]
+        return hashlib.sha256(json.dumps(data, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
     def credential(self, environ: Mapping[str, str] | None = None) -> str:
         """Read the platform credential from the environment; the error names only the variable."""

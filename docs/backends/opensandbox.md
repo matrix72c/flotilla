@@ -27,6 +27,8 @@ To investigate command conflicts, enable DEBUG on the Python logger `flotilla.pl
 
 ## Storage and network
 
+Lifecycle filesystem extensions are selected independently with `opensandbox.filesystem_protocol`. The default `"upstream"` sends no extension fields. `"sandbox-system-v1"` maps verified read-only-root and native-tmpfs requirements to the internal API, checks effective configuration before startup, and treats unsupported requests as non-retryable. See [filesystem integration and verification](../Readonly_Rootfs_and_Tmpfs.md).
+
 Storage uses deployment-approved host paths or an existing shared PVC, with confined relative subpaths. The anchor mounts the root; task instances receive only their specified mounts. The controlled anchor image includes BusyBox `stat` for numeric metadata, including setuid/setgid/sticky bits.
 
 `opensandbox.network.link="cidr"` requires accurate sandbox CIDRs. `link="sandbox"` uses explicit `sandbox:<id>` peer targets and supports none/allowlist external policies. The optional `group_extension` is used only when the deployment implements that extension; it groups a trial, rather than pinning a worker node.

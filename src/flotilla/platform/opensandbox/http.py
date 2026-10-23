@@ -68,6 +68,8 @@ def map_status(status: int, code: str | None) -> tuple[ErrorCategory, bool]:
         return ErrorCategory.CAPACITY, True
     if status == 404:
         return ErrorCategory.NOT_FOUND, False
+    if status == 501:
+        return ErrorCategory.INVALID, False
     if status >= 500:
         return ErrorCategory.TRANSIENT, True
     return ErrorCategory.INVALID, False

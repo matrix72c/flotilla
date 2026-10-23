@@ -13,7 +13,7 @@ import pytest
 import pytest_asyncio
 
 from flotilla.core.anchor import Anchor, AnchorSettings
-from flotilla.manifest import Manifest
+from flotilla.manifest import SCHEMA_VERSION, Manifest
 from flotilla.platform.base import ErrorCategory, ExecResult, FlotillaError, InstanceHandle, ProcessSpec
 from flotilla.share.publish import (
     FILES_JSON,
@@ -163,7 +163,7 @@ async def test_publish_detects_corrupted_upload(
 def _manifest() -> Manifest:
     return Manifest.model_validate(
         {
-            "schema": 4,
+            "schema": SCHEMA_VERSION,
             "task": "ds/t",
             "build_key": KEY,
             "agent_service": "main",

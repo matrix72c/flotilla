@@ -81,6 +81,7 @@ class Storage(_Model):
     no_auto_mount: Item  # security
     dir_management: Item  # required
     volume_file: Item  # feature
+    native_tmpfs: Item = Item(ok=False, source="declared", evidence="not measured")
 
 
 class Runtime(_Model):
@@ -95,6 +96,7 @@ class Runtime(_Model):
     devices: frozenset[Device]  # devices exposed when privileged
     image_digest: Item  # required
     multi_container: Item  # recorded only; not supported by the current interface
+    readonly_rootfs: Item = Item(ok=False, source="declared", evidence="not measured")
 
 
 class CapabilityReport(_Model):
@@ -109,6 +111,7 @@ class CapabilityReport(_Model):
     storage: Storage
     runtime: Runtime
     notes: tuple[str, ...] = ()
+    filesystem_profile: str | None = None  # binds optional evidence to the lifecycle dialect and runtime settings
 
     model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
 
@@ -175,6 +178,8 @@ class CapabilityReport(_Model):
             exec_auth=self.runtime.exec_auth.ok,
             privileged_runtime=self.runtime.privileged_runtime.ok,
             devices=frozenset(self.runtime.devices) if self.runtime.privileged_runtime.ok else frozenset(),
+            readonly_rootfs=self.runtime.readonly_rootfs.ok and self.runtime.readonly_rootfs.source == "probed",
+            native_tmpfs=self.storage.native_tmpfs.ok and self.storage.native_tmpfs.source == "probed",
         )
 
     def dump_json(self) -> str:

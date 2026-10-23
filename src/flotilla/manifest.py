@@ -6,7 +6,9 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-SCHEMA_VERSION = 4
+from flotilla.platform.base import TmpfsMount
+
+SCHEMA_VERSION = 5
 
 Condition = Literal["service_started", "service_healthy", "service_completed_successfully"]
 RestartPolicy = Literal["no", "always", "unless-stopped", "on-failure"]
@@ -55,6 +57,8 @@ class Unit(_Model):
     restart: RestartPolicy = "no"
     mounts: list[Mount] = []
     privileged: bool = False
+    readonly_rootfs: bool = False
+    tmpfs_mounts: list[TmpfsMount] = []
 
 
 class Network(_Model):

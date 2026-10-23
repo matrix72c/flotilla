@@ -28,9 +28,11 @@ from flotilla.platform.base import (
     ProcessSpec,
     Resources,
     SharedVolume,
+    TmpfsMount,
     Topology,
 )
 from flotilla.platform.opensandbox import ExecdSettings, OpenSandboxPlatform, StorageSettings, build
+from flotilla.platform.opensandbox.filesystem import UPSTREAM_FILESYSTEM, FilesystemSettings
 from flotilla.platform.opensandbox.network import NetworkSettings
 from flotilla.platform.opensandbox.platform import EXECD_TOKEN_HEADER, MANAGED_CREATE_FIELDS
 from flotilla.testing.platform import ManualClock
@@ -66,6 +68,7 @@ def _platform(
     extensions: dict[str, object] | None = None,
     group_extension: str | None = None,
     settings: NetworkSettings = SETTINGS,
+    filesystem: FilesystemSettings = UPSTREAM_FILESYSTEM,
 ) -> OpenSandboxPlatform:
     return build(
         endpoint="http://os.test",
@@ -79,6 +82,7 @@ def _platform(
         create_fields=create_fields,
         group_extension=group_extension,
         transport=httpx.MockTransport(handler),
+        filesystem=filesystem,
     )
 
 
@@ -163,6 +167,164 @@ async def test_create_merges_create_fields(clock: ManualClock, caps: Capabilitie
     body = await _create_body(clock, caps, _spec("db"), create_fields={"ports": PORTS})
     assert body["ports"] == PORTS
     assert body["networkPolicy"] == {"defaultAction": "deny", "egress": []}  # managed fields unaffected
+
+
+@pytest.mark.asyncio
+async def test_filesystem_wire_format_is_explicit_and_upstream_unchanged(
+    clock: ManualClock, caps: Capabilities
+) -> None:
+    body = await _create_body(clock, caps, _spec("db"))
+    assert "readOnlyRootFilesystem" not in body and "tmpfsMounts" not in body
+    caps = dataclasses.replace(caps, readonly_rootfs=True, native_tmpfs=True)
+    spec = dataclasses.replace(
+        _spec("db"), readonly_rootfs=True, tmpfs_mounts=(TmpfsMount("/tmp", 16777216, 0o750, 1000, 1001),)
+    )
+    with pytest.raises(FlotillaError, match="readonly_rootfs") as failure:
+        await _create_body(clock, caps, spec)
+    assert not failure.value.retryable
+    body = await _create_body(clock, caps, spec, filesystem=FilesystemSettings("sandbox-system-v1"))
+    assert body["readOnlyRootFilesystem"] is True
+    assert body["tmpfsMounts"] == [{"mountPath": "/tmp", "size": "16777216", "mode": "0750", "uid": 1000, "gid": 1001}]
+    default = await _create_body(clock, caps, _spec("plain"), filesystem=FilesystemSettings("sandbox-system-v1"))
+    assert default["readOnlyRootFilesystem"] is False and default["tmpfsMounts"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("effective", [None, False, True])
+async def test_effective_rootfs_is_checked_after_id_adoption_and_can_be_deleted(
+    clock: ManualClock,
+    caps: Capabilities,
+    effective: bool | None,
+) -> None:
+    seen: list[str] = []
+    body: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.method)
+        if request.method == "POST":
+            body.update(json.loads(request.content))
+            return httpx.Response(200, json={"id": "fs"})
+        if request.method == "DELETE":
+            return httpx.Response(204)
+        response: dict[str, Any] = {"id": "fs", "status": {"state": "Running"}, "metadata": body["metadata"]}
+        if effective is not None:
+            response.update(readOnlyRootFilesystem=effective, tmpfsMounts=[])
+        return httpx.Response(200, json=response)
+
+    platform = _platform(
+        handler,
+        clock,
+        caps=dataclasses.replace(caps, readonly_rootfs=True),
+        filesystem=FilesystemSettings("sandbox-system-v1"),
+    )
+    handle = await clock.run(platform.create(dataclasses.replace(_spec("db"), readonly_rootfs=True)))
+    assert handle.iid == "fs"  # caller can register cleanup before verification
+    if effective is True:
+        state = await clock.run(platform.get(handle.iid))
+        assert state.filesystem and state.filesystem.readonly_rootfs
+    else:
+        with pytest.raises(FlotillaError, match="effective filesystem") as failure:
+            await clock.run(platform.get(handle.iid))
+        assert not failure.value.retryable
+    await clock.run(platform.delete(handle.iid))
+    assert seen == ["POST", "GET", "DELETE"]
+    await platform.aclose()
+
+
+@pytest.mark.asyncio
+async def test_unsupported_filesystem_501_never_retries_or_removes_fields(
+    clock: ManualClock, caps: Capabilities
+) -> None:
+    requests: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(
+            501, json={"code": "NOT_SUPPORTED", "message": "runtime does not support readonly rootfs"}
+        )
+
+    platform = _platform(
+        handler,
+        clock,
+        caps=dataclasses.replace(caps, readonly_rootfs=True),
+        filesystem=FilesystemSettings("sandbox-system-v1"),
+    )
+    with pytest.raises(FlotillaError) as failure:
+        await clock.run(platform.create(dataclasses.replace(_spec("db"), readonly_rootfs=True)))
+    assert failure.value.category is ErrorCategory.INVALID and not failure.value.retryable
+    assert len(requests) == 1 and requests[0]["readOnlyRootFilesystem"] is True
+    await platform.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", ["64Mi", "67108864", "128Mi"])
+async def test_tmpfs_effective_capacity_is_compared_after_normalization(
+    clock: ManualClock,
+    caps: Capabilities,
+    size: str,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(200, json={"id": "fs"})
+        return httpx.Response(
+            200,
+            json={
+                "id": "fs",
+                "status": {"state": "Running"},
+                "readOnlyRootFilesystem": False,
+                "tmpfsMounts": [{"mountPath": "/tmp", "size": size, "mode": "1777", "uid": 0, "gid": 0}],
+            },
+        )
+
+    platform = _platform(
+        handler,
+        clock,
+        caps=dataclasses.replace(caps, native_tmpfs=True),
+        filesystem=FilesystemSettings("sandbox-system-v1"),
+    )
+    handle = await clock.run(platform.create(dataclasses.replace(_spec("db"), tmpfs_mounts=(TmpfsMount("/tmp"),))))
+    if size == "128Mi":
+        with pytest.raises(FlotillaError, match="effective filesystem"):
+            await clock.run(platform.get(handle.iid))
+    else:
+        assert (await clock.run(platform.get(handle.iid))).filesystem is not None
+    await platform.aclose()
+
+
+@pytest.mark.asyncio
+async def test_lost_create_response_retains_filesystem_requirements_during_reconciliation(
+    clock: ManualClock,
+    caps: Capabilities,
+) -> None:
+    metadata: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            metadata.update(json.loads(request.content)["metadata"])
+            raise httpx.ReadTimeout("lost create response", request=request)
+        state = {
+            "id": "recovered",
+            "metadata": metadata,
+            "status": {"state": "Running"},
+            "readOnlyRootFilesystem": False,
+            "tmpfsMounts": [],
+        }
+        return httpx.Response(200, json={"items": [state]} if request.url.path.endswith("/sandboxes") else state)
+
+    platform = _platform(
+        handler,
+        clock,
+        caps=dataclasses.replace(caps, readonly_rootfs=True),
+        filesystem=FilesystemSettings("sandbox-system-v1"),
+    )
+    with pytest.raises(FlotillaError) as failure:
+        await clock.run(platform.create(dataclasses.replace(_spec("db"), readonly_rootfs=True)))
+    assert failure.value.category is ErrorCategory.TRANSIENT
+    found = await clock.run(platform.list({"flotilla/unit": "db"}))
+    assert len(found) == 1
+    with pytest.raises(FlotillaError, match="effective filesystem"):
+        await clock.run(platform.get(found[0].iid))
+    await platform.aclose()
 
 
 @pytest.mark.asyncio

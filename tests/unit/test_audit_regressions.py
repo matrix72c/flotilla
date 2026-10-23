@@ -142,7 +142,10 @@ def test_tmpfs_is_derived_and_container_alias_is_written(tmp_path: Path) -> None
         )
     )
     builder = FakeBuilder()
-    outcome = build_task(task, tmp_path / "out", replace(_ctx(), builder=builder))
+    ctx = _ctx()
+    outcome = build_task(
+        task, tmp_path / "out", replace(ctx, builder=builder, caps=replace(ctx.caps, native_tmpfs=True))
+    )
     assert outcome.status == "built", outcome.reason
     assert builder.requests and "/cache" in str(builder.requests[-1].dockerfile_text)
     assert "/scratch" in str(builder.requests[-1].dockerfile_text)

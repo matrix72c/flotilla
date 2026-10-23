@@ -34,6 +34,7 @@ def _platform(cfg: FlotillaConfig, clock: SystemClock, caps: Capabilities) -> Op
         storage=cfg.storage_settings(),
         caps=caps,
         execd=cfg.execd_settings(),
+        filesystem=cfg.filesystem_settings(),
         extensions=cfg.opensandbox.extensions,
         create_fields=cfg.opensandbox.create_fields,
         group_extension=cfg.opensandbox.group_extension,
@@ -118,6 +119,7 @@ async def _probe(args: argparse.Namespace) -> int:
                 share_release=cfg.share.release,
                 endpoint=cfg.opensandbox.endpoint,
                 hosts_recheck_s=args.hosts_recheck,
+                filesystem_profile=cfg.filesystem_profile(),
             )
             report = await probe(platform, clock, anchor, declared, settings)
         finally:

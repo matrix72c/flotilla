@@ -137,4 +137,6 @@ def _unit(u: ManifestUnit, env: dict[str, str], resources: Resources | None) -> 
         restart=u.restart,
         mounts=tuple(Mount(scope=m.scope, key=m.key, target=m.target, read_only=m.read_only) for m in u.mounts),
         privileged=u.privileged,
+        readonly_rootfs=u.readonly_rootfs,
+        tmpfs_mounts=tuple(u.tmpfs_mounts),
     )

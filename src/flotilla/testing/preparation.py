@@ -8,6 +8,7 @@ from pathlib import Path
 from flotilla.build.driver import build_task
 from flotilla.build.keys import files_json
 from flotilla.compose.task import load_environment
+from flotilla.config import FlotillaConfig
 from flotilla.preparation.service import Preparer
 from flotilla.testing.build import _ctx
 
@@ -21,7 +22,8 @@ async def fake_build_process(self: Preparer, request: Path) -> None:
     task = load_environment(
         Path(definition["task_root"]), Path(definition["directory"]), config, name=definition["name"]
     )
-    outcome = build_task(task, Path(data["work"]), _ctx())
+    cfg = FlotillaConfig.from_mapping(data["config"])
+    outcome = build_task(task, Path(data["work"]), _ctx(caps=cfg.platform_capabilities()))
     if outcome.manifest_path is None:
         raise ValueError(outcome.reason)
     result = outcome.to_json()

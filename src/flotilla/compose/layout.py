@@ -62,8 +62,9 @@ def classify(services: Mapping[str, Service]) -> Layout:
                 bind_refs.append((name, posixpath.normpath(m.source), m.target, m.read_only))
             order.append((name, m.target))
 
-    volumes = tuple(_volume_plan(v, refs) for v, refs in sorted(vol_refs.items()))
-    binds = _bind_groups(bind_refs)
+    readonly = {name for name, svc in services.items() if svc.readonly_rootfs}
+    volumes = tuple(_volume_plan(v, refs, readonly) for v, refs in sorted(vol_refs.items()))
+    binds = _bind_groups(bind_refs, readonly)
 
     by_target: dict[tuple[str, str], MountPlan] = {}
     for vp in volumes:
@@ -94,17 +95,17 @@ def classify(services: Mapping[str, Service]) -> Layout:
     )
 
 
-def _volume_plan(name: str, refs: list[tuple[str, str, bool, bool]]) -> VolumePlan:
+def _volume_plan(name: str, refs: list[tuple[str, str, bool, bool]], readonly: set[str]) -> VolumePlan:
     if all(ro for _, _, ro, _ in refs):
         mode: Literal["task_ro", "local", "trial"] = "task_ro"
-    elif len(refs) == 1:
+    elif len(refs) == 1 and refs[0][0] not in readonly:
         mode = "local"
     else:
         mode = "trial"
     return VolumePlan(name=name, mode=mode, references=tuple(refs))
 
 
-def _bind_groups(refs: list[tuple[str, str, str, bool]]) -> tuple[BindGroup, ...]:
+def _bind_groups(refs: list[tuple[str, str, str, bool]], readonly: set[str]) -> tuple[BindGroup, ...]:
     """Group by source containment: equal sources or subpaths share a group (transitively). Numbered by root."""
     sources = sorted({src for _, src, _, _ in refs}, key=lambda s: (s.count("/"), s))
     roots: list[str] = []
@@ -118,7 +119,7 @@ def _bind_groups(refs: list[tuple[str, str, str, bool]]) -> tuple[BindGroup, ...
         writers = [r for r in members if not r[3]]
         if not writers:
             mode: Literal["task_ro", "image", "trial"] = "task_ro"
-        elif len(members) == 1:
+        elif len(members) == 1 and members[0][0] not in readonly:
             mode = "image"
         else:
             mode = "trial"
