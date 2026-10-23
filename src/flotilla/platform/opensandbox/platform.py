@@ -18,10 +18,12 @@ from flotilla.platform.base import (
     ExecAttempt,
     ExecResult,
     ExternalPolicy,
+    FilesystemState,
     FlotillaError,
     InstanceHandle,
     InstanceSpec,
     InstanceState,
+    InstanceStatus,
     ProcessSpec,
     ProcessStatus,
     Stage,
@@ -29,6 +31,7 @@ from flotilla.platform.base import (
 )
 from flotilla.platform.opensandbox import address
 from flotilla.platform.opensandbox.execd import Execd, ExecdSettings
+from flotilla.platform.opensandbox.filesystem import UPSTREAM_FILESYSTEM, FilesystemSettings
 from flotilla.platform.opensandbox.http import DEFAULT_RETRY, Http, RetryPolicy
 from flotilla.platform.opensandbox.lifecycle import Lifecycle
 from flotilla.platform.opensandbox.network import NetworkSettings, compile_policy
@@ -58,6 +61,8 @@ MANAGED_CREATE_FIELDS = frozenset(
         "networkPolicy",
         "extensions",
         "env",
+        "readOnlyRootFilesystem",
+        "tmpfsMounts",
     }
 )
 
@@ -72,6 +77,7 @@ class _Unit:
 
     external: ExternalPolicy  # external policy at create (for recompiling on link)
     token: str  # execd access token
+    filesystem: FilesystemState
 
 
 class OpenSandboxPlatform:
@@ -85,6 +91,7 @@ class OpenSandboxPlatform:
         settings: NetworkSettings,
         storage: StorageSettings,
         caps: Capabilities,
+        filesystem: FilesystemSettings = UPSTREAM_FILESYSTEM,
         execd: ExecdSettings | None = None,
         workload_http: Callable[[str], Http] | None = None,
         command_gate: Callable[[], Awaitable[None]] | None = None,
@@ -104,7 +111,8 @@ class OpenSandboxPlatform:
             raise ValueError(
                 f"extensions cannot set the placement group key {group_extension!r}: flotilla writes it per trial"
             )
-        self.caps = caps
+        self.caps = filesystem.capabilities(caps)
+        self._filesystem = filesystem
         self._lifecycle = lifecycle
         self._execd_http = execd_http
         self._workload_http = workload_http or execd_http
@@ -123,7 +131,23 @@ class OpenSandboxPlatform:
         self._addresses: dict[str, str] = {}  # iid -> internal address (fixed while alive)
 
     async def create(self, spec: InstanceSpec) -> InstanceHandle:
-        unit = _Unit(external=spec.external, token=secrets.token_urlsafe(32))
+        try:
+            self.caps.require_filesystem(
+                spec.readonly_rootfs,
+                spec.tmpfs_mounts,
+                privileged=spec.privileged,
+                memory=spec.resources.memory,
+                volume_paths=tuple(v.mount_path for v in spec.volumes),
+            )
+        except ValueError as exc:
+            raise FlotillaError(str(exc), stage="create", category=ErrorCategory.INVALID, retryable=False) from exc
+        unit = _Unit(
+            external=spec.external,
+            token=secrets.token_urlsafe(32),
+            filesystem=FilesystemState(
+                spec.readonly_rootfs, tuple(sorted(spec.tmpfs_mounts, key=lambda m: m.mount_path))
+            ),
+        )
         body = self._create_body(spec, unit.token)
         body["metadata"] = {**spec.labels, "flotilla/create-id": secrets.token_hex(8)}
         key = _label_key(body["metadata"])
@@ -146,6 +170,21 @@ class OpenSandboxPlatform:
     async def get(self, iid: str) -> InstanceState:
         state = await self._lifecycle.get(iid)
         self._remember(state)
+        # The caller has adopted the ID before readiness checks. A mismatch cannot
+        # turn a successful POST into an untracked, leaked instance.
+        unit = self._units.get(iid)
+        if (
+            self._filesystem.protocol == "sandbox-system-v1"
+            and unit
+            and state.status is InstanceStatus.RUNNING
+            and state.filesystem != unit.filesystem
+        ):
+            raise FlotillaError(
+                "effective filesystem configuration is missing or differs from the requested configuration",
+                stage="create",
+                category=ErrorCategory.INVALID,
+                retryable=False,
+            )
         return state
 
     async def delete(self, iid: str) -> None:
@@ -244,6 +283,7 @@ class OpenSandboxPlatform:
             "volumes": self._storage.compile(spec.volumes),
             "networkPolicy": compile_policy(spec.external, [], self._settings),
             "env": {EXECD_TOKEN_ENV: token},
+            **self._filesystem.compile(spec),
         }
         if extensions:
             body["extensions"] = extensions
@@ -299,6 +339,7 @@ def build(
     settings: NetworkSettings,
     storage: StorageSettings,
     caps: Capabilities,
+    filesystem: FilesystemSettings = UPSTREAM_FILESYSTEM,
     execd: ExecdSettings | None = None,
     extensions: Mapping[str, Any] | None = None,
     privileged_extensions: Mapping[str, Any] | None = None,
@@ -352,6 +393,7 @@ def build(
         settings=settings,
         storage=storage,
         caps=caps,
+        filesystem=filesystem,
         execd=execd,
         extensions=extensions,
         privileged_extensions=privileged_extensions,

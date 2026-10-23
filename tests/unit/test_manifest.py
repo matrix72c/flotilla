@@ -217,7 +217,7 @@ def test_manifest_json_roundtrip_and_strictness() -> None:
 
 
 def test_rejected_project_cannot_be_written() -> None:
-    p = normalize({"services": {"main": {"image": "m", "read_only": True}}}, {})
+    p = normalize({"services": {"main": {"image": "m", "read_only": "invalid"}}}, {})
     with pytest.raises(ValueError):
         _manifest(p)
 

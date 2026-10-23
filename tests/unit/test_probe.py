@@ -8,6 +8,7 @@ unsatisfied instead of raising. See backend docs section 8 for validating real d
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 
 import pytest
 from pydantic import ValidationError
@@ -62,6 +63,15 @@ class ProbeShell:
         if iid == self._anchor.iid:
             return self._tree_exec(iid, proc)
         script = proc.argv[-1]
+        if "flotilla tmpfs output probe" in script:
+            return ExecResult(
+                1 if "tmpfs-exit" in self.broken else 0,
+                b"" if "tmpfs-output" in self.broken else b"flotilla-tmpfs-stdout\n",
+                b"" if "tmpfs-stderr" in self.broken else b"flotilla-tmpfs-stderr\n",
+            )
+        if "flotilla filesystem" in script:
+            broken = "rootfs" if "rootfs probe" in script else "tmpfs"
+            return ExecResult(1 if broken in self.broken else 0, b"", b"")
         if script.startswith("id -u"):
             out = f"{proc.uid}\n{proc.gid}\n{proc.cwd}\n{proc.env.get('PROBE_VAR', '')}\n"
             return _out(out if "identity" not in self.broken else "0\n0\n/\n\n")
@@ -110,7 +120,12 @@ async def _finish_background(platform: FakePlatform, clock: ManualClock, exit_co
 
 
 async def run_probe(
-    platform: FakePlatform, clock: ManualClock, *, broken: frozenset[str] = frozenset(), exit_code: int = 7
+    platform: FakePlatform,
+    clock: ManualClock,
+    *,
+    broken: frozenset[str] = frozenset(),
+    exit_code: int = 7,
+    declared: Declared = DECLARED,
 ) -> CapabilityReport:
     tree = SharedTree(platform)
     anchor = Anchor(platform, clock, "Lp", AnchorSettings(image="anchor@sha256:abc"))
@@ -121,7 +136,7 @@ async def run_probe(
     platform.initial_files["/etc/hosts"] = b"127.0.0.1 localhost\n"
     finisher = asyncio.ensure_future(_finish_background(platform, clock, exit_code))
     try:
-        return await clock.run(probe(platform, clock, anchor, DECLARED, SETTINGS))
+        return await clock.run(probe(platform, clock, anchor, declared, SETTINGS))
     finally:
         finisher.cancel()
         await asyncio.wait({finisher})
@@ -154,6 +169,33 @@ async def test_compliant_deployment_satisfies_required_items(platform: FakePlatf
         assert item.ok and item.source == "probed", item
     assert report.network.internal_address == "exec"
     assert report.endpoint == "http://os.test" and report.deployment == "fake"
+    assert not report.runtime.readonly_rootfs.ok and not report.storage.native_tmpfs.ok
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "broken",
+    [
+        frozenset(),
+        frozenset({"rootfs"}),
+        frozenset({"tmpfs"}),
+        frozenset({"tmpfs-output"}),
+        frozenset({"tmpfs-stderr"}),
+        frozenset({"tmpfs-exit"}),
+    ],
+)
+async def test_optional_filesystem_probes_require_behavior_and_cleanup(
+    platform: FakePlatform,
+    clock: ManualClock,
+    broken: frozenset[str],
+) -> None:
+    platform.caps = replace(platform.caps, readonly_rootfs=True, native_tmpfs=True)
+    declared = DECLARED.model_copy(update={"probe_readonly_rootfs": True, "probe_native_tmpfs": True})
+    report = await run_probe(platform, clock, declared=declared, broken=broken)
+    assert report.runtime.readonly_rootfs.ok == ("rootfs" not in broken)
+    assert report.storage.native_tmpfs.ok == (not broken & {"tmpfs", "tmpfs-output", "tmpfs-stderr", "tmpfs-exit"})
+    assert report.runtime.readonly_rootfs.source == report.storage.native_tmpfs.source == "probed"
+    assert not platform.iids()
 
 
 @pytest.mark.asyncio

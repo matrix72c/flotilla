@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from flotilla.core import hosts, labels, network, process, volumes
 from flotilla.core.anchor import Anchor
@@ -14,6 +14,7 @@ from flotilla.core.plan import TrialPlan
 from flotilla.core.reaper import Reaper
 from flotilla.core.waiting import Expired, run_all, wait_running, within
 from flotilla.platform.base import (
+    RUNTIME_MOUNT,
     Clock,
     ErrorCategory,
     ExternalPolicy,
@@ -21,6 +22,7 @@ from flotilla.platform.base import (
     InstanceHandle,
     InstanceSpec,
     Platform,
+    SharedVolume,
     Stage,
 )
 
@@ -105,7 +107,7 @@ class Trial:
 
     async def start(self) -> Ready:
         s = self._settings
-        if self._plan.volumes:
+        if self._plan.volumes or any(u.readonly_rootfs for u in self._plan.units.values()):
             await self._stage("prepare", s.prepare_timeout_s, self._prepare)
         await self._stage("create", s.create_timeout_s, self._create_all)
         addresses = await self._stage("address", s.address_timeout_s, self._addresses)
@@ -190,7 +192,17 @@ class Trial:
             await self._create_once(unit)
 
     async def _create_once(self, unit: str) -> None:
-        handle = await self._reaper.create(self._trial_id, unit, self._specs[unit])
+        spec = self._specs[unit]
+        if spec.readonly_rootfs:
+            # A fresh directory per create attempt prevents a still-deleting predecessor
+            # from sharing framework files with its replacement. The trial owns cleanup.
+            base = volumes.trial_key(self._anchor.launch_id, self._trial_id)
+            key = f"{base}/_runtime/{uuid.uuid4().hex}"
+            await self._anchor.mkdir(key, stage="create")
+            ctx = self._plan.units[unit].context
+            await self._anchor.chown(key, ctx.uid, ctx.gid, stage="create")
+            spec = replace(spec, volumes=(*spec.volumes, SharedVolume(key, RUNTIME_MOUNT, False)))
+        handle = await self._reaper.create(self._trial_id, unit, spec)
         self._handles[unit] = handle
         await wait_running(self._platform, self._clock, handle.iid, stage="create")
 
@@ -211,6 +223,8 @@ class Trial:
             ),
             external=network.external_policy(self._plan, unit, self._settings.external),
             privileged=u.privileged,
+            readonly_rootfs=u.readonly_rootfs,
+            tmpfs_mounts=u.tmpfs_mounts,
             group=self._group if unit in self._grouped else None,
         )
 

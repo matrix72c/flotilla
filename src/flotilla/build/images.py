@@ -99,7 +99,7 @@ def image_changes(project: Project) -> frozenset[str]:
     - services referencing a `nocopy` local volume (image mount point is emptied).
     """
     layout = classify(project.services)
-    changed: set[str] = {name for name, svc in project.services.items() if svc.tmpfs}
+    changed: set[str] = {name for name, svc in project.services.items() if svc.tmpfs or svc.readonly_rootfs}
     for g in layout.binds:
         if g.mode == "image":
             changed.update(unit for unit, _, _, _ in g.references)

@@ -13,9 +13,10 @@ Durations are in seconds. Relative paths are resolved against the directory cont
 | `endpoint` | required | OpenSandbox server root (`http(s)://...`); the backend appends `/v1` |
 | `credential_env` | required | Name of the environment variable holding the API credential. Never put the credential itself here |
 | `capabilities` | required | Path to the capability report written by `flotilla probe` |
+| `filesystem_protocol` | `"upstream"` | Lifecycle filesystem mapping: `"upstream"` omits extension fields; `"sandbox-system-v1"` enables the internal wire format, subject to matching probe evidence |
 | `extensions` | `{}` | Extra `extensions` sent with every create request |
 | `privileged_extensions` | `{}` | Extra `extensions` sent only for `privileged: true` services |
-| `create_fields` | `{}` | Extra top-level create-request fields. Fields managed by Flotilla (`image`, `entrypoint`, `metadata`, `timeout`, `resourceLimits`, `resourceRequests`, `volumes`, `networkPolicy`, `extensions`, `env`) are rejected |
+| `create_fields` | `{}` | Extra top-level create-request fields. Fields managed by Flotilla (`image`, `entrypoint`, `metadata`, `timeout`, `resourceLimits`, `resourceRequests`, `volumes`, `networkPolicy`, `extensions`, `env`, `readOnlyRootFilesystem`, `tmpfsMounts`) are rejected |
 | `group_extension` | unset | Extension key used to place all sandboxes of one environment in one scheduling group. Set only if the deployment implements it |
 
 `[opensandbox.network]`:
@@ -36,6 +37,8 @@ Durations are in seconds. Relative paths are resolved against the directory cont
 | `wrapper` | `"/.flotilla/bin/busybox"` | BusyBox binary from the share release used to wrap commands |
 
 See the [OpenSandbox backend](backends/opensandbox.md) for the differences.
+
+The optional `probe_readonly_rootfs` and `probe_native_tmpfs` booleans in `declared.json` request behavioral measurements and default to false. They do not assert support. New filesystem capabilities require matching `probed` evidence and a runtime configuration fingerprint. See [filesystem configuration and migration](Readonly_Rootfs_and_Tmpfs.md).
 
 ### `[storage]` (required)
 

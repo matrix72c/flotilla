@@ -83,6 +83,7 @@ class Manager:
             storage=cfg.storage_settings(),
             caps=cfg.platform_capabilities(report),
             execd=cfg.execd_settings(),
+            filesystem=cfg.filesystem_settings(),
             command_gate=command_rate.acquire,
             extensions=cfg.opensandbox.extensions,
             create_fields=cfg.opensandbox.create_fields,
@@ -185,6 +186,19 @@ class Manager:
         )
         members = network.link_members(plan)
         caps = self.platform.caps
+        for name, unit in plan.units.items():
+            try:
+                caps.require_filesystem(
+                    unit.readonly_rootfs,
+                    unit.tmpfs_mounts,
+                    privileged=unit.privileged,
+                    memory=unit.resources.memory,
+                    volume_paths=tuple(m.target for m in unit.mounts),
+                )
+                if unit.readonly_rootfs and not caps.shared_volume:
+                    raise ValueError("readonly_rootfs requires shared storage for framework scratch space")
+            except ValueError as exc:
+                raise invalid(f"{name}: {exc}") from exc
         if network.topology(plan) is not None and (not caps.link or len(members) > caps.link_max_members):
             raise invalid("deployment cannot connect this task's services")
         if plan.volumes and not caps.shared_volume:

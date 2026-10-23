@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 
 from flotilla._io import owned_io
 from flotilla.platform.base import (
+    RUNTIME_MOUNT,
     ErrorCategory,
     ExecAttempt,
     ExecOutcomeUnknown,
@@ -259,7 +260,7 @@ class Service:
 
     async def upload_dir(self, source: str | Path, target: str) -> None:
         data = await owned_io(_pack, Path(source))
-        temporary = f"/tmp/flotilla-{uuid.uuid4().hex}.tar"
+        temporary = await self._temporary_path()
         try:
             await self.write_file(temporary, data, mode=0o600)
             _success(await self.exec(["/.flotilla/bin/busybox", "mkdir", "-p", target]))
@@ -268,13 +269,21 @@ class Service:
             await self._remove_temporary(temporary)
 
     async def download_dir(self, source: str, target: str | Path) -> None:
-        temporary = f"/tmp/flotilla-{uuid.uuid4().hex}.tar"
+        temporary = await self._temporary_path()
         try:
             _success(await self.exec(["/.flotilla/bin/busybox", "tar", "-cf", temporary, "-C", source, "."]))
             data = await self.read_file(temporary)
             await owned_io(_unpack, data, Path(target))
         finally:
             await self._remove_temporary(temporary)
+
+    async def _temporary_path(self) -> str:
+        async def call(manager: Manager) -> str:
+            unit = manager.get(self._env.id).plan.units[self.name]
+            return RUNTIME_MOUNT if unit.readonly_rootfs else "/tmp"
+
+        directory = await self._env._client._call(call)
+        return f"{directory}/flotilla-{uuid.uuid4().hex}.tar"
 
     async def _remove_temporary(self, path: str) -> None:
         # Environment release also removes its private /tmp; cleanup cannot mask the transfer error.

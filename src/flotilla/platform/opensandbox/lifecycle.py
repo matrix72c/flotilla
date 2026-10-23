@@ -8,6 +8,7 @@ from typing import Any
 from urllib.parse import quote, urlencode
 
 from flotilla.platform.base import ErrorCategory, FlotillaError, InstanceState, InstanceStatus, Stage
+from flotilla.platform.opensandbox.filesystem import parse_effective
 from flotilla.platform.opensandbox.http import Http
 
 PAGE_SIZE = 200  # spec maximum pageSize
@@ -41,6 +42,7 @@ def parse_state(item: Mapping[str, Any]) -> InstanceState:
         labels={str(k): str(v) for k, v in (item.get("metadata") or {}).items()},
         reason=f"{native}: {reason}" if reason else (native or None),
         message=None,
+        filesystem=parse_effective(item),
     )
 
 

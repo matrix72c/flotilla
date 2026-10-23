@@ -30,9 +30,11 @@ from flotilla.platform.base import (
     ExternalPolicy,
     FlotillaError,
     InstanceSpec,
+    InstanceState,
     InstanceStatus,
     ProcessSpec,
     Resources,
+    TmpfsMount,
     Topology,
 )
 from flotilla.testing.platform import FakePlatform, ManualClock, SharedTree
@@ -138,6 +140,83 @@ async def test_three_unit_trial_reaches_ready(
     reaper.release("t1")
     await clock.run(reaper.close())
     assert platform.calls["list"] == lists_before_release
+
+
+@pytest.mark.asyncio
+async def test_readonly_runtime_scratch_is_private_per_attempt_owned_and_reaped(
+    platform: FakePlatform,
+    clock: ManualClock,
+    anchor: Anchor,
+    reaper: Reaper,
+    shell: Shell,
+    tree: SharedTree,
+) -> None:
+    _seed_hosts(platform)
+    platform.caps = replace(platform.caps, readonly_rootfs=True, native_tmpfs=True)
+    main = _unit(readonly_rootfs=True, tmpfs_mounts=(TmpfsMount("/tmp"),), context=replace(CTX, uid=1000, gid=1001))
+    plan = TrialPlan("ro", None, {"main": main})
+    attempts: list[InstanceSpec] = []
+
+    def fail_first(iid: str, spec: InstanceSpec) -> None:
+        attempts.append(spec)
+        if len(attempts) == 1:
+            platform.set_status(iid, InstanceStatus.TERMINAL, reason="Failed")
+
+    platform.on_create = fail_first
+    ready = await clock.run(_new_trial(platform, clock, anchor, reaper, plan).start())
+    assert ready.recreated == {"main"} and len(attempts) == 2
+    scratch = [next(v for v in spec.volumes if v.mount_path == "/.flotilla-runtime") for spec in attempts]
+    assert scratch[0].key != scratch[1].key
+    assert all(v.key.startswith("launches/L1/t1/_runtime/") and not v.read_only for v in scratch)
+    assert all(tree.owners[v.key] == "1000:1001" for v in scratch)
+    assert all(spec.readonly_rootfs and spec.tmpfs_mounts == main.tmpfs_mounts for spec in attempts)
+    handle = ready.handles["main"]
+    with pytest.raises(FlotillaError, match="read-only"):
+        await platform.write_file(handle, "/root-write", b"no", mode=0o600, uid=0, gid=0)
+    await platform.write_file(handle, "/tmp/works", b"yes", mode=0o600, uid=1000, gid=1001)
+    assert await platform.read_file(handle, "/tmp/works") == b"yes"
+    assert any("/.flotilla-runtime/main.log" in p.argv[-1] for _, p in shell.unit_calls)
+    process = platform.process_spec(handle.iid, ready.pids["main"])
+    assert process.uid == 1000 and process.gid == 1001 and process.env == CTX.env
+    reaper.release("t1")
+    await clock.run(reaper.close())
+    assert not any(d.startswith("launches/L1/t1") for d in tree.dirs)
+
+
+@pytest.mark.asyncio
+async def test_filesystem_readiness_rejection_does_not_retry_or_leak_adopted_instance(
+    platform: FakePlatform,
+    clock: ManualClock,
+    anchor: Anchor,
+    reaper: Reaper,
+    shell: Shell,
+    tree: SharedTree,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    platform.caps = replace(platform.caps, readonly_rootfs=True)
+    plan = TrialPlan("ro", None, {"main": _unit(readonly_rootfs=True)})
+    original = platform.get
+
+    async def reject(iid: str) -> InstanceState:
+        state = await original(iid)
+        if platform.spec_of(iid).readonly_rootfs:
+            raise FlotillaError(
+                "effective filesystem mismatch", stage="create", category=ErrorCategory.INVALID, retryable=False
+            )
+        return state
+
+    monkeypatch.setattr(platform, "get", reject)
+    creates = platform.calls["create"]
+    trial = _new_trial(platform, clock, anchor, reaper, plan)
+    with pytest.raises(FlotillaError, match="effective filesystem"):
+        await clock.run(trial.start())
+    assert platform.calls["create"] == creates + 1
+    assert len(trial.handles) == 1
+    assert not shell.unit_calls
+    reaper.release("t1")
+    await clock.run(reaper.close())
+    assert not platform.iids()
+    assert not any(d.startswith("launches/L1/t1") for d in tree.dirs)
 
 
 @pytest.mark.asyncio

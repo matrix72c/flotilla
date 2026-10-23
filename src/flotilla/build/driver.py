@@ -226,8 +226,11 @@ def _derive(task: HarborTask, service: str, base: str, *, user: str) -> str:
         for unit, target, _, _ in volume.references
         if unit == service
     ]
-    clear.extend(task.project.services[service].tmpfs)
-    return derive_dockerfile(base, copy=copy, clear=clear, user=user)
+    svc = task.project.services[service]
+    directories = [m.mount_path for m in svc.tmpfs]
+    if svc.readonly_rootfs:
+        directories.append("/.flotilla-runtime")
+    return derive_dockerfile(base, copy=copy, clear=clear, directories=directories, user=user)
 
 
 def _metadata(

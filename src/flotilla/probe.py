@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from typing import Annotated
 
@@ -23,7 +23,7 @@ from flotilla.capabilities import (
 )
 from flotilla.core import labels
 from flotilla.core.anchor import Anchor
-from flotilla.core.waiting import wait_running, within
+from flotilla.core.waiting import Expired, wait_running, within
 from flotilla.platform.base import (
     Capabilities,
     Clock,
@@ -36,6 +36,7 @@ from flotilla.platform.base import (
     ProcessSpec,
     Resources,
     SharedVolume,
+    TmpfsMount,
 )
 from flotilla.platform.network import cluster_dns_address
 
@@ -76,6 +77,8 @@ class Declared(BaseModel):
     devices: frozenset[Device] = frozenset()
     multi_container: Item
     notes: tuple[str, ...] = ()
+    probe_readonly_rootfs: bool = False
+    probe_native_tmpfs: bool = False
 
     @field_validator("cluster_dns")
     @classmethod
@@ -131,6 +134,8 @@ class Declared(BaseModel):
             exec_auth=False,
             privileged_runtime=False,
             devices=frozenset(),
+            readonly_rootfs=self.probe_readonly_rootfs,
+            native_tmpfs=self.probe_native_tmpfs,
         )
 
 
@@ -144,6 +149,7 @@ class ProbeSettings:
     #: Delay before re-reading /etc/hosts. Acceptance runs use 10 minutes; routine probes may use less.
     hosts_recheck_s: float = 30.0
     ttl_s: int = 900
+    filesystem_profile: str | None = None
 
 
 async def probe(
@@ -170,6 +176,7 @@ async def probe(
         external_none = await run.external_none(unit)
         inbound = await run.inbound(declared.inbound_isolation)
         storage = await run.storage()
+        readonly, tmpfs = await run.filesystem(declared.probe_readonly_rootfs, declared.probe_native_tmpfs)
     finally:
         leaked = await run.cleanup()
     if leaked:  # labeled flotilla/probe with finite TTL, so platform TTL reclaims them; report notes it
@@ -182,6 +189,7 @@ async def probe(
         endpoint=settings.endpoint,
         probed_at=clock.now(),
         probe_version=__version__,
+        filesystem_profile=settings.filesystem_profile,
         lifecycle=Lifecycle(
             create_get_delete=lifecycle["create_get_delete"],
             label_list=lifecycle["label_list"],
@@ -216,6 +224,7 @@ async def probe(
             no_auto_mount=declared.no_auto_mount,
             dir_management=storage["dir_management"],
             volume_file=declared.volume_file,
+            native_tmpfs=tmpfs,
         ),
         runtime=Runtime(
             exec_auth=declared.exec_auth,
@@ -227,6 +236,7 @@ async def probe(
             devices=declared.devices,
             image_digest=digest,
             multi_container=declared.multi_container,
+            readonly_rootfs=readonly,
         ),
         notes=(*declared.notes, f"probe run {run.run_id}; internal address: {address.evidence}", *notes_extra),
     )
@@ -300,6 +310,95 @@ class _Run:
         if wait:
             await self._wait_running(handle)
         return handle
+
+    async def filesystem(self, readonly: bool, tmpfs: bool) -> tuple[Item, Item]:
+        skipped = Item(ok=False, source="declared", evidence="not requested; enable the optional filesystem probes")
+        ro_result = await self._filesystem_case(True, False) if readonly else skipped
+        tmp_result = await self._filesystem_case(False, True) if tmpfs else skipped
+        if readonly and tmpfs and ro_result.ok and tmp_result.ok:
+            combined = await self._filesystem_case(True, True)
+            if not combined.ok:
+                return combined, combined
+        return ro_result, tmp_result
+
+    async def _filesystem_case(self, readonly: bool, tmpfs: bool) -> Item:
+        """Exercise actual mounts, exec, files and hosts; a JSON echo alone is insufficient evidence."""
+        try:
+            key = f"launches/{self.anchor.launch_id}/{self.run_id}/fs-{int(readonly)}-{int(tmpfs)}"
+            await self.anchor.mkdir(key, stage="prepare")
+            spec = replace(
+                self._spec(f"fs-{int(readonly)}-{int(tmpfs)}", (SharedVolume(key, "/var/tmp", False),)),
+                readonly_rootfs=readonly,
+                tmpfs_mounts=(TmpfsMount("/tmp", 1024 * 1024, 0o750, 1000, 1000),) if tmpfs else (),
+            )
+            handle = await self._create(spec)
+            if readonly:
+                result = await self.platform.exec(
+                    handle,
+                    _sh(
+                        "# flotilla filesystem rootfs probe\n"
+                        "err=$(touch /.flotilla-rootfs-probe 2>&1); rc=$?; "
+                        "test $rc -ne 0 && printf '%s' \"$err\" | grep -q 'Read-only file system'",
+                        LC_ALL="C",
+                    ),
+                )
+                if result.exit_code != 0 or result.timed_out:
+                    return _probed(False, "root write was not rejected with EROFS")
+                # The actual multi-service setup writes this runtime-managed file.
+                hosts = await self.platform.read_file(handle, "/etc/hosts")
+                await self.platform.write_file(
+                    handle, "/etc/hosts", hosts + b"\n# flotilla filesystem probe\n", mode=0o644, uid=0, gid=0
+                )
+                if await self.platform.read_file(handle, "/etc/hosts") != hosts + b"\n# flotilla filesystem probe\n":
+                    return _probed(False, "hosts write/read failed with readonly_rootfs")
+            await self.platform.write_file(handle, "/var/tmp/flotilla-fs", b"probe", mode=0o600, uid=0, gid=0)
+            if await self.platform.read_file(handle, "/var/tmp/flotilla-fs") != b"probe":
+                return _probed(False, "writable volume upload/download failed")
+            if tmpfs:
+                result = await self.platform.exec(
+                    handle,
+                    _sh(
+                        "# flotilla filesystem tmpfs probe\n"
+                        'test "$(stat -f -c %T /tmp)" = tmpfs && '
+                        'test "$(stat -c \'%u:%g %a\' /tmp)" = "1000:1000 750" && '
+                        "test ! -e /tmp/flotilla-tmpfs-probe && "
+                        "err=$(dd if=/dev/zero of=/tmp/flotilla-tmpfs-probe bs=65536 count=32 2>&1); rc=$?; "
+                        'test $rc -ne 0 && printf "%s" "$err" | grep -q "No space left on device"',
+                        uid=1000,
+                        gid=1000,
+                        LC_ALL="C",
+                    ),
+                )
+                if result.exit_code != 0 or result.timed_out:
+                    return _probed(False, "tmpfs type, ownership, mode, non-root write or capacity check failed")
+                again = await self.platform.exec(handle, _sh("test -f /tmp/flotilla-tmpfs-probe", uid=1000, gid=1000))
+                if again.exit_code != 0:
+                    return _probed(False, "tmpfs contents did not survive another exec")
+                output = await self.platform.exec(
+                    handle,
+                    _sh(
+                        "# flotilla tmpfs output probe\n"
+                        "printf 'flotilla-tmpfs-stdout\\n'; printf 'flotilla-tmpfs-stderr\\n' >&2",
+                        uid=1000,
+                        gid=1000,
+                    ),
+                )
+                if (
+                    output.exit_code != 0
+                    or output.timed_out
+                    or output.stdout != b"flotilla-tmpfs-stdout\n"
+                    or output.stderr != b"flotilla-tmpfs-stderr\n"
+                ):
+                    return _probed(False, "tmpfs exhaustion broke command execution or stdout/stderr capture")
+                # A second instance has the same mount declaration and independent contents.
+                other = await self._create(spec)
+                empty = await self.platform.exec(other, _sh("test ! -e /tmp/flotilla-tmpfs-probe"))
+                if empty.exit_code != 0:
+                    return _probed(False, "tmpfs data leaked to a second instance")
+            return _probed(True, f"filesystem behavior verified (readonly_rootfs={readonly}, native_tmpfs={tmpfs})")
+        except (FlotillaError, ValueError, Expired) as exc:
+            # Do not copy remote output or configuration into persistent evidence.
+            return _probed(False, f"filesystem probe failed ({type(exc).__name__})")
 
     async def _wait_running(self, handle: InstanceHandle) -> None:
         running = wait_running(self.platform, self.clock, handle.iid, stage="create")

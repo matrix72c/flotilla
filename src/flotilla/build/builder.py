@@ -110,7 +110,12 @@ class Builder(Protocol):
 
 
 def derive_dockerfile(
-    base: str, *, copy: Sequence[tuple[str, str]] = (), clear: Sequence[str] = (), user: str = "0:0"
+    base: str,
+    *,
+    copy: Sequence[tuple[str, str]] = (),
+    clear: Sequence[str] = (),
+    directories: Sequence[str] = (),
+    user: str = "0:0",
 ) -> str:
     """Dockerfile for the derived layer.
 
@@ -131,6 +136,12 @@ def derive_dockerfile(
     for source, target in copy:
         lines.append(_run(f"rm -rf {shlex.quote(target)}"))
         lines.append(f"COPY [{json.dumps(source)}, {json.dumps(target)}]")
+    for target in directories:
+        # Reject symlink components: the mounted directory must be the declared path,
+        # not an alias of a protected location such as /run.
+        parts = target.strip("/").split("/")
+        checks = " && ".join(f"test ! -L {shlex.quote('/' + '/'.join(parts[:i]))}" for i in range(1, len(parts) + 1))
+        lines.append(_run(f"{checks} && mkdir -p {shlex.quote(target)}"))
     lines.append(f"USER {user}")
     return "\n".join(lines) + "\n"
 

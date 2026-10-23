@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Literal
 
-from flotilla.platform.base import Resources
+from flotilla.platform.base import RESERVED_MOUNTS, Resources, TmpfsMount, overlaps, validate_mounts
 
 Condition = Literal["service_started", "service_healthy", "service_completed_successfully"]
 RestartPolicy = Literal["no", "always", "unless-stopped", "on-failure"]
@@ -72,6 +72,8 @@ class Unit:
     restart: RestartPolicy = "no"
     mounts: tuple[Mount, ...] = ()
     privileged: bool = False
+    readonly_rootfs: bool = False
+    tmpfs_mounts: tuple[TmpfsMount, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -152,11 +154,20 @@ class TrialPlan:
         keys = [v.key for v in self.volumes]
         for key in keys:
             _require_key(key, "trial volume key")
+            if key == "_runtime" or key.startswith("_runtime/"):
+                raise ValueError("trial volume key _runtime is reserved for framework scratch space")
         if len(keys) != len(set(keys)):
             raise ValueError("duplicate trial volume key")
         for name, unit in self.units.items():
+            validate_mounts(unit.tmpfs_mounts, (m.target for m in unit.mounts))
+            if unit.readonly_rootfs and unit.privileged:
+                raise ValueError(f"{name}: readonly_rootfs cannot be combined with privileged")
             for m in unit.mounts:
+                if any(overlaps(m.target, reserved) for reserved in RESERVED_MOUNTS):
+                    raise ValueError(f"{name}: mount {m.target} conflicts with a reserved mount")
                 _require_key(m.key, f"mount {m.target} of {name}")
+                if m.key == "_runtime" or m.key.startswith("_runtime/"):
+                    raise ValueError("mount key _runtime is reserved for framework scratch space")
                 if m.scope == "trial" and not any(m.key == k or m.key.startswith(k + "/") for k in keys):
                     raise ValueError(f"{name} mounts undeclared trial volume {m.key}")
                 if m.scope == "task":

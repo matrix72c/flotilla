@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from flotilla.core.plan import Condition, Healthcheck, TrialPlan, Unit
 from flotilla.core.waiting import run_all
 from flotilla.platform.base import (
+    RUNTIME_MOUNT,
     Clock,
     ErrorCategory,
     ExecResult,
@@ -28,8 +29,8 @@ TAIL_BYTES = 4096
 _OWN_TIMEOUT_S = 30.0  # the orchestration core's own execs (create log dir, read log tail)
 
 
-def log_path(service: str) -> str:
-    return f"{LOG_DIR}/{service}.log"
+def log_path(service: str, *, readonly_rootfs: bool = False) -> str:
+    return f"{RUNTIME_MOUNT if readonly_rootfs else LOG_DIR}/{service}.log"
 
 
 def service_spec(unit: Unit, argv: tuple[str, ...], *, timeout_s: float | None) -> ProcessSpec:
@@ -49,9 +50,10 @@ async def launch(platform: Platform, handle: InstanceHandle, service: str, unit:
     The log file is first created by root and handed to the service uid / gid; the process only appends as itself.
     """
     assert unit.command is not None
-    path = log_path(service)
+    path = log_path(service, readonly_rootfs=unit.readonly_rootfs)
     ctx = unit.context
-    prep = f"mkdir -p {LOG_DIR} && : > {shlex.quote(path)} && chown {ctx.uid}:{ctx.gid} {shlex.quote(path)}"
+    directory = RUNTIME_MOUNT if unit.readonly_rootfs else LOG_DIR
+    prep = f"mkdir -p {directory} && : > {shlex.quote(path)} && chown {ctx.uid}:{ctx.gid} {shlex.quote(path)}"
     try:
         result = await platform.exec(handle, own_spec((BUSYBOX, "sh", "-c", prep)))
     except FlotillaError as exc:
@@ -72,10 +74,14 @@ async def launch(platform: Platform, handle: InstanceHandle, service: str, unit:
         raise _infra(service, exc) from exc
 
 
-async def tail(platform: Platform, handle: InstanceHandle, service: str, nbytes: int = TAIL_BYTES) -> str:
+async def tail(
+    platform: Platform, handle: InstanceHandle, service: str, nbytes: int = TAIL_BYTES, *, readonly_rootfs: bool = False
+) -> str:
     """Tail of the service log; empty if unreadable (diagnostics only; must not mask the original error)."""
     try:
-        result = await platform.exec(handle, own_spec((BUSYBOX, "tail", "-c", str(nbytes), log_path(service))))
+        result = await platform.exec(
+            handle, own_spec((BUSYBOX, "tail", "-c", str(nbytes), log_path(service, readonly_rootfs=readonly_rootfs)))
+        )
     except FlotillaError:
         return ""
     return result.stdout.decode(errors="replace") if result.exit_code == 0 else ""
@@ -112,7 +118,11 @@ async def wait_healthy(
         exit_code = await _exited(platform, handle, service, pid)
         if exit_code is not None:
             raise await _service_error(
-                platform, handle, service, f"process exited during healthcheck (exit code {exit_code})"
+                platform,
+                handle,
+                service,
+                f"process exited during healthcheck (exit code {exit_code})",
+                readonly_rootfs=unit.readonly_rootfs,
             )
         if result.exit_code == 0 and not result.timed_out:
             return
@@ -121,7 +131,11 @@ async def wait_healthy(
         if failures >= hc.retries:
             why = "timeout" if result.timed_out else f"exit code {result.exit_code}"
             raise await _service_error(
-                platform, handle, service, f"healthcheck failed {failures} consecutive times (last: {why})"
+                platform,
+                handle,
+                service,
+                f"healthcheck failed {failures} consecutive times (last: {why})",
+                readonly_rootfs=unit.readonly_rootfs,
             )
 
 
@@ -192,8 +206,10 @@ def _infra(service: str, exc: FlotillaError) -> FlotillaError:
     return FlotillaError(str(exc), stage="start", category=exc.category, retryable=exc.retryable, service=service)
 
 
-async def _service_error(platform: Platform, handle: InstanceHandle, service: str, why: str) -> FlotillaError:
-    logs = await tail(platform, handle, service)
+async def _service_error(
+    platform: Platform, handle: InstanceHandle, service: str, why: str, *, readonly_rootfs: bool = False
+) -> FlotillaError:
+    logs = await tail(platform, handle, service, readonly_rootfs=readonly_rootfs)
     message = f"{service}: {why}" + (f"\n--- log tail ---\n{logs}" if logs else "")
     return FlotillaError(message, stage="start", category=ErrorCategory.SERVICE, retryable=False, service=service)
 

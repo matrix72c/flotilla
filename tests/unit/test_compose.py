@@ -166,7 +166,7 @@ def test_volumes_long_syntax() -> None:
         ({"image": "a", "volumes": [{"type": "bind", "source": "/etc", "target": "/x"}]}, "services.app.volumes[0]"),
         ({"image": "a", "volumes": [{"type": "bind", "source": "../up", "target": "/x"}]}, "services.app.volumes[0]"),
         ({"image": "a", "volumes": [{"type": "volume", "source": "ghost", "target": "/x"}]}, "services.app.volumes[0]"),
-        ({"image": "a", "read_only": True}, "services.app.read_only"),
+        ({"image": "a", "read_only": "true"}, "services.app.read_only"),
         ({"image": "a", "pid": "service:main"}, "services.app.pid"),
         ({"image": "a", "network_mode": "host"}, "services.app.network_mode"),
         ({"image": "a", "network_mode": "service:main"}, "services.app.network_mode"),
@@ -191,13 +191,12 @@ def test_rejections_report_field_path(svc: dict[str, Any], path: str) -> None:
     assert path in _paths(p, "reject"), p.findings
 
 
-def test_known_proxy_read_only_is_equivalent_but_others_rejected() -> None:
+def test_read_only_is_preserved_for_every_service() -> None:
     proxy = {"image": "kali", "entrypoint": ["python3", "/opt/model-api-proxy/proxy.py"], "read_only": True}
     p = _norm({"model-api-proxy": proxy})
-    assert "services.model-api-proxy.read_only" in _paths(p, "reject") and p.rejected
-    # Same name but different entrypoint: still rejected (exact match on service name + entrypoint).
+    assert not p.rejected and p.services["model-api-proxy"].readonly_rootfs
     p = _norm({"model-api-proxy": {**proxy, "entrypoint": ["sh", "-c", "write-things"]}})
-    assert "services.model-api-proxy.read_only" in _paths(p, "reject")
+    assert not p.rejected and p.services["model-api-proxy"].readonly_rootfs
 
 
 @pytest.mark.parametrize(
@@ -238,14 +237,19 @@ def test_equivalent_fields_are_recorded() -> None:
     assert {
         "services.app.init",
         "services.app.restart",
-        "services.app.tmpfs",
         "services.app.ports",
         "services.app.networks.default.gw_priority",
         "services.app.depends_on.main.restart",
     } <= _paths(p, "equivalent")
     assert "services.app.hostname" in _paths(p, "warn")
     app = p.services["app"]
-    assert (app.restart, app.tmpfs, app.udp_ports, app.hostname) == ("always", ("/tmp",), (53,), "kafka")
+    assert (app.restart, tuple(m.mount_path for m in app.tmpfs), app.udp_ports, app.hostname) == (
+        "always",
+        ("/tmp",),
+        (53,),
+        "kafka",
+    )
+    assert "services.app.tmpfs" not in _paths(p, "equivalent")
 
 
 def test_runtime_params_recorded_from_environment() -> None:

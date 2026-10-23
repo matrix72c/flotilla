@@ -37,6 +37,11 @@ def definition(task: Task, root: Path) -> EnvironmentDefinition:
             "user": f"{unit.context.uid}:{unit.context.gid}",
             "working_dir": unit.context.cwd,
             "restart": unit.restart,
+            "read_only": unit.readonly_rootfs,
+            "tmpfs": [
+                f"{m.mount_path}:size={m.size_bytes},mode={m.mode:04o},uid={m.uid},gid={m.gid}"
+                for m in unit.tmpfs_mounts
+            ],
             "deploy": {"resources": {"limits": unit.resources.model_dump(exclude_none=True)}},
         }
         limits = service["deploy"]["resources"]["limits"]

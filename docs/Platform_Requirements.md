@@ -15,7 +15,8 @@ The supported release target is Linux x86_64, Python 3.12, Harbor 0.24.0, and th
 | Resources | CPU/memory defaults and per-service overrides | Actual cgroup limits and quota behavior |
 | Images | Digest resolution; static FROM substitution; linux/amd64 selection | BuildKit and runtime pull access tested independently; reject missing supported architecture |
 | Harbor | Main/shared/separate verifier, overrides, logs, borrowed/owned lifecycle | Pinned Harbor contracts plus Oracle/Nop and cleanup checks |
-| Unsupported | Root filesystem read-only, devices, extra hosts, `on-failure` restarts, other unsupported Compose keys (see [Compose support](Compose_Support.md)) | Field-level rejection before runtime creation |
+| Optional filesystem features | Read-only root filesystem and native tmpfs through the explicitly selected internal lifecycle dialect | Matching behavioral probe evidence; unsupported requirements are rejected without fallback |
+| Unsupported | Devices, extra hosts, `on-failure` restarts, other unsupported Compose keys (see [Compose support](Compose_Support.md)) | Field-level rejection before runtime creation |
 
 ## Evidence
 

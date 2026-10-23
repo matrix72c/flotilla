@@ -8,6 +8,30 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Literal, Protocol, runtime_checkable
 
+from flotilla.platform.filesystem import (
+    NO_FILESYSTEM_LIMITS,
+)
+from flotilla.platform.filesystem import (
+    RESERVED_MOUNTS as RESERVED_MOUNTS,
+)
+from flotilla.platform.filesystem import (
+    RUNTIME_MOUNT as RUNTIME_MOUNT,
+)
+from flotilla.platform.filesystem import (
+    FilesystemLimits as FilesystemLimits,
+)
+from flotilla.platform.filesystem import (
+    FilesystemState as FilesystemState,
+)
+from flotilla.platform.filesystem import (
+    TmpfsMount as TmpfsMount,
+)
+from flotilla.platform.filesystem import (
+    overlaps as overlaps,
+)
+from flotilla.platform.filesystem import (
+    validate_mounts as validate_mounts,
+)
 from flotilla.platform.network import non_dns_egress
 
 # Error classification
@@ -111,6 +135,28 @@ class Capabilities:
     devices: frozenset[str]  # subset of {"fuse", "kvm"}
     cluster_dns: tuple[str, ...] = ()  # explicitly declared resolver IPs; only TCP/UDP 53 may be implicit
     sandbox_ingress: bool = False  # backend configured to enforce ingress using sandbox identity rules
+    readonly_rootfs: bool = False
+    native_tmpfs: bool = False
+    filesystem_limits: FilesystemLimits = NO_FILESYSTEM_LIMITS
+
+    def require_filesystem(
+        self,
+        readonly_rootfs: bool,
+        tmpfs_mounts: tuple[TmpfsMount, ...],
+        *,
+        privileged: bool = False,
+        memory: str | None = None,
+        volume_paths: tuple[str, ...] = (),
+    ) -> None:
+        if readonly_rootfs and not self.readonly_rootfs:
+            raise ValueError("deployment does not support readonly_rootfs")
+        if tmpfs_mounts and not self.native_tmpfs:
+            raise ValueError("deployment does not support native_tmpfs; directory emulation is not supported")
+        if readonly_rootfs and privileged:
+            raise ValueError("readonly_rootfs cannot be combined with privileged")
+        if tmpfs_mounts and privileged:
+            raise ValueError("native_tmpfs has not been verified for privileged runtimes")
+        validate_mounts(tmpfs_mounts, volume_paths, limits=self.filesystem_limits, memory=memory)
 
     @property
     def supports_no_network(self) -> bool:
@@ -170,6 +216,8 @@ class InstanceSpec:
     #: flotilla only expresses "same group", not where; deployments that don't need it ignore it. A trial gives
     #: units that must link the same value, one per trial.
     group: str | None = None
+    readonly_rootfs: bool = False
+    tmpfs_mounts: tuple[TmpfsMount, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -222,6 +270,7 @@ class InstanceState:
     labels: Mapping[str, str]
     reason: str | None = None
     message: str | None = None
+    filesystem: FilesystemState | None = None
 
 
 @dataclass

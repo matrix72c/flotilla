@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import posixpath
+import re
 import shlex
 from collections.abc import Callable, Mapping
 from typing import Any, cast
@@ -25,6 +26,8 @@ from flotilla.compose.model import (
 )
 from flotilla.compose.paths import valid_name
 from flotilla.compose.units import parse_duration
+from flotilla.platform.base import TmpfsMount
+from flotilla.platform.filesystem import memory_bytes, validate_mounts
 
 DEFAULT_NETWORK = "default"
 KEEPALIVE = ("sh", "-c", "sleep infinity")
@@ -42,7 +45,6 @@ _EQUIVALENT = {
 }
 # Rejected service fields (including platform capability gaps).
 _REJECT = {
-    "read_only": "requires readonly_rootfs; not supported yet",
     "group_add": "requires supplementary_groups; not supported yet",
     "cap_drop": "requires per-command capability control; not supported yet",
     "security_opt": "requires per-command capability control; not supported yet",
@@ -192,7 +194,7 @@ def _service(
     for key in raw:
         if key in _HANDLED:
             continue
-        if key == "read_only" and not _boolean(raw[key], f"{path}.read_only", c):
+        if key == "read_only":
             continue
         if key in _EQUIVALENT:
             c.equivalent(f"{path}.{key}", _EQUIVALENT[key])
@@ -204,6 +206,12 @@ def _service(
     if "image" not in raw and "build" not in raw:
         c.reject(path, "neither image nor build")
     hc, hc_disabled = _healthcheck(raw.get("healthcheck"), f"{path}.healthcheck", c)
+    mounts = _volumes(raw.get("volumes"), f"{path}.volumes", volumes, c)
+    tmpfs = (*_tmpfs(raw.get("tmpfs"), f"{path}.tmpfs", c), *_long_tmpfs(raw.get("volumes"), f"{path}.volumes", c))
+    try:
+        validate_mounts(tmpfs, (m.target for m in mounts))
+    except ValueError as exc:
+        c.reject(f"{path}.tmpfs", str(exc))
     return Service(
         name=name,
         resources=_resources(raw, path, c),
@@ -218,8 +226,9 @@ def _service(
         healthcheck_disabled=hc_disabled,
         depends_on=_depends_on(raw.get("depends_on"), f"{path}.depends_on", c),
         networks=_service_networks(raw, path, c),
-        volumes=_volumes(raw.get("volumes"), f"{path}.volumes", volumes, c),
-        tmpfs=(*_tmpfs(raw.get("tmpfs"), f"{path}.tmpfs", c), *_long_tmpfs(raw.get("volumes"))),
+        volumes=mounts,
+        tmpfs=tmpfs,
+        readonly_rootfs=_boolean(raw.get("read_only", False), f"{path}.read_only", c),
         restart=_restart(raw.get("restart"), f"{path}.restart", c),
         privileged=_boolean(raw.get("privileged", False), f"{path}.privileged", c),
         container_name=_hostname(raw.get("container_name"), f"{path}.container_name", c),
@@ -488,10 +497,6 @@ def _volumes(value: object, path: str, named: set[str], c: _Collector) -> tuple[
             c.reject(p, "mounting at the root directory is not supported")
             continue
         if kind == "tmpfs":
-            for key in v:
-                if key not in ("type", "target"):
-                    c.reject(f"{p}.{key}", "tmpfs-equivalent directories do not support mount options")
-            c.equivalent(p, "directory is emptied at build time and is empty at sandbox start")
             continue
         if kind not in ("volume", "bind"):
             c.reject(p, f"unsupported volume type: {kind!r}")
@@ -531,40 +536,79 @@ def _volumes(value: object, path: str, named: set[str], c: _Collector) -> tuple[
     return tuple(out)
 
 
-def _tmpfs(value: object, path: str, c: _Collector) -> tuple[str, ...]:
+def _tmpfs(value: object, path: str, c: _Collector) -> tuple[TmpfsMount, ...]:
     if value is None:
         return ()
     items = [value] if isinstance(value, str) else value
     if not isinstance(items, list):
         c.reject(path, f"unrecognized syntax: {value!r}")
         return ()
-    c.equivalent(
-        path, "directory is emptied at build time and empty at sandbox start; size and memory accounting differ"
-    )
-    out = []
-    for item in items:
-        if not isinstance(item, str) or not item.startswith("/") or ":" in item:
-            c.reject(path, "tmpfs must be an absolute directory path; mount options are not supported")
-        else:
-            normalized = posixpath.normpath(item)
-            if normalized == "/":
-                c.reject(path, "tmpfs cannot empty the root directory")
-            else:
-                out.append(normalized)
+    out: list[TmpfsMount] = []
+    for i, item in enumerate(items):
+        p = f"{path}[{i}]"
+        if not isinstance(item, str):
+            c.reject(p, "tmpfs must be an absolute directory with optional size, mode, uid, gid options")
+            continue
+        target, separator, text = item.partition(":")
+        options: dict[str, object] = {}
+        if separator:
+            for option in text.split(","):
+                key, equals, val = option.partition("=")
+                if not equals or key not in ("size", "mode", "uid", "gid") or key in options:
+                    c.reject(p, f"unsupported or duplicate tmpfs option: {key}")
+                else:
+                    options[key] = val
+        mount = _tmpfs_mount(target, options, p, c)
+        if mount is not None:
+            out.append(mount)
     return tuple(out)
 
 
-def _long_tmpfs(value: object) -> tuple[str, ...]:
+def _long_tmpfs(value: object, path: str, c: _Collector) -> tuple[TmpfsMount, ...]:
     if not isinstance(value, list):
         return ()
-    return tuple(
-        posixpath.normpath(v["target"])
-        for v in value
-        if isinstance(v, dict)
-        and v.get("type") == "tmpfs"
-        and isinstance(v.get("target"), str)
-        and v["target"].startswith("/")
-    )
+    out: list[TmpfsMount] = []
+    for i, v in enumerate(value):
+        if not isinstance(v, dict) or v.get("type") != "tmpfs":
+            continue
+        p = f"{path}[{i}]"
+        for key in v:
+            if key not in ("type", "target", "tmpfs", "read_only"):
+                c.reject(f"{p}.{key}", "unsupported tmpfs mount field")
+        if _boolean(v.get("read_only", False), f"{p}.read_only", c):
+            c.reject(f"{p}.read_only", "read-only tmpfs is not supported by the lifecycle API")
+        opts = _mapping(v.get("tmpfs"), f"{p}.tmpfs", c)
+        for key in opts:
+            if key not in ("size", "mode"):
+                c.reject(f"{p}.tmpfs.{key}", "unsupported long-syntax tmpfs option; use short syntax for uid/gid")
+        mount = _tmpfs_mount(v.get("target"), opts, p, c)
+        if mount is not None:
+            out.append(mount)
+    return tuple(out)
+
+
+def _tmpfs_mount(target: object, options: Mapping[str, object], path: str, c: _Collector) -> TmpfsMount | None:
+    try:
+        if not isinstance(target, str):
+            raise ValueError("tmpfs target must be a canonical absolute directory")
+        size = memory_bytes(resource_values.memory(options["size"])) if "size" in options else 64 * 1024 * 1024
+        mode = options.get("mode", "1777")
+        if isinstance(mode, str) and re.fullmatch(r"[0-7]{1,4}", mode):
+            mode = int(mode, 8)
+        if type(mode) is not int:
+            raise ValueError("tmpfs mode must be an octal string or YAML octal integer")
+        ids = []
+        for name in ("uid", "gid"):
+            value = options.get(name, 0)
+            if isinstance(value, str) and re.fullmatch(r"[0-9]+", value):
+                value = int(value)
+            if type(value) is not int:
+                raise ValueError(f"tmpfs {name} must be a nonnegative integer")
+            ids.append(value)
+        return TmpfsMount(target, size, mode, ids[0], ids[1])
+    except ValueError as exc:
+        c.reject(path, str(exc))
+        return None
 
 
 _RESTART: dict[str, RestartPolicy] = {"no": "no", "always": "always", "unless-stopped": "unless-stopped"}

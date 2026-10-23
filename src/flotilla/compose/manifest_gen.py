@@ -118,6 +118,8 @@ def _unit(
             for m in layout.mounts.get(svc.name, ())
         ],
         privileged=svc.privileged,
+        readonly_rootfs=svc.readonly_rootfs,
+        tmpfs_mounts=list(svc.tmpfs),
     )
 
 

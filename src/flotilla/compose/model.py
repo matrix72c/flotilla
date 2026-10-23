@@ -6,6 +6,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Literal
 
+from flotilla.platform.base import TmpfsMount
+
 Kind = Literal["equivalent", "warn", "reject"]
 Condition = Literal["service_started", "service_healthy", "service_completed_successfully"]
 RestartPolicy = Literal["no", "always", "unless-stopped", "on-failure"]
@@ -80,7 +82,8 @@ class Service:
     depends_on: Mapping[str, Dependency] = field(default_factory=dict)
     networks: Mapping[str, NetworkAttachment] = field(default_factory=dict)  # empty = network_mode: none
     volumes: tuple[VolumeMount, ...] = ()
-    tmpfs: tuple[str, ...] = ()
+    tmpfs: tuple[TmpfsMount, ...] = ()
+    readonly_rootfs: bool = False
     restart: RestartPolicy = "no"
     privileged: bool = False
     container_name: str | None = None
