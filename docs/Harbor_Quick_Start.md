@@ -36,6 +36,13 @@ Use fresh job names on subsequent runs. `flotilla inspect` checks the task's mai
 - Main-service termination preserves a local log snapshot for Harbor's later collection while sidecars remain available. Failures to confirm service termination cannot be accepted as a normal verifier result.
 - `force_build` selects available source builds while retaining Docker layer caching.
 
+## Running at scale
+
+- Run the Harbor driver on a dedicated machine. One driver process holds an event loop, one stream per in-flight command, and any local BuildKit preparation; sharing it with other heavy workloads stalls the loop and surfaces as false environment-start timeouts across the whole job.
+- Prewarm before loading: run one low-concurrency pass (for example `nop`) so every task image is built or derived and pushed once; the loaded run then performs no local builds and starts in seconds.
+- Scale out, not up: raise total concurrency by sharding jobs across driver processes instead of one large `--n-concurrent`; each process runs its own preparation and keeps its own limits.
+- Judge by per-trial `result.json` and cleanup records (below), never by CLI exit codes or wall-clock impressions.
+
 ## Acceptance
 
 Inspect every trial's `result.json`: require no infrastructure exception and the task's expected verifier reward. A successful CLI exit alone does not establish success. Check agent/verifier logs, artifacts, resource overrides, and each `flotilla/<session>/environment.json` / `cleanup.json` record. Session records distinguish separate verifiers.
