@@ -31,12 +31,15 @@ flowchart LR
     Manager --> Core[Lifecycle core]
     Core --> Platform[Platform protocol]
     Platform --> Backend[OpenSandbox current / legacy]
+    Platform --> Plugin[Backend plugins]
     Harbor[Harbor adapter] --> API
 ```
 
 `compose` validates source semantics into a project. `build` resolves images and exports files without platform access. Preparation owns the subprocess, temporary directory, Docker-container journal, and publication staging. The IPC manifest is validated at the subprocess boundary; the runtime prepares one private parsed result and digest from it. Project, manifest, and runtime plan serve distinct boundaries.
 
 `runtime` owns admission, environment handles, monitoring, and cleanup. Each client has one maintenance loop in a separate thread. Diagnostic callbacks use a bounded dispatcher thread; local file scans and reads use owned thread work that must settle before their directory is removed. Preparation capacity is retained if cleanup cannot be confirmed.
+
+`backends` selects the platform: the built-in OpenSandbox backend or a plugin from the `flotilla.backends` entry-point group, and every caller (runtime, probe, GC, share) constructs it through `FlotillaConfig.build_platform`. See [Writing a backend](Writing_a_Backend.md).
 
 `core` depends on the Platform protocol and injected Clock. Its anchor is a renewable sandbox mounting the shared root. Launch and trial labels allow reconciliation after uncertain creates; a create response timeout does not imply that creation failed. Startup reserves replacement capacity and uses actual dependency gates. Cleanup releases capacity only after deletion is confirmed.
 
@@ -46,4 +49,4 @@ Shared storage separates immutable share releases, immutable task publications, 
 
 The anchor stops admitting new work after its renewal grace period. GC uses two observations and list-visibility bounds to avoid collecting a live owner. Explicit GC handles abandoned resources after crashes; it is not a scheduler inside the runtime.
 
-Reading entry points: `runtime/client.py`, `preparation/service.py`, `core/trial.py`, `core/reaper.py`, and `platform/base.py`. The public `flotilla.testing` package provides clocks, fake registries, and a deliberately limited fake platform for downstream contract tests; it ships in the wheel, and runtime packages never import it. See [the API](Runtime_API.md) for user contracts, [OpenSandbox](backends/opensandbox.md) for protocol details, and [downstream contracts](downstream.md) for the testing surface.
+Reading entry points: `runtime/client.py`, `preparation/service.py`, `core/trial.py`, `core/reaper.py`, and `platform/base.py`. The public `flotilla.testing` package provides clocks, fake registries, and a deliberately limited fake platform for downstream contract tests; it ships in the wheel, and runtime packages never import it. See [the API](Runtime_API.md) for user contracts, [OpenSandbox](backends/opensandbox.md) for protocol details, and [integration guide](Integration_Guide.md) for the testing surface.
