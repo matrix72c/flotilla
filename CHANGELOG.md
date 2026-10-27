@@ -22,6 +22,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - Preserve non-root image `USER` for workload execution while preparing a root-default runtime image for the exec daemon, including linked and mirrored source images.
 - Retry confirmed timeouts of the internal no-op health probe within the existing check budget instead of immediately losing the environment; user commands are never replayed.
 - Treat execd command-stream `409 CONFLICT` responses as explicit `CommandBusy` rejections: healthchecks skip that round, foreground and background calls preserve the rejection, and commands are never automatically replayed. Other conflicts retain their existing classification.
+- Send each sandbox's execd access token when replacing its network policy. Upstream OpenSandbox's Docker runtime serves `PUT /sandboxes/{id}/networkpolicy` through execd's proxy and rejected the unauthenticated request with HTTP 401, so linking multi-service environments failed.
 
 ## [0.1.1] - 2026-10-20
 
