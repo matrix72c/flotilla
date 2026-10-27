@@ -135,8 +135,9 @@ def fold_exec(events: Sequence[Mapping[str, Any]]) -> ExecResult:
 
 
 def _line(event: Mapping[str, Any]) -> str:
+    # execd before 1.1.1 strips line terminators (a blank line arrives as "\n"); 1.1.1 and later keep them.
     text = str(event.get("text") or "")
-    return text if text == "\n" else text + "\n"
+    return text if text.endswith(("\n", "\r")) else text + "\n"
 
 
 def _error_exit_code(event: Mapping[str, Any]) -> int | None:

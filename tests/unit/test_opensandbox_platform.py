@@ -441,11 +441,17 @@ async def test_sandbox_link_uses_exact_topology_and_same_upstream_endpoint(
             body = json.loads(request.content)
             assert all(not r["target"].startswith("sandbox:") for r in body["networkPolicy"]["egress"])
             assert body["extensions"] == {"project": "p1"}
-            return httpx.Response(200, json={"id": next(ids)})
+            iid = next(ids)
+            created[iid] = body["env"]["EXECD_ACCESS_TOKEN"]
+            return httpx.Response(200, json={"id": iid})
         assert request.method == "PUT" and request.url.path.endswith("/networkpolicy")
-        policies[request.url.path.split("/")[3]] = json.loads(request.content)
+        iid = request.url.path.split("/")[3]
+        policies[iid] = json.loads(request.content)
+        tokens[iid] = request.headers.get(EXECD_TOKEN_HEADER)
         return httpx.Response(200)
 
+    created: dict[str, str] = {}
+    tokens: dict[str, str | None] = {}
     platform = _platform(handler, clock, caps=caps, settings=NetworkSettings(link="sandbox"))
     external = ExternalPolicy(mode="allowlist", hosts=("model.example.com",))
     members = {name: await clock.run(platform.create(_spec(name, external))) for name in ("a", "b", "c")}
@@ -460,6 +466,8 @@ async def test_sandbox_link_uses_exact_topology_and_same_upstream_endpoint(
         ],
         "sb-c": [{"action": "allow", "target": "sandbox:sb-b"}, {"action": "allow", "target": "model.example.com"}],
     }
+    # Each policy update carries that sandbox's own execd token (upstream Docker routes it through execd).
+    assert tokens == created and len(set(created.values())) == 3
     await clock.run(platform.link(members, Topology(networks={})))
     assert all(
         p == {"defaultAction": "deny", "egress": [{"action": "allow", "target": "model.example.com"}]}

@@ -99,6 +99,16 @@ def test_fold_exec_restores_lines() -> None:
     assert fold_exec(events).stdout.decode().splitlines() == ["a", "", "b", "c", "d"]
 
 
+def test_fold_exec_keeps_terminated_lines() -> None:
+    # execd 1.1.1+ keeps each line's terminator; it must not be doubled.
+    texts = ["a\n", "\n", "b\r", "c\r\n", "d"]
+    events = [{"type": "stdout", "text": t} for t in texts] + [{"type": "stderr", "text": "e\n"}]
+    result = fold_exec([*events, {"type": "execution_complete"}])
+    assert result.stdout == b"a\n\nb\rc\r\nd\n"
+    assert result.stdout.decode().splitlines() == ["a", "", "b", "c", "d"]
+    assert result.stderr == b"e\n"
+
+
 def test_fold_exec_error_exit_code() -> None:
     events = parse_events(_sse('{"type":"error","error":{"ename":"CommandExecError","evalue":"7"}}'))
     result = fold_exec(events)
