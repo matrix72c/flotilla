@@ -19,7 +19,7 @@ Flotilla is alpha software. The supported target is **Linux x86_64 and Python 3.
 
 ## Requirements
 
-- An OpenSandbox deployment, with shared storage that every sandbox worker can mount. See [Platform requirements](docs/Platform_Requirements.md).
+- An OpenSandbox deployment, with shared storage that every sandbox worker can mount. The features it must enable are listed in [Platform requirements](docs/Platform_Requirements.md).
 - On the machine that runs Flotilla: Docker with BuildKit/buildx, push access to an image registry, and network access to the OpenSandbox server.
 - The sandbox platform must be able to pull the images from that registry.
 
@@ -81,7 +81,7 @@ asyncio.run(main())
 | [Deployment guide](docs/Deployment.md) | Setting up a deployment once |
 | [Configuration reference](docs/Configuration.md) | `deployment.toml` and `declared.json` fields |
 | [OpenSandbox backend](docs/backends/opensandbox.md) | execd protocols, storage, and network modes |
-| [Platform requirements](docs/Platform_Requirements.md) | What a deployment must provide and how it is verified |
+| [Platform requirements](docs/Platform_Requirements.md) | What a deployment must enable, feature by feature, and how each is verified |
 | [Network validation](docs/Network_Validation.md) | Verifying isolation on a real deployment |
 | [Architecture](docs/Architecture.md) | Internals and terminology |
 
