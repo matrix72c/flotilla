@@ -104,9 +104,13 @@ class Lifecycle:
             "POST", f"{sandbox_path(iid)}/renew-expiration", stage="run", idempotent=True, json=body
         )
 
-    async def put_policy(self, iid: str, policy: Mapping[str, Any], *, stage: Stage) -> None:
+    async def put_policy(
+        self, iid: str, policy: Mapping[str, Any], *, stage: Stage, headers: Mapping[str, str] | None = None
+    ) -> None:
         """`PUT /sandboxes/{id}/networkpolicy` replaces the whole policy; idempotent."""
-        await self._http.request("PUT", f"{sandbox_path(iid)}/networkpolicy", stage=stage, idempotent=True, json=policy)
+        await self._http.request(
+            "PUT", f"{sandbox_path(iid)}/networkpolicy", stage=stage, idempotent=True, json=policy, headers=headers
+        )
 
 
 def _dedupe(states: list[InstanceState]) -> list[InstanceState]:

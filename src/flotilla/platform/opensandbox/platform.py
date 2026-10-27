@@ -250,9 +250,10 @@ class OpenSandboxPlatform:
             targets = {name: await self.internal_address(handle) for name, handle in members.items()}
         for name, handle in members.items():
             peers = _peers_of(name, topology, targets)
-            external = (await self._unit_of(handle.iid, stage="wire")).external
-            policy = compile_policy(external, peers, self._settings)
-            await self._lifecycle.put_policy(handle.iid, policy, stage="wire")
+            unit = await self._unit_of(handle.iid, stage="wire")
+            policy = compile_policy(unit.external, peers, self._settings)
+            # Upstream's Docker runtime serves this route through execd's proxy, which requires the execd token.
+            await self._lifecycle.put_policy(handle.iid, policy, stage="wire", headers={EXECD_TOKEN_HEADER: unit.token})
 
     async def aclose(self) -> None:
         """Close the shared HTTP clients (called by whoever built the platform when done)."""
