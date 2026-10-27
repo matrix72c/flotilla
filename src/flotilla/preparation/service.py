@@ -159,8 +159,7 @@ class Preparer:
         # filesystem reads cannot block the runtime's renewal/cleanup loop.
         stage = operation.directory
         request, result = stage / "request.json", stage / "result.json"
-        config = self.cfg.model_dump(mode="json", exclude={"base_dir"})
-        config["opensandbox"]["capabilities"] = str(self.cfg.capabilities_path().resolve())
+        config = self.cfg.to_mapping()
         request.write_text(
             json.dumps(
                 {
@@ -216,7 +215,11 @@ class Preparer:
                     stdout=output,
                     stderr=output,
                     start_new_session=True,
-                    env={key: value for key, value in os.environ.items() if key != self.cfg.opensandbox.credential_env},
+                    env={
+                        key: value
+                        for key, value in os.environ.items()
+                        if key != self.cfg.backend_settings.credential_env
+                    },
                 )
             )
             try:

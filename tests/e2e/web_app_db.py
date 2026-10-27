@@ -220,17 +220,17 @@ async def run(args: argparse.Namespace) -> tuple[dict[str, object], list[Result]
     report = cfg.load_report()
     clock = SystemClock()
     platform = build(
-        endpoint=cfg.opensandbox.endpoint,
+        endpoint=cfg.opensandbox_settings().endpoint,
         credential=cfg.credential(),
         clock=clock,
         settings=cfg.network_settings(),
         storage=cfg.storage_settings(),
         caps=report.to_capabilities(),
         execd=cfg.execd_settings(),
-        extensions=cfg.opensandbox.extensions,
-        privileged_extensions=cfg.opensandbox.privileged_extensions,
-        create_fields=cfg.opensandbox.create_fields,
-        group_extension=cfg.opensandbox.group_extension,
+        extensions=cfg.opensandbox_settings().extensions,
+        privileged_extensions=cfg.opensandbox_settings().privileged_extensions,
+        create_fields=cfg.opensandbox_settings().create_fields,
+        group_extension=cfg.opensandbox_settings().group_extension,
     )
     out: dict[str, object] = {
         "deployment": report.deployment,

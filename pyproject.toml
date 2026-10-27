@@ -136,6 +136,7 @@ type = "forbidden"
 source_modules = ["flotilla.core"]
 forbidden_modules = [
   "flotilla.platform.opensandbox",
+  "flotilla.backends",
   "flotilla.compose",
   "flotilla.build",
   "flotilla.scan",

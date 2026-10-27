@@ -348,7 +348,7 @@ class Clock(Protocol):
 
 @runtime_checkable
 class Platform(Protocol):
-    """All core calls to the platform go through this protocol. See `docs/Architecture.md` for the backend contract."""
+    """All core calls to the platform go through this protocol. See `docs/Writing_a_Backend.md` for the contract."""
 
     caps: Capabilities
 

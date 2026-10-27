@@ -6,6 +6,7 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Added
 
+- Pluggable sandbox backends. A package registers a `flotilla.backends.Backend` subclass in the `flotilla.backends` entry-point group; a deployment selects it with `backend = "<name>"` and configures it in `[backends.<name>]`. The built-in OpenSandbox backend keeps its `[opensandbox]` table, and existing configurations and capability-report fingerprints are unchanged. See [Writing a backend](docs/Writing_a_Backend.md).
 - Opt-in internal lifecycle support for Compose read-only root filesystems and native tmpfs, with independent behavioral probes, effective-configuration verification, private framework scratch mounts, and strict upstream-compatible request defaults.
 
 - Task-level `network_mode = "no-network"` and `allow_internet = false`, preserving service links while removing external access throughout preparation and execution.
@@ -15,6 +16,7 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Changed
 
+- `flotilla probe`, `gc`, and `share` construct their platform through the same factory as the runtime, so `opensandbox.privileged_extensions` now also applies to privileged instances these commands create.
 - tmpfs now requires native support; the previous empty-directory approximation is removed without fallback. Private preparation manifests use schema 5 and must be regenerated.
 
 ### Fixed

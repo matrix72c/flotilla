@@ -31,7 +31,6 @@ from flotilla.platform.base import (
 )
 from flotilla.platform.clock import SystemClock
 from flotilla.platform.execution import confirm_stopped
-from flotilla.platform.opensandbox import build
 from flotilla.runtime.planning import AgentOverlay, to_plan
 from flotilla.runtime.types import (
     ENVIRONMENT_RESERVATION_COPIES,
@@ -75,21 +74,8 @@ class Manager:
         cfg.check_against(report)
         self.capability_report = report
         command_rate = RateLimiter(self.clock, cfg.limits.exec_rate)
-        self.platform = platform or build(
-            endpoint=cfg.opensandbox.endpoint,
-            credential=cfg.credential(),
-            clock=self.clock,
-            settings=cfg.network_settings(),
-            storage=cfg.storage_settings(),
-            caps=cfg.platform_capabilities(report),
-            execd=cfg.execd_settings(),
-            filesystem=cfg.filesystem_settings(),
-            command_gate=command_rate.acquire,
-            extensions=cfg.opensandbox.extensions,
-            create_fields=cfg.opensandbox.create_fields,
-            group_extension=cfg.opensandbox.group_extension,
-            privileged_extensions=cfg.opensandbox.privileged_extensions,
-            create_timeout_s=cfg.timeouts.create,
+        self.platform = platform or cfg.build_platform(
+            clock=self.clock, caps=cfg.platform_capabilities(report), command_gate=command_rate.acquire
         )
         self.launch_id = f"run-{uuid.uuid4().hex[:16]}"
         self.anchor = Anchor(self.platform, self.clock, self.launch_id, cfg.anchor_settings())

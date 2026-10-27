@@ -40,7 +40,7 @@ async def run(deployment: Path, image: str, output: Path, *, cases: tuple[str, .
     if (needs_readonly and not caps.readonly_rootfs) or (needs_tmpfs and not caps.native_tmpfs):
         raise ValueError("contract requires matching successful probes for the requested filesystem capabilities")
     result: dict[str, Any] = {
-        "protocol": cfg.opensandbox.filesystem_protocol,
+        "protocol": cfg.opensandbox_settings().filesystem_protocol,
         "cases": cases,
         "checks": [],
         "clean": False,
@@ -58,7 +58,7 @@ async def run(deployment: Path, image: str, output: Path, *, cases: tuple[str, .
             raise AssertionError(name)
 
     observer = build(
-        endpoint=cfg.opensandbox.endpoint,
+        endpoint=cfg.opensandbox_settings().endpoint,
         credential=cfg.credential(),
         clock=SystemClock(),
         caps=caps,
@@ -66,9 +66,9 @@ async def run(deployment: Path, image: str, output: Path, *, cases: tuple[str, .
         storage=cfg.storage_settings(),
         execd=cfg.execd_settings(),
         filesystem=cfg.filesystem_settings(),
-        extensions=cfg.opensandbox.extensions,
-        create_fields=cfg.opensandbox.create_fields,
-        group_extension=cfg.opensandbox.group_extension,
+        extensions=cfg.opensandbox_settings().extensions,
+        create_fields=cfg.opensandbox_settings().create_fields,
+        group_extension=cfg.opensandbox_settings().group_extension,
     )
     fleet = Flotilla(deployment=cfg)
     try:

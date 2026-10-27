@@ -62,7 +62,7 @@ async def run(deployment: Path, image: str, output: Path, *, services: int = 3, 
         )
     )
     result: dict[str, Any] = {
-        "protocol": cfg.opensandbox.execd.protocol,
+        "protocol": cfg.opensandbox_settings().execd.protocol,
         "service_count": services,
         "checks": [],
         "skipped": []
@@ -83,16 +83,16 @@ async def run(deployment: Path, image: str, output: Path, *, services: int = 3, 
             raise AssertionError(name)
 
     observer = build(
-        endpoint=cfg.opensandbox.endpoint,
+        endpoint=cfg.opensandbox_settings().endpoint,
         credential=cfg.credential(),
         clock=SystemClock(),
         settings=cfg.network_settings(),
         storage=cfg.storage_settings(),
         caps=cfg.load_report().to_capabilities(),
         execd=cfg.execd_settings(),
-        extensions=cfg.opensandbox.extensions,
-        create_fields=cfg.opensandbox.create_fields,
-        group_extension=cfg.opensandbox.group_extension,
+        extensions=cfg.opensandbox_settings().extensions,
+        create_fields=cfg.opensandbox_settings().create_fields,
+        group_extension=cfg.opensandbox_settings().group_extension,
     )
     fleet = Flotilla(deployment=cfg)
     pending: asyncio.Task[Any] | None = None

@@ -32,6 +32,7 @@ Unit tests need local asyncio sockets but no deployment, credentials, or Docker.
 - `core` depends only on `platform.base` and reads time through an injected `Clock`, never the wall clock.
 - `compose`, `build`, and `scan` never call a real backend.
 - Adapters (`integrations`), `probe`, `cli`, and the `testing` doubles are outer layers; nothing internal imports them.
+- Runtime and CLI code constructs platforms through `FlotillaConfig.build_platform`, not a backend factory directly, so the runtime and every CLI command use the same settings. New platforms are usually better as a separate package; see [Writing a backend](docs/Writing_a_Backend.md).
 
 Shared test clocks, fixtures, fake builders, and the fake platform are in `src/flotilla/testing`, packaged as the public testing surface: downstream contract tests import them from `flotilla.testing`, and runtime packages never do (enforced by import-linter). Test modules must not import other test modules. The fake platform deliberately fails on operations it does not model; extend it rather than loosening it.
 

@@ -41,16 +41,16 @@ release_sha256 = "{SHA}"
     )
     cfg = FlotillaConfig.load(tmp_path / "flotilla.toml")
     assert cfg.capabilities_path() == tmp_path / "deployments/test.json"
-    assert cfg.opensandbox.create_fields["ports"][0]["containerPort"] == 44772
+    assert cfg.opensandbox_settings().create_fields["ports"][0]["containerPort"] == 44772
     assert cfg.storage_settings().host_path == "/srv/flotilla"
     assert cfg.network.policy() == ExternalPolicy(mode="none")  # no external given: only none
 
 
 def test_group_extension_is_optional() -> None:
-    assert config().opensandbox.group_extension is None
+    assert config().opensandbox_settings().group_extension is None
     data = config_data()
     data["opensandbox"] = {**data["opensandbox"], "group_extension": "sandboxGroup"}
-    assert FlotillaConfig.from_mapping(data).opensandbox.group_extension == "sandboxGroup"
+    assert FlotillaConfig.from_mapping(data).opensandbox_settings().group_extension == "sandboxGroup"
 
 
 def test_pvc_storage_translates_to_settings() -> None:
@@ -60,7 +60,7 @@ def test_pvc_storage_translates_to_settings() -> None:
 
 
 def test_endpoint_trailing_slash_normalized() -> None:
-    assert config().opensandbox.endpoint == "http://os.test"
+    assert config().opensandbox_settings().endpoint == "http://os.test"
 
 
 @pytest.mark.parametrize(

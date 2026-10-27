@@ -147,7 +147,7 @@ def test_report_requires_matching_dialect_and_runtime_profile() -> None:
     assert not cfg.platform_capabilities(report()).readonly_rootfs
     changes: list[dict[str, Any]] = [{"filesystem_protocol": "upstream"}, {"extensions": {"runtimeClass": "kata"}}]
     for changed in changes:
-        other = cfg.model_copy(update={"opensandbox": cfg.opensandbox.model_copy(update=changed)})
+        other = cfg.model_copy(update={"opensandbox": cfg.opensandbox_settings().model_copy(update=changed)})
         assert not other.platform_capabilities(evidence).readonly_rootfs
     unmeasured = evidence.model_copy(update={"filesystem_profile": None})
     assert not cfg.platform_capabilities(unmeasured).native_tmpfs

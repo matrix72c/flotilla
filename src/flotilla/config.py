@@ -9,14 +9,14 @@ import logging
 import os
 import re
 import tomllib
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
 from pathlib import Path
 from typing import Annotated, Any, Literal
-from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
+from flotilla.backends import BUILTIN, Backend, BackendSettings, load_backend
 from flotilla.build.images import BuildSettings
 from flotilla.capabilities import SECURITY_FIELDS, CapabilityReport
 from flotilla.compose.resources import cpu, memory
@@ -25,15 +25,15 @@ from flotilla.core.reaper import ReaperSettings
 from flotilla.core.runtime import MonitorSettings
 from flotilla.core.trial import TrialSettings
 from flotilla.manifest import Manifest
-from flotilla.platform.base import Capabilities, ExternalPolicy, Resources
+from flotilla.platform.base import Capabilities, Clock, ExternalPolicy, Platform, Resources
 from flotilla.platform.opensandbox import ExecdSettings, NetworkSettings, StorageSettings
+from flotilla.platform.opensandbox import build as build_opensandbox
 from flotilla.platform.opensandbox.filesystem import FilesystemProtocol, FilesystemSettings
 
 #: Anchor renewal retry interval (`AnchorSettings.retry_interval_s`); the renew interval cannot be shorter.
 ANCHOR_RETRY_S = AnchorSettings(image="x").retry_interval_s
 PositiveFloat = Annotated[float, Field(gt=0)]
 PositiveInt = Annotated[int, Field(gt=0)]
-_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _RELEASE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 
@@ -72,37 +72,18 @@ class OpenSandboxExecd(_Model):
     wrapper: str = ExecdSettings().wrapper
 
 
-class OpenSandbox(_Model):
-    endpoint: str
-    credential_env: str
-    capabilities: str  # capability report path (from `flotilla probe`); relative to the config file's directory
-    extensions: dict[str, Any] = {}
-    privileged_extensions: dict[str, Any] = {}
+class OpenSandbox(BackendSettings):
+    """`[opensandbox]`: the built-in backend's table."""
+
+    extensions: dict[str, Any] = Field(default_factory=dict)
+    privileged_extensions: dict[str, Any] = Field(default_factory=dict)
     network: OpenSandboxNetwork = OpenSandboxNetwork()
     execd: OpenSandboxExecd = OpenSandboxExecd()
     filesystem_protocol: FilesystemProtocol = "upstream"
-    create_fields: dict[str, Any] = {}
+    create_fields: dict[str, Any] = Field(default_factory=dict)
     group_extension: str | None = (
         None  # `extensions` key for the placement group; unset if the deployment lacks group scheduling
     )
-
-    @field_validator("endpoint")
-    @classmethod
-    def _endpoint(cls, value: str) -> str:
-        parts = urlsplit(value)
-        if parts.scheme not in ("http", "https") or not parts.netloc:
-            raise ValueError(f"endpoint must be an http(s) URL: {value!r}")
-        return value.rstrip("/")
-
-    @field_validator("credential_env")
-    @classmethod
-    def _credential_env(cls, value: str) -> str:
-        if not _ENV_NAME.fullmatch(value):
-            # Do not echo the value: the most common mistake here is pasting the credential itself.
-            raise ValueError(
-                "credential_env must be an environment variable name ([A-Za-z_][A-Za-z0-9_]*), not the credential"
-            )
-        return value
 
 
 class Build(_Model):
@@ -309,7 +290,9 @@ class Preparation(_Model):
 
 
 class FlotillaConfig(_Model):
-    opensandbox: OpenSandbox
+    backend: str = BUILTIN
+    opensandbox: OpenSandbox | None = None  # built-in backend table
+    backends: dict[str, dict[str, Any]] = {}  # third-party backend tables, validated by the selected backend
     storage: Storage
     build: Build = Build()
     preparation: Preparation = Preparation()
@@ -330,19 +313,20 @@ class FlotillaConfig(_Model):
 
     @model_validator(mode="after")
     def _local(self) -> FlotillaConfig:
-        problems = []
-        net = self.opensandbox.network
-        if net.ingress == "sandbox" and net.link != "sandbox":
-            problems.append("ingress = sandbox requires link = sandbox")
-        narrow = () if self.network.external == "any" else self.network.external
-        if net.link == "cidr" and not net.sandbox_cidrs:
-            problems.append("opensandbox.network.link = cidr requires sandbox_cidrs")
-        if net.link == "sandbox" and self.network.external == "any":
-            problems.append("link = sandbox supports only external = [] or an allowlist, not external = any")
-        if net.link == "cidr" and self.network.external == "any" and not net.platform_cidrs:
-            problems.append("network.external = any requires opensandbox.network.platform_cidrs")
-        if net.link == "cidr" and any(_as_network(t) for t in narrow) and not net.sandbox_cidrs:
-            problems.append("network.external with CIDRs requires opensandbox.network.sandbox_cidrs")
+        backend = load_backend(self.backend)
+        if self.backend == BUILTIN:
+            if self.backends:
+                raise ValueError("[backends.*] tables are only read for third-party backends; use [opensandbox]")
+            if self.opensandbox is None:
+                raise ValueError("[opensandbox] is required (or select another backend with backend = ...)")
+        else:
+            if self.opensandbox is not None:
+                raise ValueError(f"[opensandbox] is set but backend = {self.backend!r}")
+            if self.backend not in self.backends:
+                raise ValueError(f"backend = {self.backend!r} requires a [backends.{self.backend}] table")
+            if unused := sorted(set(self.backends) - {self.backend}):
+                raise ValueError(f"[backends.*] tables for unselected backends: {', '.join(unused)}")
+        problems = backend.check(self.backend_settings, self)
         if problems:
             raise ValueError("; ".join(problems))
         return self
@@ -365,8 +349,35 @@ class FlotillaConfig(_Model):
     def from_mapping(cls, data: Mapping[str, Any], *, base_dir: Path | None = None) -> FlotillaConfig:
         return cls.model_validate({**data, "base_dir": base_dir})
 
+    @property
+    def backend_settings(self) -> BackendSettings:
+        """The selected backend's validated table: `[opensandbox]` or `[backends.<name>]`."""
+        if self.backend == BUILTIN:
+            return self.opensandbox_settings()
+        table = self.backends[self.backend]
+        try:
+            return load_backend(self.backend).settings_model.model_validate(table)
+        except ValidationError as exc:
+            # Re-raise with the TOML path; `hide_input_in_errors` keeps values out of the message.
+            prefix = f"backends.{self.backend}"
+            raise ValueError(
+                "; ".join(f"{'.'.join([prefix, *map(str, e['loc'])])}: {e['msg']}" for e in exc.errors())
+            ) from None
+
+    def opensandbox_settings(self) -> OpenSandbox:
+        if self.opensandbox is None:
+            raise ConfigError([f"backend {self.backend!r} has no [opensandbox] settings"])
+        return self.opensandbox
+
+    def to_mapping(self) -> dict[str, Any]:
+        """JSON-compatible config with an absolute report path, for a child process without `base_dir`."""
+        data = self.model_dump(mode="json", exclude={"base_dir"})
+        table = data["opensandbox"] if self.backend == BUILTIN else data["backends"][self.backend]
+        table["capabilities"] = str(self.capabilities_path().resolve())
+        return data
+
     def capabilities_path(self) -> Path:
-        path = Path(self.opensandbox.capabilities)
+        path = Path(self.backend_settings.capabilities)
         if not path.is_absolute() and self.base_dir is not None:
             path = self.base_dir / path
         return path
@@ -381,43 +392,41 @@ class FlotillaConfig(_Model):
         matched = report.filesystem_profile == self.filesystem_profile()
         caps = replace(
             caps,
-            sandbox_ingress=self.opensandbox.network.ingress == "sandbox",
             readonly_rootfs=caps.readonly_rootfs and matched,
             native_tmpfs=caps.native_tmpfs and matched,
         )
-        return self.filesystem_settings().capabilities(caps)
+        return load_backend(self.backend).capabilities(self.backend_settings, self, caps)
 
     def filesystem_settings(self) -> FilesystemSettings:
-        return FilesystemSettings(self.opensandbox.filesystem_protocol)
+        return FilesystemSettings(self.opensandbox_settings().filesystem_protocol)
 
     def filesystem_profile(self) -> str:
         """Evidence applies to these creation/runtime settings, never just a hostname."""
-        settings = self.opensandbox
-        data = [
-            settings.filesystem_protocol,
-            settings.extensions,
-            settings.privileged_extensions,
-            settings.create_fields,
-        ]
-        return hashlib.sha256(json.dumps(data, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        return load_backend(self.backend).profile(self.backend_settings, self)
 
     def credential(self, environ: Mapping[str, str] | None = None) -> str:
         """Read the platform credential from the environment; the error names only the variable."""
         env = os.environ if environ is None else environ
-        value = env.get(self.opensandbox.credential_env, "")
+        name = self.backend_settings.credential_env
+        value = env.get(name, "")
         if not value:
-            raise ConfigError(
-                [f"environment variable {self.opensandbox.credential_env} is not set (platform credential)"]
-            )
+            raise ConfigError([f"environment variable {name} is not set (platform credential)"])
         return value
+
+    def build_platform(
+        self, *, clock: Clock, caps: Capabilities, command_gate: Callable[[], Awaitable[None]] | None = None
+    ) -> Platform:
+        """Construct the selected backend's platform client; the caller owns it and calls `aclose()`."""
+        return load_backend(self.backend).build(
+            self.backend_settings, self, clock=clock, credential=self.credential(), caps=caps, command_gate=command_gate
+        )
 
     def check_against(self, report: CapabilityReport) -> None:
         """Startup validation without platform calls. Raises `ConfigError` listing every problem."""
         problems: list[str] = []
-        if report.endpoint.rstrip("/") != self.opensandbox.endpoint:
-            problems.append(
-                f"capability report endpoint {report.endpoint} does not match config {self.opensandbox.endpoint}"
-            )
+        endpoint = self.backend_settings.endpoint
+        if report.endpoint.rstrip("/") != endpoint:
+            problems.append(f"capability report endpoint {report.endpoint} does not match config {endpoint}")
         problems += [f"deployment lacks required capability: {name}" for name in report.missing_required()]
 
         form = self.network.policy().mode
@@ -492,7 +501,7 @@ class FlotillaConfig(_Model):
         )
 
     def network_settings(self) -> NetworkSettings:
-        n = self.opensandbox.network
+        n = self.opensandbox_settings().network
         return NetworkSettings(
             sandbox_cidrs=n.sandbox_cidrs,
             platform_cidrs=n.platform_cidrs,
@@ -505,7 +514,7 @@ class FlotillaConfig(_Model):
         return self.storage.settings()
 
     def execd_settings(self) -> ExecdSettings:
-        e = self.opensandbox.execd
+        e = self.opensandbox_settings().execd
         return ExecdSettings(
             protocol=e.protocol, wrapper=e.wrapper, output_limit_bytes=self.runtime.exec_output_limit_bytes
         )
@@ -532,3 +541,67 @@ def _is_hostname(target: str) -> bool:
 
 
 __all__ = ["SECURITY_FIELDS", "ConfigError", "FlotillaConfig"]
+
+
+class OpenSandboxBackend(Backend[OpenSandbox]):
+    """The built-in backend, configured by `[opensandbox]`."""
+
+    settings_model = OpenSandbox
+
+    def check(self, settings: OpenSandbox, cfg: FlotillaConfig) -> list[str]:
+        problems = []
+        net = settings.network
+        external = cfg.network.external
+        if net.ingress == "sandbox" and net.link != "sandbox":
+            problems.append("ingress = sandbox requires link = sandbox")
+        narrow = () if external == "any" else external
+        if net.link == "cidr" and not net.sandbox_cidrs:
+            problems.append("opensandbox.network.link = cidr requires sandbox_cidrs")
+        if net.link == "sandbox" and external == "any":
+            problems.append("link = sandbox supports only external = [] or an allowlist, not external = any")
+        if net.link == "cidr" and external == "any" and not net.platform_cidrs:
+            problems.append("network.external = any requires opensandbox.network.platform_cidrs")
+        if net.link == "cidr" and any(_as_network(t) for t in narrow) and not net.sandbox_cidrs:
+            problems.append("network.external with CIDRs requires opensandbox.network.sandbox_cidrs")
+        return problems
+
+    def capabilities(self, settings: OpenSandbox, cfg: FlotillaConfig, caps: Capabilities) -> Capabilities:
+        caps = replace(caps, sandbox_ingress=settings.network.ingress == "sandbox")
+        return FilesystemSettings(settings.filesystem_protocol).capabilities(caps)
+
+    def profile(self, settings: OpenSandbox, cfg: FlotillaConfig) -> str:
+        # Fixed field list: existing capability reports record this exact digest.
+        data = [
+            settings.filesystem_protocol,
+            settings.extensions,
+            settings.privileged_extensions,
+            settings.create_fields,
+        ]
+        return hashlib.sha256(json.dumps(data, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+    def build(
+        self,
+        settings: OpenSandbox,
+        cfg: FlotillaConfig,
+        *,
+        clock: Clock,
+        credential: str,
+        caps: Capabilities,
+        command_gate: Callable[[], Awaitable[None]] | None = None,
+    ) -> Platform:
+        return build_opensandbox(
+            endpoint=settings.endpoint,
+            credential=credential,
+            clock=clock,
+            settings=cfg.network_settings(),
+            storage=cfg.storage_settings(),
+            caps=caps,
+            execd=cfg.execd_settings(),
+            filesystem=cfg.filesystem_settings(),
+            command_gate=command_gate,
+            extensions=settings.extensions,
+            create_fields=settings.create_fields,
+            group_extension=settings.group_extension,
+            privileged_extensions=settings.privileged_extensions,
+            create_timeout_s=cfg.timeouts.create,
+        )
