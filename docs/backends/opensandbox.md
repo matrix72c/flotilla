@@ -12,6 +12,7 @@ Authentication and other non-retryable failures stop readiness/reconciliation po
 | File routes | `/v1/filesystem/{uid}/{gid}/...` | `/files/...` |
 | Upload ownership | Route selects writing identity | Root writes, then chown and chmod restore requested metadata |
 | Literal upload paths | Identity route contract | Absolute path without `$`; remote expansion is rejected |
+| execd version | 1.1.1 or later (argv requests and identity file routes) | Older execd releases |
 
 Choose the deployment's actual protocol in `[opensandbox.execd]`; there is no speculative retry using a different protocol. Both paths use the configured BusyBox wrapper (default `/.flotilla/bin/busybox`). Task images must provide the shell/tools required by their own commands and build steps; Flotilla does not inject a missing `/bin/sh` into arbitrary images.
 

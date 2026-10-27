@@ -23,6 +23,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - Retry confirmed timeouts of the internal no-op health probe within the existing check budget instead of immediately losing the environment; user commands are never replayed.
 - Treat execd command-stream `409 CONFLICT` responses as explicit `CommandBusy` rejections: healthchecks skip that round, foreground and background calls preserve the rejection, and commands are never automatically replayed. Other conflicts retain their existing classification.
 - Send each sandbox's execd access token when replacing its network policy. Upstream OpenSandbox's Docker runtime serves `PUT /sandboxes/{id}/networkpolicy` through execd's proxy and rejected the unauthenticated request with HTTP 401, so linking multi-service environments failed.
+- Stop doubling line terminators in command output from execd 1.1.1 and later, which keeps each line's terminator in stdout/stderr events.
 
 ## [0.1.1] - 2026-10-20
 
