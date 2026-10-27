@@ -17,29 +17,10 @@ from flotilla.core.anchor import Anchor
 from flotilla.core.deletion import Deleter
 from flotilla.core.gc import Gc, GcReport
 from flotilla.core.volumes import LAUNCHES
-from flotilla.platform.base import Capabilities, FlotillaError
+from flotilla.platform.base import FlotillaError
 from flotilla.platform.clock import SystemClock
-from flotilla.platform.opensandbox import OpenSandboxPlatform, build
 from flotilla.probe import Declared, ProbeSettings, probe
 from flotilla.share.release import ReleaseError, VerifyReport, gc_releases, publish_release, verify_release
-
-
-def _platform(cfg: FlotillaConfig, clock: SystemClock, caps: Capabilities) -> OpenSandboxPlatform:
-    """Build the backend platform. `probe` passes bootstrap caps from the declared file; others use the report."""
-    return build(
-        endpoint=cfg.opensandbox.endpoint,
-        credential=cfg.credential(),
-        clock=clock,
-        settings=cfg.network_settings(),
-        storage=cfg.storage_settings(),
-        caps=caps,
-        execd=cfg.execd_settings(),
-        filesystem=cfg.filesystem_settings(),
-        extensions=cfg.opensandbox.extensions,
-        create_fields=cfg.opensandbox.create_fields,
-        group_extension=cfg.opensandbox.group_extension,
-        create_timeout_s=cfg.timeouts.create,
-    )
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -67,7 +48,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--out",
         type=Path,
-        help="output path for the capability report; defaults to opensandbox.capabilities in the config",
+        help="output path for the capability report; defaults to the backend table's capabilities path",
     )
     p.add_argument(
         "--hosts-recheck",
@@ -107,7 +88,7 @@ async def _probe(args: argparse.Namespace) -> int:
     cfg = FlotillaConfig.load(args.deployment)
     declared = Declared.model_validate_json(args.declared.read_bytes())
     clock = SystemClock()
-    platform = _platform(cfg, clock, declared.bootstrap_capabilities())
+    platform = cfg.build_platform(clock=clock, caps=declared.bootstrap_capabilities())
     # Temporary anchor with its own launch_id; mounts the shared root, removed on exit; only creates launches/<id>.
     anchor = Anchor(platform, clock, f"probe-{uuid.uuid4().hex[:12]}", cfg.anchor_settings())
     try:
@@ -117,7 +98,7 @@ async def _probe(args: argparse.Namespace) -> int:
             settings = ProbeSettings(
                 image=args.image,
                 share_release=cfg.share.release,
-                endpoint=cfg.opensandbox.endpoint,
+                endpoint=cfg.backend_settings.endpoint,
                 hosts_recheck_s=args.hosts_recheck,
                 filesystem_profile=cfg.filesystem_profile(),
             )
@@ -173,7 +154,7 @@ async def _gc(args: argparse.Namespace) -> int:
     """
     cfg = FlotillaConfig.load(args.deployment)
     clock = SystemClock()
-    platform = _platform(cfg, clock, cfg.platform_capabilities())
+    platform = cfg.build_platform(clock=clock, caps=cfg.platform_capabilities())
     anchor = Anchor(platform, clock, f"gc-{uuid.uuid4().hex[:12]}", cfg.anchor_settings())
     try:
         await anchor.start()
@@ -239,7 +220,7 @@ async def _share(args: argparse.Namespace) -> int:
     else:
         caps = cfg.platform_capabilities()
         expected = ""
-    platform = _platform(cfg, clock, caps)
+    platform = cfg.build_platform(clock=clock, caps=caps)
     anchor = Anchor(platform, clock, f"share-{uuid.uuid4().hex[:12]}", cfg.anchor_settings())
     try:
         await anchor.start()

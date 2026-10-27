@@ -48,7 +48,7 @@ exclude = [
 # Only public source roots may enter a source release.
 include = [
   "/src/flotilla", "/tests", "/docs", "/images", "/scripts", "/deployments/examples",
-  "/.github", "/.gitignore", "/README.md", "/CONTRIBUTING.md", "/LICENSE",
+  "/.github", "/.gitignore", "/README.md", "/README_zh.md", "/CONTRIBUTING.md", "/LICENSE",
   "/pyproject.toml", "/uv.lock", "/SECURITY.md", "/THIRD_PARTY.md", "/third_party",
   "/CHANGELOG.md", "/CODE_OF_CONDUCT.md", "/RELEASING.md",
 ]
@@ -136,6 +136,7 @@ type = "forbidden"
 source_modules = ["flotilla.core"]
 forbidden_modules = [
   "flotilla.platform.opensandbox",
+  "flotilla.backends",
   "flotilla.compose",
   "flotilla.build",
   "flotilla.scan",

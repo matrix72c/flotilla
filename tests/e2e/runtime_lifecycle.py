@@ -68,17 +68,17 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
     cfg.check_against(cfg.load_report())
     clock = SystemClock()
     observer = build(
-        endpoint=cfg.opensandbox.endpoint,
+        endpoint=cfg.opensandbox_settings().endpoint,
         credential=cfg.credential(),
         clock=clock,
         settings=cfg.network_settings(),
         storage=cfg.storage_settings(),
         caps=cfg.load_report().to_capabilities(),
         execd=cfg.execd_settings(),
-        extensions=cfg.opensandbox.extensions,
-        create_fields=cfg.opensandbox.create_fields,
-        group_extension=cfg.opensandbox.group_extension,
-        privileged_extensions=cfg.opensandbox.privileged_extensions,
+        extensions=cfg.opensandbox_settings().extensions,
+        create_fields=cfg.opensandbox_settings().create_fields,
+        group_extension=cfg.opensandbox_settings().group_extension,
+        privileged_extensions=cfg.opensandbox_settings().privileged_extensions,
     )
     # The observer shares the deliberately blocked caller loop, so its grace must
     # exceed that pause. The runtime under test retains the deployment's 90s grace.

@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from flotilla.cli import main
+from flotilla.config import FlotillaConfig
 from flotilla.testing.platform import FakePlatform, ManualClock, SharedTree
 from flotilla.testing.reports import report
 
@@ -148,7 +149,7 @@ async def test_share_gc_preview_matches_real_deletion(
     cfg = _deployment(tmp_path)
     tree.dirs.update({"share/releases", "share/releases/2026-10-07.1", "share/releases/stale"})
     monkeypatch.setattr(cli, "SystemClock", lambda: clock)
-    monkeypatch.setattr(cli, "_platform", lambda *_: platform)
+    monkeypatch.setattr(FlotillaConfig, "build_platform", lambda *_, **__: platform)
     monkeypatch.setattr(platform, "aclose", AsyncMock(), raising=False)
     argv = ["share", "gc", "--deployment", str(cfg)]
     parser = cli._build_parser()

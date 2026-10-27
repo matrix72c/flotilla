@@ -51,7 +51,9 @@ async def test_readonly_directory_transfers_use_scratch_and_preserve_environment
 ) -> None:
     cfg, platform, tree = deployment
     cfg = cfg.model_copy(
-        update={"opensandbox": cfg.opensandbox.model_copy(update={"filesystem_protocol": "sandbox-system-v1"})}
+        update={
+            "opensandbox": cfg.opensandbox_settings().model_copy(update={"filesystem_protocol": "sandbox-system-v1"})
+        }
     )
     measured = Item(ok=True, source="probed", evidence="test double")
     report = cfg.load_report()

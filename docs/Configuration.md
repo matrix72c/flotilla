@@ -6,7 +6,16 @@ A deployment is described by two operator-owned files: `deployment.toml`, read b
 
 Durations are in seconds. Relative paths are resolved against the directory containing `deployment.toml`.
 
-### `[opensandbox]` (required)
+### `backend` and `[backends.<name>]`
+
+| Key | Default | Meaning |
+|---|---|---|
+| `backend` | `"opensandbox"` | Sandbox backend. The built-in `opensandbox` backend reads `[opensandbox]`; any other name must be an installed backend plugin |
+| `[backends.<name>]` | | The selected third-party backend's settings, validated by that backend. Every backend table has `endpoint`, `credential_env`, and `capabilities` with the same meaning as in `[opensandbox]` |
+
+A configuration contains exactly one backend table: `[opensandbox]` for the built-in backend, or `[backends.<name>]` matching `backend`. See [Writing a backend](Writing_a_Backend.md).
+
+### `[opensandbox]` (required for the built-in backend)
 
 | Key | Default | Meaning |
 |---|---|---|

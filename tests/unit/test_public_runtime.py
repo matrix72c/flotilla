@@ -416,14 +416,14 @@ async def test_unconfirmed_deadline_reports_unknown_outcome_not_caller_cancellat
         assert (await fleet.drain(2)).clean
 
 
-@pytest.mark.parametrize("entry", ["cli", "runtime"])
+@pytest.mark.parametrize("entry", ["config", "runtime"])
 @pytest.mark.asyncio
 async def test_configured_create_timeout_reaches_http(
     deployment: tuple[FlotillaConfig, FakePlatform, SharedTree], monkeypatch: pytest.MonkeyPatch, entry: str
 ) -> None:
     import httpx
 
-    from flotilla import cli
+    from flotilla import config
     from flotilla.platform.base import ExternalPolicy, InstanceSpec
     from flotilla.platform.base import Resources as PlatformResources
     from flotilla.platform.opensandbox import OpenSandboxPlatform, build
@@ -441,8 +441,11 @@ async def test_configured_create_timeout_reaches_http(
     def factory(**kwargs: Any) -> Any:
         return build(**kwargs, transport=httpx.MockTransport(handle))
 
-    monkeypatch.setattr(cli if entry == "cli" else manager, "build", factory)
-    platform = cli._platform(cfg, SystemClock(), fake.caps) if entry == "cli" else manager.Manager(cfg).platform
+    monkeypatch.setattr(config, "build_opensandbox", factory)
+    # The CLI commands construct through `build_platform`; the runtime must reach the same factory.
+    platform = (
+        cfg.build_platform(clock=SystemClock(), caps=fake.caps) if entry == "config" else manager.Manager(cfg).platform
+    )
     assert isinstance(platform, OpenSandboxPlatform)
     try:
         await platform.create(

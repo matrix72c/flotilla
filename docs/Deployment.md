@@ -2,6 +2,8 @@
 
 This guide is for whoever operates the sandbox platform. It is done once per deployment; afterwards every Flotilla user only needs the resulting `deployment.toml` and the platform credential.
 
+To try the whole procedure on one machine first, follow the [local quick start](Local_Quick_Start.md).
+
 You need a running [OpenSandbox](https://github.com/opensandbox-group/OpenSandbox) server (see its getting-started guide), an image registry that both your build machine and the platform can reach, and shared storage. Field-by-field documentation is in the [configuration reference](Configuration.md).
 
 Provision a dedicated shared-storage root reachable by every sandbox worker and the anchor. Install Docker with BuildKit/buildx on preparation machines. Configure registry credentials through Docker's credential mechanism. Runtime platform credentials come from the environment variable named by `opensandbox.credential_env`.
