@@ -115,7 +115,7 @@ python -m pip install .            # 或：python -m pip install '.[harbor]'
 
 - [部署指南](docs/Deployment.md)：一次性准备镜像、share release 和能力探测。
 - [配置参考](docs/Configuration.md)：`deployment.toml` 和 `declared.json` 的全部字段。
-- [平台要求](docs/Platform_Requirements.md)与[网络验证](docs/Network_Validation.md)：部署必须提供什么，以及如何验证。
+- [平台要求](docs/Platform_Requirements.md)与[网络验证](docs/Network_Validation.md)：部署必须逐项启用哪些功能，以及如何逐项验证。
 - [OpenSandbox 后端](docs/backends/opensandbox.md)，包括[只读根文件系统与 tmpfs](docs/Readonly_Rootfs_and_Tmpfs.md)。
 
 **扩展 Flotilla**

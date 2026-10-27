@@ -115,7 +115,7 @@ Then pick a path:
 
 - [Deployment guide](docs/Deployment.md): one-time setup of images, the share release, and the capability probe.
 - [Configuration reference](docs/Configuration.md): every `deployment.toml` and `declared.json` field.
-- [Platform requirements](docs/Platform_Requirements.md) and [network validation](docs/Network_Validation.md): what a deployment must provide and how to verify it.
+- [Platform requirements](docs/Platform_Requirements.md) and [network validation](docs/Network_Validation.md): what a deployment must enable, feature by feature, and how to verify each.
 - [OpenSandbox backend](docs/backends/opensandbox.md), including [read-only root filesystems and tmpfs](docs/Readonly_Rootfs_and_Tmpfs.md).
 
 **Extending Flotilla**
