@@ -59,7 +59,7 @@ image = "opensandbox/egress:release-1.1.1"
 mode = "dns+nft"
 
 [storage]
-allowed_host_paths = ["/home/you/flotilla-local/shared"]   # replace with the value of $LOCAL/shared
+allowed_host_paths = ["/path/to/flotilla-local/shared"]   # replace with the value of $LOCAL/shared
 
 [store]
 type = "sqlite"
@@ -124,7 +124,7 @@ protocol = "current"
 
 [storage]
 volumes = "host"
-host_path = "/home/you/flotilla-local/shared"
+host_path = "/path/to/flotilla-local/shared"
 
 [share]
 release = "local-1"
