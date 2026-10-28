@@ -17,9 +17,7 @@ htmlcov/
 .env.*
 !.env.example
 
-# Local workspace: deployment settings, diagnostics, notes, and run artifacts.
-/internal/
-# Legacy local paths remain ignored to prevent accidental publication.
+# Local deployment settings, capability reports, and run artifacts.
 deployments/local/
 deployments/*.json
 artifacts/
