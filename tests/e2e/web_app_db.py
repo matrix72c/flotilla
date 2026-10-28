@@ -4,11 +4,11 @@ Starts a real trial through `Anchor` / `Reaper` / `Trial`, runs checks in the un
 reaper and confirms all instances are deleted. Requires a deployment config and capability report from a prior
 `flotilla probe`; no provider startup validation is done, and gaps in the report are only printed.
 
-    mkdir -p internal/runs/e2e
+    mkdir -p artifacts/e2e
     uv run python -m tests.e2e.web_app_db \\
-        --deployment internal/deployments/default/opensandbox.toml \\
+        --deployment deployments/local/deployment.toml \\
         --image '<registry>/flotilla:probe@sha256:<digest>' \\
-        --out internal/runs/e2e/report.json
+        --out artifacts/e2e/report.json
 
 All three units use `--image` (it needs `/bin/sh`, `nc` (OpenBSD flavor, supporting `-l -q -u -z`), `getent`, `timeout`,
 `grep`; the `images/probe` image qualifies). The topology matches a typical three-tier Compose service:
