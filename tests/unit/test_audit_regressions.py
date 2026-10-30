@@ -99,7 +99,6 @@ def test_runtime_interpolation_preserves_all_references_and_literal_dollars(envi
     p = normalize({"services": {"main": {"image": "r.io/a", "environment": environment}}}, {"KNOWN": "build$value"})
     m = build_manifest(
         task="t",
-        build_key="a" * 64,
         project=p,
         images={"main": "r.io/a"},
         meta={"main": ImageMeta()},

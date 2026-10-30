@@ -1,9 +1,10 @@
-"""Operator commands for inspection, capability probes, publication, and explicit garbage collection."""
+"""Operator commands for inspection, preparation, capability probes, publication, and garbage collection."""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import importlib.util
 import json
 import sys
 import uuid
@@ -32,6 +33,17 @@ def _build_parser() -> argparse.ArgumentParser:
     command.add_argument("tasks", nargs="+", type=Path)
     command.add_argument("--deployment", required=True, type=Path)
     command.add_argument("--out", type=Path)
+    pr = sub.add_parser("prepare", help="build images and publish task files once; write one prepared row per task")
+    pr.add_argument("dirs", nargs="+", type=Path, help="dataset directories (or single task directories)")
+    pr.add_argument("--deployment", required=True, type=Path, help="deployment configuration (TOML)")
+    pr.add_argument("--out", required=True, type=Path, help="prepared rows (jsonl); existing rows are kept")
+    pr.add_argument("--failures", type=Path, help="failure report (jsonl); defaults to <out>.failures.jsonl")
+    pr.add_argument("--force", action="store_true", help="re-prepare tasks that already have a row")
+    pr.add_argument("--concurrency", type=int, help="tasks prepared at once; defaults to [prepare].concurrency")
+    pr.add_argument("--work", type=Path, help="local scratch directory; defaults to <out>.work")
+    pr.add_argument(
+        "--main-only", action="store_true", help="prepare only main environments (no Harbor verifier resolution)"
+    )
     g = sub.add_parser("gc", help="clean up leftover launches via a temporary anchor")
     g.add_argument("--deployment", required=True, type=Path, help="deployment configuration (TOML)")
     g.add_argument(
@@ -142,6 +154,60 @@ async def _tasks(args: argparse.Namespace) -> int:
         args.out.write_text(output + "\n")
     print(output)
     return int(failed)
+
+
+async def _prepare(args: argparse.Namespace) -> int:
+    from flotilla.prepare import prepare
+    from flotilla.prepare.runner import Environments, failures_path, main_only
+
+    if args.concurrency is not None and args.concurrency < 1:
+        print("--concurrency must be positive", file=sys.stderr)
+        return 2
+    environments: Environments = main_only
+    if not args.main_only:
+        if importlib.util.find_spec("harbor") is None:
+            print(
+                "verifier resolution needs Harbor: install flotilla-compose[harbor] or pass --main-only",
+                file=sys.stderr,
+            )
+            return 2
+        from flotilla.integrations.harbor_source import task_environments
+
+        environments = task_environments
+    cfg = FlotillaConfig.load(args.deployment)
+    clock = SystemClock()
+    platform = cfg.build_platform(clock=clock, caps=cfg.platform_capabilities())
+
+    async def start_anchor() -> Anchor:
+        # Like gc/share, a temporary anchor without `launches/<own id>`, so it never becomes a gc candidate.
+        anchor = Anchor(platform, clock, f"prepare-{uuid.uuid4().hex[:12]}", cfg.anchor_settings())
+        try:
+            await anchor.start()
+        except BaseException:
+            await anchor.close()
+            raise
+        return anchor
+
+    try:
+        report = await prepare(
+            cfg,
+            args.dirs,
+            args.out,
+            anchor=start_anchor,
+            environments=environments,
+            failures=args.failures,
+            force=args.force,
+            concurrency=args.concurrency,
+            work=args.work,
+        )
+    finally:
+        await platform.aclose()
+    print(f"prepared {len(report.prepared)}, skipped {len(report.skipped)}, failed {len(report.failed)} → {args.out}")
+    if report.failed:
+        print(f"failures: {args.failures or failures_path(args.out)}", file=sys.stderr)
+    if report.leftover_containers:
+        print(f"export containers not removed: {list(report.leftover_containers)}", file=sys.stderr)
+    return 1 if report.failed or report.leftover_containers else 0
 
 
 async def _gc(args: argparse.Namespace) -> int:
@@ -291,6 +357,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             return asyncio.run(_tasks(args))
         except (ConfigError, ValueError, OSError, FlotillaError) as exc:
             print(exc, file=sys.stderr)
+            return 2
+    if args.command == "prepare":
+        try:
+            return asyncio.run(_prepare(args))
+        except (ConfigError, ValueError, RuntimeError, OSError, FlotillaError) as exc:
+            print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
             return 2
     if args.command == "gc":
         try:

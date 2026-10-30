@@ -66,7 +66,7 @@ def test_compose_filesystem_fields_roundtrip_to_runtime(tmp_path: Path) -> None:
     assert "rm -rf /tmp" not in dockerfile and "rm -rf /cache" not in dockerfile
     assert not any(f.kind == "equivalent" and "tmpfs" in f.path for f in manifest.findings)
     with pytest.raises(ValueError, match="schema"):
-        Manifest.load_json(manifest.dump_json().replace('"schema": 5', '"schema": 4'))
+        Manifest.load_json(manifest.dump_json().replace('"schema": 6', '"schema": 5'))
 
 
 @pytest.mark.parametrize(

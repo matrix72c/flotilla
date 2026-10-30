@@ -187,7 +187,7 @@ class Preparer:
                 files,
                 owned_staging=operation.remote_dirs,
             )
-            manifest = mark_published(manifest, published, self.cfg.storage_settings().root)
+            manifest = mark_published(manifest, published.task_files, self.cfg.storage_settings().root)
         return Task(manifest), (
             ("prepare_images_s", built - started),
             ("publish_files_s", time.monotonic() - built),

@@ -25,7 +25,6 @@ from flotilla.manifest import Healthcheck as ManifestHealthcheck
 def build_manifest(
     *,
     task: str,
-    build_key: str,
     project: Project,
     images: Mapping[str, str],
     meta: Mapping[str, ImageMeta],
@@ -49,7 +48,6 @@ def build_manifest(
     }
     return Manifest(
         task=task,
-        build_key=build_key,
         agent_service=MAIN,
         units=units,
         networks=_networks(project),

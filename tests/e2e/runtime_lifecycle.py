@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import hashlib
 import json
 import time
 import uuid
@@ -39,7 +38,7 @@ from tests.e2e.web_app_db import web_app_db
 def fixture(image: str, *, single: bool = False, waiting: bool = False) -> Task:
     data = asdict(web_app_db(image))
     data["trial_volumes"] = data.pop("volumes")
-    data.update(agent_service="web", build_key=hashlib.sha256(image.encode()).hexdigest())
+    data.update(agent_service="web")
     if single:
         data.update(
             units={"web": data["units"]["web"]}, networks={}, depends_on={}, trial_volumes=[], external_units=[]

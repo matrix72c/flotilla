@@ -149,6 +149,8 @@ forbidden_modules = [
   "flotilla.cli",
   "flotilla.runtime",
   "flotilla.preparation",
+  "flotilla.prepare",
+  "flotilla.prepared",
   "flotilla.testing",
 ]
 
@@ -186,6 +188,8 @@ source_modules = [
   "flotilla.capabilities",
   "flotilla.config",
   "flotilla.preparation",
+  "flotilla.prepare",
+  "flotilla.prepared",
 ]
 forbidden_modules = [
   "flotilla.integrations",
