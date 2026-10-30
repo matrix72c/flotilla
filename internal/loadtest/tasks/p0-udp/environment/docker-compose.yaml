@@ -1,0 +1,25 @@
+services:
+  udptarget:
+    image: <TASK_AGENT_IMAGE>
+    command:
+      - python3
+      - "-c"
+      - |
+        import socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.bind(("0.0.0.0", 5353))
+        while True:
+            data, addr = s.recvfrom(64)
+            s.sendto(b"udp-ok:" + data, addr)
+    ports:
+      - "5353:5353/udp"
+    networks:
+      - p0net
+  main:
+    image: <TASK_AGENT_IMAGE>
+    command: ["sleep", "infinity"]
+    networks:
+      - p0net
+networks:
+  p0net:
+    driver: bridge
