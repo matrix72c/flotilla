@@ -308,6 +308,14 @@ class Execd:
                 raise
         raise ExecOutcomeUnknown("background start outcome is unknown", command_id=attempt.command_id)
 
+    async def ping(self) -> None:
+        """`GET /ping`; raises `FlotillaError` until execd answers.
+
+        kata instances read Running while the guest is still bringing execd up; commands are
+        never retried, so callers gate their first command per instance behind this ping.
+        """
+        await self._http.request("GET", "/ping", stage="run", idempotent=True)
+
     async def interrupt(self, pid: str) -> None:
         await self._http.request("DELETE", "/command", params={"id": pid}, stage="run", idempotent=False)
 

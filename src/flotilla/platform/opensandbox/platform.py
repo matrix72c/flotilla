@@ -237,9 +237,30 @@ class OpenSandboxPlatform:
         cached = self._addresses.get(handle.iid)
         if cached is None:
             execd = await self._execd_of(handle.iid, stage="address")
+            await self._await_execd(execd)
             cached = await address.read_internal_address(execd, handle.iid)
             self._addresses[handle.iid] = cached
         return cached
+
+    async def _await_execd(self, execd: Execd, *, timeout_s: float = 30.0, interval_s: float = 1.0) -> None:
+        """Gate the first command on an instance behind an execd /ping readiness poll.
+
+        kata instances read Running before the platform injects execd; the address discovery
+        command would then hit a 503 from the proxy, and commands are never retried (not
+        idempotent), failing the environment at the address stage. Bounded here; the trial's
+        stage timeout still bounds the overall wait. Timeouts degrade to proceeding: the
+        original command error is more informative than a readiness timeout.
+        """
+        clock = execd._http.clock  # package-internal; the injectable clock is virtual in tests
+        deadline = clock.monotonic() + timeout_s
+        while True:
+            try:
+                await execd.ping()
+                return
+            except FlotillaError:
+                if clock.monotonic() >= deadline:
+                    return
+                await clock.sleep(interval_s)
 
     async def link(self, members: Mapping[str, InstanceHandle], topology: Topology) -> None:
         """Replace the whole policy with "external policy + peer targets"; dataplane convergence is up to deployment."""
