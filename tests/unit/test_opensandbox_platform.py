@@ -24,6 +24,7 @@ from flotilla.platform.base import (
     FlotillaError,
     InstanceHandle,
     InstanceSpec,
+    InstanceStatus,
     Platform,
     ProcessSpec,
     Resources,
@@ -314,6 +315,53 @@ async def test_tmpfs_effective_capacity_is_compared_after_normalization(
             await clock.run(platform.get(handle.iid))
     else:
         assert (await clock.run(platform.get(handle.iid))).filesystem is not None
+    await platform.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("requested", "echoed", "ok"),
+    [
+        (100663296, "100663296", True),  # the platform echoes an explicit size in extensions
+        (100663296, "96Mi", True),
+        (100663296, None, False),  # requested but not applied
+        (100663296, "64Mi", False),
+        (100663296, "lots", False),
+        (None, None, True),  # the platform omits the key for its default
+        (None, "8Gi", True),  # an echoed default is still the platform default
+    ],
+)
+async def test_effective_shm_size_must_match_an_explicit_request(
+    clock: ManualClock, caps: Capabilities, requested: int | None, echoed: str | None, ok: bool
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(200, json={"id": "shm"})
+        extensions = {"project": "p1", **({SHM_SIZE_EXTENSION: echoed} if echoed is not None else {})}
+        return httpx.Response(
+            200,
+            json={
+                "id": "shm",
+                "status": {"state": "Running"},
+                "readOnlyRootFilesystem": False,
+                "tmpfsMounts": [],
+                "extensions": extensions,
+            },
+        )
+
+    platform = _platform(
+        handler,
+        clock,
+        caps=dataclasses.replace(caps, shm_size=True),
+        filesystem=FilesystemSettings("sandbox-system-v1"),
+    )
+    handle = await clock.run(platform.create(dataclasses.replace(_spec("db"), shm_size_bytes=requested)))
+    if ok:
+        assert (await clock.run(platform.get(handle.iid))).status is InstanceStatus.RUNNING
+    else:
+        with pytest.raises(FlotillaError, match="effective filesystem") as failure:
+            await clock.run(platform.get(handle.iid))
+        assert not failure.value.retryable
     await platform.aclose()
 
 
