@@ -68,11 +68,10 @@ _REJECT = {
     "extra_hosts": "not implemented yet (not seen in task data)",
     "domainname": "not implemented yet (not seen in task data)",
     "scale": "replicas not implemented yet (not seen in task data)",
-    "shm_size": "requires shm_size; not supported yet",
 }
 _HANDLED = {
     "image", "build", "command", "entrypoint", "environment", "working_dir", "user", "healthcheck", "depends_on",
-    "networks", "network_mode", "volumes", "tmpfs", "restart", "privileged", "hostname", "ports",
+    "networks", "network_mode", "volumes", "tmpfs", "shm_size", "restart", "privileged", "hostname", "ports",
     "cpus", "mem_limit", "deploy",
 }  # fmt: skip
 
@@ -228,6 +227,7 @@ def _service(
         networks=_service_networks(raw, path, c),
         volumes=mounts,
         tmpfs=tmpfs,
+        shm_size_bytes=_shm_size(raw.get("shm_size"), f"{path}.shm_size", c),
         readonly_rootfs=_boolean(raw.get("read_only", False), f"{path}.read_only", c),
         restart=_restart(raw.get("restart"), f"{path}.restart", c),
         privileged=_boolean(raw.get("privileged", False), f"{path}.privileged", c),
@@ -606,6 +606,18 @@ def _tmpfs_mount(target: object, options: Mapping[str, object], path: str, c: _C
                 raise ValueError(f"tmpfs {name} must be a nonnegative integer")
             ids.append(value)
         return TmpfsMount(target, size, mode, ids[0], ids[1])
+    except ValueError as exc:
+        c.reject(path, str(exc))
+        return None
+
+
+def _shm_size(value: object, path: str, c: _Collector) -> int | None:
+    if value is None:
+        return None
+    try:
+        if isinstance(value, bool):
+            raise ValueError("shm_size must be a byte count or K/M/G/T quantity")
+        return memory_bytes(resource_values.memory(value))
     except ValueError as exc:
         c.reject(path, str(exc))
         return None

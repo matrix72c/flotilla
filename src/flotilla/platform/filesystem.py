@@ -75,13 +75,21 @@ class FilesystemState:
 NO_FILESYSTEM_LIMITS = FilesystemLimits()
 
 
+def validate_shm_size(size_bytes: int | None) -> None:
+    if size_bytes is not None and (type(size_bytes) is not int or size_bytes <= 0):
+        raise ValueError("shm_size must be a positive whole byte count")
+
+
 def validate_mounts(
     mounts: tuple[TmpfsMount, ...],
     volume_paths: Iterable[str] = (),
     *,
     limits: FilesystemLimits = NO_FILESYSTEM_LIMITS,
     memory: str | None = None,
+    shm_size_bytes: int | None = None,
 ) -> None:
+    """`shm_size_bytes` (an explicit `/dev/shm` size) shares the tmpfs memory budget."""
+    validate_shm_size(shm_size_bytes)
     if limits.max_tmpfs_mounts is not None and len(mounts) > limits.max_tmpfs_mounts:
         raise ValueError(f"tmpfs mount count exceeds deployment limit {limits.max_tmpfs_mounts}")
     paths = tuple(volume_paths)
@@ -94,9 +102,9 @@ def validate_mounts(
         if any(overlaps(path, other) for other in paths):
             raise ValueError(f"tmpfs path {path} conflicts with a volume mount")
     if (
-        mounts
+        (mounts or shm_size_bytes)
         and limits.memory_budget
         and memory is not None
-        and sum(m.size_bytes for m in mounts) > memory_bytes(memory)
+        and sum(m.size_bytes for m in mounts) + (shm_size_bytes or 0) > memory_bytes(memory)
     ):
-        raise ValueError("tmpfs capacities exceed the sandbox requested memory")
+        raise ValueError("tmpfs and shm_size capacities exceed the sandbox requested memory")

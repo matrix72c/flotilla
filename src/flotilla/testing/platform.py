@@ -406,6 +406,7 @@ class FakePlatform:
                 privileged=spec.privileged,
                 memory=spec.resources.memory,
                 volume_paths=tuple(m.mount_path for m in spec.volumes),
+                shm_size_bytes=spec.shm_size_bytes,
             )
         except ValueError as exc:
             raise FlotillaError(str(exc), stage="create", category=ErrorCategory.INVALID, retryable=False) from exc

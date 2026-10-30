@@ -137,6 +137,7 @@ class Capabilities:
     sandbox_ingress: bool = False  # backend configured to enforce ingress using sandbox identity rules
     readonly_rootfs: bool = False
     native_tmpfs: bool = False
+    shm_size: bool = False  # explicit `/dev/shm` size per instance
     filesystem_limits: FilesystemLimits = NO_FILESYSTEM_LIMITS
 
     def require_filesystem(
@@ -147,16 +148,27 @@ class Capabilities:
         privileged: bool = False,
         memory: str | None = None,
         volume_paths: tuple[str, ...] = (),
+        shm_size_bytes: int | None = None,
     ) -> None:
         if readonly_rootfs and not self.readonly_rootfs:
             raise ValueError("deployment does not support readonly_rootfs")
         if tmpfs_mounts and not self.native_tmpfs:
             raise ValueError("deployment does not support native_tmpfs; directory emulation is not supported")
+        if shm_size_bytes is not None and not self.shm_size:
+            raise ValueError("deployment does not support shm_size")
         if readonly_rootfs and privileged:
             raise ValueError("readonly_rootfs cannot be combined with privileged")
         if tmpfs_mounts and privileged:
             raise ValueError("native_tmpfs has not been verified for privileged runtimes")
-        validate_mounts(tmpfs_mounts, volume_paths, limits=self.filesystem_limits, memory=memory)
+        if shm_size_bytes is not None and privileged:
+            raise ValueError("shm_size has not been verified for privileged runtimes")
+        validate_mounts(
+            tmpfs_mounts,
+            volume_paths,
+            limits=self.filesystem_limits,
+            memory=memory,
+            shm_size_bytes=shm_size_bytes,
+        )
 
     @property
     def supports_no_network(self) -> bool:
@@ -218,6 +230,7 @@ class InstanceSpec:
     group: str | None = None
     readonly_rootfs: bool = False
     tmpfs_mounts: tuple[TmpfsMount, ...] = ()
+    shm_size_bytes: int | None = None  # None keeps the platform's default `/dev/shm`
 
 
 @dataclass(frozen=True)

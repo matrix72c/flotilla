@@ -180,6 +180,7 @@ class Manager:
                     privileged=unit.privileged,
                     memory=unit.resources.memory,
                     volume_paths=tuple(m.target for m in unit.mounts),
+                    shm_size_bytes=unit.shm_size_bytes,
                 )
                 if unit.readonly_rootfs and not caps.shared_volume:
                     raise ValueError("readonly_rootfs requires shared storage for framework scratch space")

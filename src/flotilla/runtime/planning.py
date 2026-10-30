@@ -139,4 +139,5 @@ def _unit(u: ManifestUnit, env: dict[str, str], resources: Resources | None) -> 
         privileged=u.privileged,
         readonly_rootfs=u.readonly_rootfs,
         tmpfs_mounts=tuple(u.tmpfs_mounts),
+        shm_size_bytes=u.shm_size_bytes,
     )

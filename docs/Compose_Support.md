@@ -59,6 +59,7 @@ Top-level networks support `internal: true`. `driver` must be `bridge`, `ipam` m
 | `healthcheck` | `test`, `interval`, `timeout`, `retries`, `start_period`, `start_interval`, `disable`. `test` must be given (inheriting the image's test is rejected); `["NONE"]` or `disable: true` turns the image's healthcheck off |
 | `volumes` | See [Volumes and bind mounts](#volumes-and-bind-mounts) |
 | `tmpfs`, `type: tmpfs` | Native memory mounts; requires verified `native_tmpfs`. Short syntax supports size/mode/uid/gid; long syntax supports size/mode. No directory emulation |
+| `shm_size` | `/dev/shm` capacity; requires verified `shm_size` (internal filesystem dialect only, rejected on upstream OpenSandbox). Counts against the same memory budget as tmpfs. Without it the platform default applies. See [shared memory](Readonly_Rootfs_and_Tmpfs.md#shared-memory-shm_size) |
 | `networks` | List or map with `aliases`. Static `ipv4_address`/`ipv6_address` are rejected |
 | `network_mode` | Only `none`. `host`, `bridge`, `service:*`, and `container:*` are rejected |
 | `ports`, `expose` | Equivalent: nothing is published, and services on a shared network reach every port. Port ranges and protocols other than TCP/UDP are rejected; UDP requires the deployment's `link_udp` capability |
@@ -68,7 +69,7 @@ Top-level networks support `internal: true`. `driver` must be `bridge`, `ipam` m
 | `hostname`, `container_name` | Added as names other services can resolve. `hostname` is a warning: `gethostname()` inside the sandbox still returns the platform's name |
 | `cpus`, `mem_limit`, `deploy.resources.limits.{cpus,memory}` | Supported; if both forms are given they must agree. Memory units are binary (`g` = GiB) |
 | `init`, `labels`, `logging`, `stop_signal`, `stop_grace_period`, `pull_policy` | Equivalent (recorded only) |
-| `ulimits`, `tty`, `stdin_open`, `shm_size`, `group_add`, `cap_drop`, `security_opt`, `pid`, `ipc`, `userns_mode`, `runtime` | Rejected: not available in a sandbox |
+| `ulimits`, `tty`, `stdin_open`, `group_add`, `cap_drop`, `security_opt`, `pid`, `ipc`, `userns_mode`, `runtime` | Rejected: not available in a sandbox |
 | `cap_add`, `devices`, `sysctls`, `extra_hosts`, `domainname`, `links`, `profiles`, `secrets`, `configs`, `extends`, `volumes_from`, `scale` | Rejected: not implemented |
 | Any other key, including `deploy` keys other than resource limits and `x-*` | Rejected |
 

@@ -109,6 +109,7 @@ def _deployment(project: Project, caps: Capabilities) -> Iterable[Finding]:
                 privileged=svc.privileged,
                 memory=svc.resources.get("memory"),
                 volume_paths=tuple(m.target for m in svc.volumes),
+                shm_size_bytes=svc.shm_size_bytes,
             )
             if svc.readonly_rootfs and not caps.shared_volume:
                 raise ValueError("readonly_rootfs requires shared storage for framework scratch space")

@@ -69,6 +69,8 @@ class ProbeShell:
                 b"" if "tmpfs-output" in self.broken else b"flotilla-tmpfs-stdout\n",
                 b"" if "tmpfs-stderr" in self.broken else b"flotilla-tmpfs-stderr\n",
             )
+        if "flotilla shm_size probe" in script:
+            return ExecResult(1 if "shm" in self.broken else 0, b"", b"")
         if "flotilla filesystem" in script:
             broken = "rootfs" if "rootfs probe" in script else "tmpfs"
             return ExecResult(1 if broken in self.broken else 0, b"", b"")
@@ -195,6 +197,25 @@ async def test_optional_filesystem_probes_require_behavior_and_cleanup(
     assert report.runtime.readonly_rootfs.ok == ("rootfs" not in broken)
     assert report.storage.native_tmpfs.ok == (not broken & {"tmpfs", "tmpfs-output", "tmpfs-stderr", "tmpfs-exit"})
     assert report.runtime.readonly_rootfs.source == report.storage.native_tmpfs.source == "probed"
+    assert not platform.iids()
+
+
+@pytest.mark.parametrize("broken", [frozenset(), frozenset({"shm"})])
+@pytest.mark.asyncio
+async def test_optional_shm_size_probe_requests_a_distinct_size(
+    platform: FakePlatform, clock: ManualClock, broken: frozenset[str]
+) -> None:
+    skipped = await run_probe(platform, clock)
+    assert not skipped.storage.shm_size.ok and skipped.storage.shm_size.source == "declared"
+    platform.caps = replace(platform.caps, shm_size=True)
+    sizes: list[int] = []
+    platform.on_create = lambda _iid, spec: sizes.extend([spec.shm_size_bytes] if spec.shm_size_bytes else [])
+    report = await run_probe(
+        platform, clock, declared=DECLARED.model_copy(update={"probe_shm_size": True}), broken=broken
+    )
+    assert report.storage.shm_size.ok == (not broken) and report.storage.shm_size.source == "probed"
+    assert report.to_capabilities().shm_size == (not broken)
+    assert sizes == [96 * 1024 * 1024]
     assert not platform.iids()
 
 

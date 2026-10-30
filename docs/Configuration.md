@@ -47,7 +47,7 @@ A configuration contains exactly one backend table: `[opensandbox]` for the buil
 
 See the [OpenSandbox backend](backends/opensandbox.md) for the differences.
 
-The optional `probe_readonly_rootfs` and `probe_native_tmpfs` booleans in `declared.json` request behavioral measurements and default to false. They do not assert support. New filesystem capabilities require matching `probed` evidence and a runtime configuration fingerprint. See [filesystem configuration and migration](Readonly_Rootfs_and_Tmpfs.md).
+The optional `probe_readonly_rootfs`, `probe_native_tmpfs`, and `probe_shm_size` booleans in `declared.json` request behavioral measurements and default to false. They do not assert support. New filesystem capabilities require matching `probed` evidence and a runtime configuration fingerprint. See [filesystem configuration and migration](Readonly_Rootfs_and_Tmpfs.md).
 
 ### `[storage]` (required)
 

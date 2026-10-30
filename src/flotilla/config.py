@@ -411,6 +411,7 @@ class FlotillaConfig(_Model):
             caps,
             readonly_rootfs=caps.readonly_rootfs and matched,
             native_tmpfs=caps.native_tmpfs and matched,
+            shm_size=caps.shm_size and matched,
         )
         return load_backend(self.backend).capabilities(self.backend_settings, self, caps)
 
