@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from flotilla.compose.interpolate import interpolate
 from flotilla.core.plan import (
@@ -19,7 +19,8 @@ from flotilla.core.plan import (
 )
 from flotilla.manifest import Manifest
 from flotilla.manifest import Unit as ManifestUnit
-from flotilla.platform.base import Resources
+from flotilla.platform.base import Resources, TmpfsMount
+from flotilla.platform.filesystem import memory_bytes
 
 _REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
@@ -106,6 +107,17 @@ def _apply_runtime_params(
         env_by_unit[p.service][p.var] = str(result.value)
 
 
+_TMPFS_FLOOR_BYTES = 64 * 1024 * 1024
+
+
+def _resolve_tmpfs(mounts: tuple[TmpfsMount, ...], resources: Resources) -> tuple[TmpfsMount, ...]:
+    """Give unsized tmpfs mounts a concrete size: docker bounds them only by the container memory,
+    so half the service memory (the Linux tmpfs convention) is the closest fixed approximation,
+    floored at the historical 64 MiB so small services keep working."""
+    default = max(_TMPFS_FLOOR_BYTES, memory_bytes(resources.memory) // 2)
+    return tuple(m if m.size_bytes is not None else replace(m, size_bytes=default) for m in mounts)
+
+
 def _overlay(env: dict[str, str], overlay: Mapping[str, str]) -> dict[str, str]:
     out = dict(env)
     for key, value in overlay.items():
@@ -138,6 +150,6 @@ def _unit(u: ManifestUnit, env: dict[str, str], resources: Resources | None) -> 
         mounts=tuple(Mount(scope=m.scope, key=m.key, target=m.target, read_only=m.read_only) for m in u.mounts),
         privileged=u.privileged,
         readonly_rootfs=u.readonly_rootfs,
-        tmpfs_mounts=tuple(u.tmpfs_mounts),
+        tmpfs_mounts=_resolve_tmpfs(u.tmpfs_mounts, resources),
         shm_size_bytes=u.shm_size_bytes,
     )

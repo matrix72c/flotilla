@@ -10,6 +10,7 @@ from flotilla.compose.interpolate import InterpolationError, interpolate
 from flotilla.compose.model import Dependency, Healthcheck, NetworkAttachment, VolumeMount
 from flotilla.compose.normalize import KEEPALIVE, harbor_overlay, normalize
 from flotilla.compose.units import parse_duration
+from flotilla.platform.base import TmpfsMount
 
 # ───────────────────────────── Interpolation ─────────────────────────────
 
@@ -250,6 +251,12 @@ def test_equivalent_fields_are_recorded() -> None:
         "kafka",
     )
     assert "services.app.tmpfs" not in _paths(p, "equivalent")
+
+
+def test_unsized_tmpfs_keeps_docker_semantics_until_planning() -> None:
+    p = _norm({"app": {"image": "a", "tmpfs": ["/tmp", "/cache:size=8m"]}})
+    assert not p.rejected
+    assert p.services["app"].tmpfs == (TmpfsMount("/tmp"), TmpfsMount("/cache", 8 * 1024**2))
 
 
 def test_runtime_params_recorded_from_environment() -> None:

@@ -14,10 +14,10 @@ from flotilla.compose.normalize import normalize
 from flotilla.compose.task import load_task
 from flotilla.config import FlotillaConfig
 from flotilla.manifest import Manifest
-from flotilla.platform.base import Capabilities, TmpfsMount
+from flotilla.platform.base import Capabilities, Resources, TmpfsMount
 from flotilla.platform.filesystem import memory_bytes
 from flotilla.platform.opensandbox.filesystem import INTERNAL_LIMITS, parse_effective
-from flotilla.runtime.planning import to_plan
+from flotilla.runtime.planning import _resolve_tmpfs, to_plan
 from flotilla.scan import scan
 from flotilla.testing.build import FakeBuilder, _ctx, _task
 from flotilla.testing.config import config_data
@@ -99,15 +99,24 @@ def test_filesystem_admission_and_internal_limits(caps: Capabilities) -> None:
     assert scan("fs", project, replace(supported, native_tmpfs=False)).status == "rejected"
     for tmpfs, memory in [
         ((TmpfsMount("/run/app"),), "1Gi"),
-        ((TmpfsMount("/tmp"),), "32Mi"),
-        (tuple(TmpfsMount(f"/cache{i}") for i in range(9)), "1Gi"),
+        ((TmpfsMount("/tmp", 64 * 1024 * 1024),), "32Mi"),
+        (tuple(TmpfsMount(f"/cache{i}", 1024**2) for i in range(9)), "1Gi"),
     ]:
         with pytest.raises(ValueError):
             supported.require_filesystem(False, tmpfs, memory=memory)
+    # unsized mounts are memory-bounded at runtime, not statically checkable
+    supported.require_filesystem(False, (TmpfsMount("/tmp"),), memory="32Mi")
     with pytest.raises(ValueError, match="privileged"):
         supported.require_filesystem(True, (), privileged=True)
     with pytest.raises(ValueError, match="privileged"):
         supported.require_filesystem(False, (TmpfsMount("/tmp"),), privileged=True)
+
+
+def test_unsized_tmpfs_resolves_to_half_service_memory_at_planning() -> None:
+    planned = _resolve_tmpfs((TmpfsMount("/tmp"), TmpfsMount("/cache", 8 * 1024**2)), Resources(cpu="1", memory="2Gi"))
+    assert planned == (TmpfsMount("/tmp", 1024**3), TmpfsMount("/cache", 8 * 1024**2))
+    small = _resolve_tmpfs((TmpfsMount("/tmp"),), Resources(cpu="1", memory="128Mi"))
+    assert small == (TmpfsMount("/tmp", 64 * 1024**2),)
 
 
 def test_readonly_rootfs_promotes_single_writer_mounts_to_real_storage() -> None:

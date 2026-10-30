@@ -32,7 +32,9 @@ def overlaps(a: str, b: str) -> bool:
 @dataclass(frozen=True)
 class TmpfsMount:
     mount_path: str
-    size_bytes: int = 64 * 1024 * 1024
+    # None mirrors docker's unsized tmpfs: bounded by the sandbox memory, not a fixed cap.
+    # The runtime resolves it before the instance spec is built (see runtime/planning.py).
+    size_bytes: int | None = None
     mode: int = 0o1777
     uid: int = 0
     gid: int = 0
@@ -48,11 +50,14 @@ class TmpfsMount:
             or any(ord(c) < 32 for c in path)
         ):
             raise ValueError("tmpfs mount_path must be a canonical absolute directory other than root")
-        for name in ("size_bytes", "mode", "uid", "gid"):
+        if self.size_bytes is not None:
+            if type(self.size_bytes) is not int:
+                raise ValueError("tmpfs size_bytes must be an integer or null")
+            if self.size_bytes <= 0:
+                raise ValueError("tmpfs size_bytes must be positive")
+        for name in ("mode", "uid", "gid"):
             if type(getattr(self, name)) is not int:
                 raise ValueError(f"tmpfs {name} must be an integer")
-        if self.size_bytes <= 0:
-            raise ValueError("tmpfs size_bytes must be positive")
         if not 0 <= self.mode <= 0o7777:
             raise ValueError("tmpfs mode must be between 0000 and 7777")
         if not 0 <= self.uid < 2**32 - 1 or not 0 <= self.gid < 2**32 - 1:
@@ -105,6 +110,6 @@ def validate_mounts(
         (mounts or shm_size_bytes)
         and limits.memory_budget
         and memory is not None
-        and sum(m.size_bytes for m in mounts) + (shm_size_bytes or 0) > memory_bytes(memory)
-    ):
+        and sum(m.size_bytes or 0 for m in mounts) + (shm_size_bytes or 0) > memory_bytes(memory)
+    ):  # unsized mounts are not statically checkable; the runtime memory-bounds them
         raise ValueError("tmpfs and shm_size capacities exceed the sandbox requested memory")

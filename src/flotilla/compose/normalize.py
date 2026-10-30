@@ -591,7 +591,7 @@ def _tmpfs_mount(target: object, options: Mapping[str, object], path: str, c: _C
     try:
         if not isinstance(target, str):
             raise ValueError("tmpfs target must be a canonical absolute directory")
-        size = memory_bytes(resource_values.memory(options["size"])) if "size" in options else 64 * 1024 * 1024
+        size = memory_bytes(resource_values.memory(options["size"])) if "size" in options else None
         mode = options.get("mode", "1777")
         if isinstance(mode, str) and re.fullmatch(r"[0-7]{1,4}", mode):
             mode = int(mode, 8)
