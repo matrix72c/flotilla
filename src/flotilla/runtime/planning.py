@@ -150,6 +150,6 @@ def _unit(u: ManifestUnit, env: dict[str, str], resources: Resources | None) -> 
         mounts=tuple(Mount(scope=m.scope, key=m.key, target=m.target, read_only=m.read_only) for m in u.mounts),
         privileged=u.privileged,
         readonly_rootfs=u.readonly_rootfs,
-        tmpfs_mounts=_resolve_tmpfs(u.tmpfs_mounts, resources),
+        tmpfs_mounts=_resolve_tmpfs(tuple(u.tmpfs_mounts), resources),
         shm_size_bytes=u.shm_size_bytes,
     )
