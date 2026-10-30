@@ -2,34 +2,16 @@
 
 from __future__ import annotations
 
-import hashlib
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from flotilla.core.reaper import CleanupRecord
-from flotilla.manifest import Manifest
+from flotilla.prepared import PreparedEnvironment
 
-
-@dataclass(frozen=True)
-class Task:
-    """Private execution plan for one open operation."""
-
-    _manifest: Manifest = field(repr=False)
-    digest: str = field(init=False)
-
-    def __post_init__(self) -> None:
-        manifest = self._manifest.model_copy(deep=True)
-        object.__setattr__(self, "_manifest", manifest)
-        object.__setattr__(self, "digest", hashlib.sha256(manifest.dump_json().encode()).hexdigest())
-        if manifest.agent_service not in manifest.units:
-            raise ValueError("manifest agent_service does not exist")
-        if any(f.kind == "reject" for f in manifest.findings):
-            raise ValueError("manifest contains rejected findings")
-
-    def manifest(self) -> Manifest:
-        return self._manifest.model_copy(deep=True)
+# The runtime's name for one prepared environment.
+Task = PreparedEnvironment
 
 
 @dataclass(frozen=True)

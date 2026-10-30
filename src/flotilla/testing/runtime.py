@@ -76,7 +76,6 @@ def deployment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Flotill
 def task() -> Task:
     manifest = Manifest(
         task="test",
-        build_key="a" * 64,
         agent_service="main",
         units={
             "main": Unit(

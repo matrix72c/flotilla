@@ -81,34 +81,41 @@ class BuildContext:
     image_accounts: Callable[[str], ImageAccounts] | None = None
 
 
-def build_task(task: HarborTask, out_dir: Path, ctx: BuildContext) -> BuildOutcome:
-    """Always compile current inputs in an operation-private directory."""
+def build_task(task: HarborTask, out_dir: Path, ctx: BuildContext, *, identity: str | None = None) -> BuildOutcome:
+    """Always compile current inputs in an operation-private directory.
+
+    `identity` (e.g. `<dataset>--<task>--<role>`) names output image tags; without it tags derive from the
+    environment directory path.
+    """
     result = scan_task(task, ctx.caps)
     if result.status == "rejected":
         reasons = [f.reason for f in result.findings if f.kind == "reject"]
         return BuildOutcome(task.name, "rejected", reason="; ".join(reasons[:3]), scan=result)
     try:
-        return _build(task, out_dir, ctx, result)
+        return _build(task, out_dir, ctx, result, identity)
     except (ImageError, OSError, ValueError) as exc:
         return BuildOutcome(task.name, "failed", reason=f"{type(exc).__name__}: {exc}", scan=result)
 
 
-def _build(task: HarborTask, out_dir: Path, ctx: BuildContext, result: ScanResult) -> BuildOutcome:
+def _build(
+    task: HarborTask, out_dir: Path, ctx: BuildContext, result: ScanResult, identity: str | None
+) -> BuildOutcome:
     project = task.project
     plans = pin_images(plan_images(task.project, ctx.settings), ctx.registry)
     resources = {name: Resources.model_validate(svc.resources) for name, svc in project.services.items()}
-    # Execution-plan identity only: never an input-version or a cache key.
+    # Output directory identity only: never an input-version or a cache key.
     key = hashlib.sha256(uuid.uuid4().bytes).hexdigest()
     target_dir = out_dir / key
     manifest_path = target_dir / MANIFEST_NAME
     # Output tags are stable across source edits and independent of resources.
-    tag_key = hashlib.sha256(str(task.env_dir.resolve()).encode()).hexdigest()
+    name = identity or task.name
+    tag_key = hashlib.sha256((identity or str(task.env_dir.resolve())).encode()).hexdigest()
 
     resolution = resolve_images(plans, ctx.settings, ctx.registry)
     images = dict(resolution.images)
     for plan in plans:
         if plan.disposition == "build":
-            images[plan.service] = _build_one(task, plan, tag_key, ctx)
+            images[plan.service] = _build_one(task, name, plan, tag_key, ctx)
 
     files_dir = target_dir / FILES_DIR
     exported = export_task_files(project, task.env_dir, files_dir, images=images, image_export=ctx.image_export)
@@ -117,10 +124,9 @@ def _build(task: HarborTask, out_dir: Path, ctx: BuildContext, result: ScanResul
     # Capture task identity before changing the container's default user. The
     # exec daemon needs root to initialize networking/files and switch identities;
     # service commands and healthchecks still use the original manifest context.
-    runtime_built = _runtime_images(task, images, tag_key, target_dir / "runtime-context", ctx)
+    runtime_built = _runtime_images(name, images, tag_key, target_dir / "runtime-context", ctx)
     manifest = build_manifest(
         task=task.name,
-        build_key=key,
         project=project,
         images=images,
         meta=meta,
@@ -142,7 +148,7 @@ def _build(task: HarborTask, out_dir: Path, ctx: BuildContext, result: ScanResul
     )
 
 
-def _runtime_images(task: HarborTask, images: dict[str, str], key: str, context: Path, ctx: BuildContext) -> set[str]:
+def _runtime_images(name: str, images: dict[str, str], key: str, context: Path, ctx: BuildContext) -> set[str]:
     """Give the exec daemon root without changing previously captured task metadata.
 
     This also applies to linked and mirrored images, not just source builds or
@@ -163,7 +169,7 @@ def _runtime_images(task: HarborTask, images: dict[str, str], key: str, context:
             context.mkdir(parents=True, exist_ok=True)
             request = BuildRequest(
                 service=service,
-                tag=image_tag(ctx.settings.target, f"{task.name}-runtime", service, key),
+                tag=image_tag(ctx.settings.target, f"{name}-runtime", service, key),
                 context=context,
                 dockerfile_text=f"FROM {image}\nUSER 0:0\n",
             )
@@ -173,14 +179,14 @@ def _runtime_images(task: HarborTask, images: dict[str, str], key: str, context:
     return changed
 
 
-def _build_one(task: HarborTask, plan: ServiceImage, key: str, ctx: BuildContext) -> str:
+def _build_one(task: HarborTask, name: str, plan: ServiceImage, key: str, ctx: BuildContext) -> str:
     """Build or derive one service's image, returning `repo@sha256:...`."""
     service = plan.service
     if ctx.builder is None:
         raise ImageError(f"service {service} needs a build, but no builder was provided")
     if not ctx.settings.target:
         raise ImageError(f"service {service} needs a build, but [build].target is not configured")
-    tag = image_tag(ctx.settings.target, task.name, service, key)
+    tag = image_tag(ctx.settings.target, name, service, key)
     svc = task.project.services[service]
     derive = service in image_changes(task.project)
     if plan.ref is not None:
@@ -192,7 +198,7 @@ def _build_one(task: HarborTask, plan: ServiceImage, key: str, ctx: BuildContext
         text = (task.env_dir / svc.build.context / dockerfile).read_text()
         request = BuildRequest(
             service=service,
-            tag=image_tag(ctx.settings.target, f"{task.name}-base", service, key) if derive else tag,
+            tag=image_tag(ctx.settings.target, f"{name}-base", service, key) if derive else tag,
             context=task.env_dir / svc.build.context,
             dockerfile=dockerfile,
             args=svc.build.args,
