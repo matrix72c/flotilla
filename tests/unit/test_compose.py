@@ -29,6 +29,14 @@ from flotilla.platform.base import TmpfsMount
         ("$${HOSTNAME}", {"HOSTNAME": "h"}, "${HOSTNAME}", {}),  # $$ is a literal $, not interpolated
         ("a$$b", {}, "a$b", {}),
         ("${A:-http://127.0.0.1:9}", {}, "http://127.0.0.1:9", {"A": "http://127.0.0.1:9"}),
+        ("${A:+x}", {"A": "1"}, "x", {}),
+        ("${A:+x}", {"A": ""}, "", {}),  # :+ needs a nonempty value
+        ("${A+x}", {"A": ""}, "x", {}),  # + only needs the variable to be set
+        ("${A:+x}", {}, "", {"A": ""}),  # optional: unset yields the empty string
+        ("${P:+${P},}web", {"P": "a"}, "a,web", {}),  # nested reference inside the alternative
+        ("${P:+${P},}web", {}, "web", {"P": ""}),
+        ("${A:+${B}}", {}, "", {"A": ""}),  # an unused alternative records nothing
+        ("${A:-${B:-z}}", {}, "z", {"A": "z", "B": "z"}),
     ],
 )
 def test_interpolate_strings(text: str, variables: dict[str, str], expected: str, unresolved: dict[str, Any]) -> None:
@@ -37,10 +45,18 @@ def test_interpolate_strings(text: str, variables: dict[str, str], expected: str
     assert got.unresolved == unresolved
 
 
-@pytest.mark.parametrize("text", ["$A", "${A:?err}", "${A:+x}", "${}", "${1A}"])
+@pytest.mark.parametrize("text", ["$A", "${A:?err}", "${}", "${1A}", "${A", "${A:-${B}", "${A:+$B}"])
 def test_interpolate_rejects_unsupported(text: str) -> None:
     with pytest.raises(InterpolationError):
         interpolate(text, {})
+
+
+def test_deferred_nested_reference_is_kept_whole_and_resolves_later() -> None:
+    expr = "${P:+${P},}web,localhost"
+    deferred = interpolate(expr, {}, defer=True)
+    assert deferred.value == expr and deferred.unresolved == {"P": ""}
+    assert interpolate(expr, {"P": "proxy"}).value == "proxy,web,localhost"
+    assert interpolate(expr, {}).value == "web,localhost"
 
 
 def test_interpolate_recurses_but_not_into_keys() -> None:

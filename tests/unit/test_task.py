@@ -70,6 +70,26 @@ def test_compose_with_dotenv(tmp_path: Path) -> None:
     assert task.project.runtime_params["db"]["PASSWORD"][0] == "${DB_PASSWORD}"
 
 
+def test_harbor_compose_variables_like_webvuln(tmp_path: Path) -> None:
+    # Harbor injects CONTEXT_DIR (the environment directory) and tasks use nested alternatives for proxy lists.
+    compose = """
+services:
+  main:
+    environment:
+      NO_PROXY: ${NO_PROXY:+${NO_PROXY},}webapp,localhost
+  webapp:
+    build:
+      context: ${CONTEXT_DIR}
+      dockerfile: webapp.Dockerfile
+"""
+    task = load_task(_task(tmp_path, "webvuln", compose=compose, **{".env": "CONTEXT_DIR=/elsewhere\n"}))
+    assert not task.findings and not task.project.findings
+    build = task.project.services["webapp"].build
+    assert build is not None and build.context == "."  # Harbor's value wins over .env, as in Harbor
+    expr, default = task.project.runtime_params["main"]["NO_PROXY"]
+    assert expr == "${NO_PROXY:+${NO_PROXY},}webapp,localhost" and default == ""
+
+
 def test_unreadable_task(tmp_path: Path) -> None:
     path = _task(tmp_path, "bad")
     (path / "task.toml").write_text("[task\n")

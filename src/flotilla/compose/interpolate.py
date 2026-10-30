@@ -6,9 +6,9 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
-# `$$` or `${...}`; a `$` followed by a name (bare `$VAR`) is matched separately so it can be rejected.
-_TOKEN = re.compile(r"\$\$|\$\{(?P<body>[^}]*)\}|\$(?P<bare>[A-Za-z_])")
-_BODY = re.compile(r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?:(?P<op>:-|-)(?P<default>[^$}]*))?")
+_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# Longest first: `:-` must not be read as a name followed by `-`.
+_OPERATORS = (":-", ":+", "-", "+")
 
 
 class InterpolationError(ValueError):
@@ -48,24 +48,88 @@ def _walk(
 def _string(
     text: str, variables: Mapping[str, str], unresolved: dict[str, str | None], path: str, *, defer: bool
 ) -> str:
-    def replace(m: re.Match[str]) -> str:
-        if m.group(0) == "$$":
-            return "$$" if defer else "$"
-        if m.group("bare") is not None:
-            raise InterpolationError(f"{path}: bare $VAR is not supported, use ${{VAR}}: {text!r}")
-        body = m.group("body")
-        parsed = _BODY.fullmatch(body)
-        if parsed is None:
-            raise InterpolationError(f"{path}: unsupported interpolation syntax ${{{body}}}")
-        name, op, default = parsed.group("name"), parsed.group("op"), parsed.group("default")
-        if name in variables:
-            current = variables[name]
-            if op == ":-" and current == "":
-                return default or ""
-            return current.replace("$", "$$") if defer else current
-        # If any reference lacks a default, the variable is required; later defaults cannot lift that.
-        if name not in unresolved or op is None:
-            unresolved[name] = default if op is not None else None
-        return m.group(0) if defer else (default or "")
+    """Substitute `$$`, `${VAR}`, `${VAR:-default}`, `${VAR-default}`, `${VAR:+alt}` and `${VAR+alt}`.
 
-    return _TOKEN.sub(replace, text)
+    Defaults and alternatives may themselves contain references (`${NO_PROXY:+${NO_PROXY},}`), as in Compose.
+    An alternative is evaluated only when it is used, so variables inside an unused one are not recorded.
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(text):
+        if text.startswith("$$", i):
+            out.append("$$" if defer else "$")
+            i += 2
+        elif text.startswith("${", i):
+            value, i = _reference(text, i, variables, unresolved, path, defer=defer)
+            out.append(value)
+        elif text[i] == "$" and _NAME.match(text, i + 1):
+            raise InterpolationError(f"{path}: bare $VAR is not supported, use ${{VAR}}: {text!r}")
+        else:
+            out.append(text[i])
+            i += 1
+    return "".join(out)
+
+
+def _reference(
+    text: str,
+    start: int,
+    variables: Mapping[str, str],
+    unresolved: dict[str, str | None],
+    path: str,
+    *,
+    defer: bool,
+) -> tuple[str, int]:
+    """Substitute the `${...}` starting at `start`; returns the value and the index after its closing brace."""
+    close = _closing(text, start + 2, path)
+    body = text[start + 2 : close]
+    name = _NAME.match(body)
+    op = next((o for o in _OPERATORS if name and body.startswith(o, name.end())), None)
+    if name is None or (op is None and name.end() != len(body)):
+        raise InterpolationError(f"{path}: unsupported interpolation syntax ${{{body}}}")
+    var = name.group()
+    arg = body[name.end() + len(op) :] if op else ""
+
+    value: str | None  # None: the argument's value
+    if var in variables:
+        current = variables[var]
+        if op in (":+", "+"):
+            used = op == "+" or current != ""
+            value = None if used else ""
+        elif op == ":-" and current == "":
+            used, value = True, None
+        else:
+            used, value = False, current.replace("$", "$$") if defer else current
+    else:
+        # Unprovided: `-` forms fall back to their default, `+` forms and bare references to the empty string.
+        used = op in (":-", "-")
+        value = None if used else ""
+    # An unused argument is still checked for syntax, but its references are not recorded.
+    argument = _string(arg, variables, unresolved if used else {}, path, defer=defer)
+    result = argument if value is None else value
+    if var not in variables:
+        # Only a bare reference makes the variable required; if any reference lacks a default, later defaults
+        # cannot lift that.
+        if var not in unresolved or op is None:
+            unresolved[var] = result if op is not None else None
+        if defer:
+            result = text[start : close + 1]
+    return result, close + 1
+
+
+def _closing(text: str, i: int, path: str) -> int:
+    """Index of the `}` closing a reference whose body starts at `i`, skipping nested references and `$$`."""
+    depth = 0
+    while i < len(text):
+        if text.startswith("$$", i):
+            i += 2
+            continue
+        if text.startswith("${", i):
+            depth += 1
+            i += 2
+            continue
+        if text[i] == "}":
+            if depth == 0:
+                return i
+            depth -= 1
+        i += 1
+    raise InterpolationError(f"{path}: unterminated interpolation in {text!r}")
