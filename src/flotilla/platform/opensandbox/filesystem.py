@@ -92,4 +92,11 @@ def parse_effective(item: Mapping[str, Any]) -> FilesystemState | None:
         return None
     if len({m.mount_path for m in mounts}) != len(mounts):
         return None
-    return FilesystemState(item["readOnlyRootFilesystem"], tuple(sorted(mounts, key=lambda m: m.mount_path)))
+    # The platform echoes an explicit shm size in `extensions` and omits the key for its default.
+    extensions = item.get("extensions") or {}
+    shm = extensions.get(SHM_SIZE_EXTENSION) if isinstance(extensions, dict) else None
+    try:
+        shm_bytes = None if shm is None else memory_bytes(shm)
+    except (TypeError, ValueError):
+        return None
+    return FilesystemState(item["readOnlyRootFilesystem"], tuple(sorted(mounts, key=lambda m: m.mount_path)), shm_bytes)

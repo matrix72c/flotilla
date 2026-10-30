@@ -81,6 +81,8 @@ Compose `shm_size` sets the capacity of the service's `/dev/shm`. Values use Com
 
 In internal mode an explicit size is sent per instance as `extensions["sandbox-system.io/shm-size"]`, in bytes. The size counts against the same requested-memory budget as tmpfs: declared tmpfs capacities plus `shm_size` may not exceed the sandbox memory. Deployment-wide `opensandbox.extensions` and `privileged_extensions` may not set this key. Privileged services with `shm_size` are rejected, as with tmpfs.
 
+The platform echoes an explicit size in the instance's `extensions` and omits the key for its default. Before business startup, an instance that requested `shm_size` must echo exactly that size (after quantity normalization); a missing, different, or malformed value fails readiness like a tmpfs mismatch. Instances without `shm_size` accept whatever default the platform reports.
+
 Upstream OpenSandbox has no create-time `/dev/shm` setting, so upstream mode rejects tasks declaring `shm_size`. Flotilla does not drop the field or fall back to the default size.
 
 Enable the measurement with `"probe_shm_size": true` in `declared.json`. The probe requests 96 MiB, then checks as UID 1000 that `/dev/shm` is tmpfs, reports exactly that capacity, and refuses a larger write. Only `probed` evidence in `storage.shm_size`, bound to the same `filesystem_profile`, enables the capability.

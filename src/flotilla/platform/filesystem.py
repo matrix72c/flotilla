@@ -75,6 +75,7 @@ class FilesystemLimits:
 class FilesystemState:
     readonly_rootfs: bool
     tmpfs_mounts: tuple[TmpfsMount, ...] = ()
+    shm_size_bytes: int | None = None  # explicit `/dev/shm` size; None = platform default
 
 
 NO_FILESYSTEM_LIMITS = FilesystemLimits()

@@ -8,7 +8,7 @@ All notable changes to this project are documented here. The format follows [Kee
 
 - Pluggable sandbox backends. A package registers a `flotilla.backends.Backend` subclass in the `flotilla.backends` entry-point group; a deployment selects it with `backend = "<name>"` and configures it in `[backends.<name>]`. The built-in OpenSandbox backend keeps its `[opensandbox]` table, and existing configurations and capability-report fingerprints are unchanged. See [Writing a backend](docs/Writing_a_Backend.md).
 - Opt-in internal lifecycle support for Compose read-only root filesystems and native tmpfs, with independent behavioral probes, effective-configuration verification, private framework scratch mounts, and strict upstream-compatible request defaults.
-- Compose `shm_size` on the internal filesystem dialect, sent per instance as the `sandbox-system.io/shm-size` extension, sharing the tmpfs memory budget and gated by the new `probe_shm_size` measurement. Upstream OpenSandbox has no equivalent setting and rejects such tasks.
+- Compose `shm_size` on the internal filesystem dialect, sent per instance as the `sandbox-system.io/shm-size` extension, sharing the tmpfs memory budget, gated by the new `probe_shm_size` measurement, and verified per instance against the size the platform echoes before startup. Upstream OpenSandbox has no equivalent setting and rejects such tasks.
 
 - Task-level `network_mode = "no-network"` and `allow_internet = false`, preserving service links while removing external access throughout preparation and execution.
 - Explicit cluster DNS declarations: offline policies tolerate only the declared resolver IPs on TCP/UDP 53 and reject every other implicit egress exception.

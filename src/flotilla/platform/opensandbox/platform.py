@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import secrets
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any
 from urllib.parse import quote
@@ -69,6 +69,15 @@ MANAGED_CREATE_FIELDS = frozenset(
 
 def _label_key(labels: Mapping[str, str]) -> frozenset[tuple[str, str]]:
     return frozenset(labels.items())
+
+
+def _filesystem_matches(effective: FilesystemState | None, requested: FilesystemState) -> bool:
+    """An explicit shm size must be echoed exactly; without one, any platform default is acceptable."""
+    if effective is None:
+        return False
+    if requested.shm_size_bytes is None:
+        effective = replace(effective, shm_size_bytes=None)
+    return effective == requested
 
 
 @dataclass(frozen=True)
@@ -150,7 +159,9 @@ class OpenSandboxPlatform:
             external=spec.external,
             token=secrets.token_urlsafe(32),
             filesystem=FilesystemState(
-                spec.readonly_rootfs, tuple(sorted(spec.tmpfs_mounts, key=lambda m: m.mount_path))
+                spec.readonly_rootfs,
+                tuple(sorted(spec.tmpfs_mounts, key=lambda m: m.mount_path)),
+                spec.shm_size_bytes,
             ),
         )
         body = self._create_body(spec, unit.token)
@@ -182,7 +193,7 @@ class OpenSandboxPlatform:
             self._filesystem.protocol == "sandbox-system-v1"
             and unit
             and state.status is InstanceStatus.RUNNING
-            and state.filesystem != unit.filesystem
+            and not _filesystem_matches(state.filesystem, unit.filesystem)
         ):
             raise FlotillaError(
                 "effective filesystem configuration is missing or differs from the requested configuration",
