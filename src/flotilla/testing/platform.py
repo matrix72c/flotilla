@@ -548,7 +548,7 @@ class FakePlatform:
                 )
             if tmpfs is not None:
                 used = sum(len(b) for p, b in inst.files.items() if p != path and p.startswith(tmpfs.mount_path + "/"))
-                if used + len(data) > tmpfs.size_bytes:
+                if tmpfs.size_bytes is not None and used + len(data) > tmpfs.size_bytes:
                     raise FlotillaError(
                         "no space left on device", stage="run", category=ErrorCategory.INVALID, retryable=False
                     )

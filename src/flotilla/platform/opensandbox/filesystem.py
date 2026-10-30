@@ -53,7 +53,7 @@ class FilesystemSettings:
             "tmpfsMounts": [
                 {
                     "mountPath": m.mount_path,
-                    "size": str(m.size_bytes),
+                    "size": str(_resolved_size(m)),
                     "mode": f"{m.mode:04o}",
                     "uid": m.uid,
                     "gid": m.gid,
@@ -64,6 +64,12 @@ class FilesystemSettings:
 
 
 UPSTREAM_FILESYSTEM = FilesystemSettings()
+
+
+def _resolved_size(mount: TmpfsMount) -> int:
+    if mount.size_bytes is None:
+        raise ValueError(f"tmpfs mount {mount.mount_path} reached the platform without a resolved size")
+    return mount.size_bytes
 
 
 def parse_effective(item: Mapping[str, Any]) -> FilesystemState | None:

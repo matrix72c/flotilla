@@ -307,7 +307,8 @@ async def test_tmpfs_effective_capacity_is_compared_after_normalization(
         caps=dataclasses.replace(caps, native_tmpfs=True),
         filesystem=FilesystemSettings("sandbox-system-v1"),
     )
-    handle = await clock.run(platform.create(dataclasses.replace(_spec("db"), tmpfs_mounts=(TmpfsMount("/tmp"),))))
+    spec = dataclasses.replace(_spec("db"), tmpfs_mounts=(TmpfsMount("/tmp", 64 * 1024**2),))
+    handle = await clock.run(platform.create(spec))
     if size == "128Mi":
         with pytest.raises(FlotillaError, match="effective filesystem"):
             await clock.run(platform.get(handle.iid))

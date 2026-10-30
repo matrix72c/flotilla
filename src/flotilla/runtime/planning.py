@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from flotilla.compose.interpolate import interpolate
 from flotilla.core.plan import (
@@ -19,7 +19,8 @@ from flotilla.core.plan import (
 )
 from flotilla.manifest import Manifest
 from flotilla.manifest import Unit as ManifestUnit
-from flotilla.platform.base import Resources
+from flotilla.platform.base import Resources, TmpfsMount
+from flotilla.platform.filesystem import unsized_tmpfs_bytes
 
 _REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
@@ -106,6 +107,12 @@ def _apply_runtime_params(
         env_by_unit[p.service][p.var] = str(result.value)
 
 
+def _resolve_tmpfs(mounts: tuple[TmpfsMount, ...], resources: Resources) -> tuple[TmpfsMount, ...]:
+    """Give unsized tmpfs mounts their concrete size (see `unsized_tmpfs_bytes`)."""
+    default = unsized_tmpfs_bytes(resources.memory)
+    return tuple(m if m.size_bytes is not None else replace(m, size_bytes=default) for m in mounts)
+
+
 def _overlay(env: dict[str, str], overlay: Mapping[str, str]) -> dict[str, str]:
     out = dict(env)
     for key, value in overlay.items():
@@ -138,6 +145,6 @@ def _unit(u: ManifestUnit, env: dict[str, str], resources: Resources | None) -> 
         mounts=tuple(Mount(scope=m.scope, key=m.key, target=m.target, read_only=m.read_only) for m in u.mounts),
         privileged=u.privileged,
         readonly_rootfs=u.readonly_rootfs,
-        tmpfs_mounts=tuple(u.tmpfs_mounts),
+        tmpfs_mounts=_resolve_tmpfs(tuple(u.tmpfs_mounts), resources),
         shm_size_bytes=u.shm_size_bytes,
     )

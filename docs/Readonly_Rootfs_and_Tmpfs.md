@@ -60,7 +60,7 @@ Service `read_only` protects the root filesystem, including against ordinary roo
 
 Short tmpfs syntax accepts an absolute directory, optionally followed by `size`, `mode`, `uid`, and `gid` options. Long volume syntax accepts `type: tmpfs`, `target`, and `tmpfs: {size, mode}`. Use short syntax to specify UID/GID. Unsupported options (including `noexec`, `nosuid`, and read-only tmpfs) are rejected rather than dropped.
 
-Capacity is converted from Compose byte quantities to a whole byte count; for example `64m` becomes 67108864 bytes. Permission strings are octal (`"0750"`); YAML octal integers are accepted in long syntax. Defaults are **64 MiB, mode 1777, UID 0, GID 0**. The explicit 64 MiB default is the internal platform default, not a claim to reproduce Docker's unspecified-size default.
+Capacity is converted from Compose byte quantities to a whole byte count; for example `64m` becomes 67108864 bytes. Permission strings are octal (`"0750"`); YAML octal integers are accepted in long syntax. Defaults are mode 1777, UID 0, GID 0. A mount without `size` gets **half the service's requested memory, at least 64 MiB**, after deployment resource defaults are resolved; Docker bounds such a mount only by container memory, and this is the closest fixed size. Admission counts an unsized mount at that same size.
 
 The internal dialect enforces:
 
