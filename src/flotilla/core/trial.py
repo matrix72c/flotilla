@@ -82,6 +82,8 @@ class Trial:
         settings: TrialSettings,
         health_fallback: bool = False,
         health_fallback_after_s: float = 0.0,
+        kata_hinted_tasks: set[str] | None = None,
+        on_kata_learned: Callable[[str], None] | None = None,
     ) -> None:
         plan.validate()
         if settings.ttl_s <= 0:
@@ -101,6 +103,8 @@ class Trial:
         self._health_recreated: set[str] = set()
         self._health_fallback = health_fallback
         self._health_fallback_after_s = health_fallback_after_s
+        self._kata_hinted = kata_hinted_tasks if kata_hinted_tasks is not None else set()
+        self._on_kata_learned = on_kata_learned
         # Units that must be linked share one placement group; recreated units reuse it.
         self._grouped = network.link_members(plan) if network.topology(plan) is not None else frozenset()
         self._group = str(uuid.uuid4()) if self._grouped else None
@@ -237,7 +241,7 @@ class Trial:
             readonly_rootfs=u.readonly_rootfs,
             tmpfs_mounts=u.tmpfs_mounts,
             shm_size_bytes=u.shm_size_bytes,
-            fallback_runtime=(u.runtime == "kata"),
+            fallback_runtime=(u.runtime == "kata") or (self._plan.task in self._kata_hinted),
             group=self._group if unit in self._grouped else None,
         )
 
@@ -267,6 +271,11 @@ class Trial:
         if unit in self._health_recreated:
             return None
         self._health_recreated.add(unit)
+        if self._on_kata_learned is not None:
+            try:
+                self._on_kata_learned(self._plan.task)
+            except Exception:
+                pass  # best-effort persistence
         old = self._handles.pop(unit, None)
         if old is not None:
             self._reaper.discard(self._trial_id, old.iid)

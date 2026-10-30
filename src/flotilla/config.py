@@ -85,6 +85,10 @@ class OpenSandbox(BackendSettings):
     #: Needed when healthchecks have very long retry budgets (e.g. 5s x 180) that
     #: would otherwise exceed the start stage timeout and bypass the fallback.
     health_fallback_after_s: float = 0.0
+    #: Persistent kata task manifest (JSON list of task names learned to need kata).
+    #: Loaded at startup, appended when the health fallback succeeds; shared across runs.
+    #: Empty string disables persistence (learning stays in-memory only).
+    kata_manifest_path: str = ""
     network: OpenSandboxNetwork = OpenSandboxNetwork()
     execd: OpenSandboxExecd = OpenSandboxExecd()
     filesystem_protocol: FilesystemProtocol = "upstream"
