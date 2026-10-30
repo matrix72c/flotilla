@@ -1,4 +1,4 @@
-"""Versioned subprocess IPC schema; not a public task-input format."""
+"""Versioned prepared-environment schema: the flotilla-owned `env` payload of a prepared row."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from flotilla.platform.base import TmpfsMount
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 Condition = Literal["service_started", "service_healthy", "service_completed_successfully"]
 RestartPolicy = Literal["no", "always", "unless-stopped", "on-failure"]
@@ -97,13 +97,11 @@ class Finding(_Model):
 
 class Published(_Model):
     storage_root: str  # `StorageSettings.root` at publication time
-    files_sha256: str
 
 
 class Manifest(_Model):
     schema_: Annotated[int, Field(alias="schema")] = SCHEMA_VERSION
     task: str
-    build_key: str
     agent_service: str
     units: dict[str, Unit]
     networks: dict[str, Network] = {}
@@ -122,7 +120,14 @@ class Manifest(_Model):
 
     @classmethod
     def load_json(cls, text: str | bytes) -> Manifest:
-        manifest = cls.model_validate_json(text)
+        return cls._checked(cls.model_validate_json(text))
+
+    @classmethod
+    def load(cls, data: object) -> Manifest:
+        return cls._checked(cls.model_validate(data))
+
+    @staticmethod
+    def _checked(manifest: Manifest) -> Manifest:
         if manifest.schema_ != SCHEMA_VERSION:
             raise ValueError(f"unsupported manifest schema version {manifest.schema_} (expected {SCHEMA_VERSION})")
         return manifest

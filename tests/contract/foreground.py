@@ -41,7 +41,6 @@ async def run(deployment: Path, image: str, output: Path, *, services: int = 3, 
     task = Task(
         Manifest(
             task="foreground-contract",
-            build_key="c" * 64,
             agent_service="main",
             units={
                 name: Unit(

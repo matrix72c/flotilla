@@ -21,6 +21,7 @@ from flotilla.share.publish import (
     entries,
     files_json,
     mark_published,
+    publish_task_dir,
     publish_task_files,
 )
 from flotilla.testing.platform import FakePlatform, ManualClock, SharedTree
@@ -165,7 +166,6 @@ def _manifest() -> Manifest:
         {
             "schema": SCHEMA_VERSION,
             "task": "ds/t",
-            "build_key": KEY,
             "agent_service": "main",
             "units": {
                 "main": {
@@ -185,11 +185,10 @@ async def test_mark_published_fills_manifest(
 ) -> None:
     files = _files(tmp_path)
     result = await publish_task_files(anchor, KEY, files)
-    published = mark_published(_manifest(), result, ROOT)
+    published = mark_published(_manifest(), result.task_files, ROOT)
     assert published.task_files == f"tasks/{KEY}"
     assert published.task_files_published is not None
     assert published.task_files_published.storage_root == ROOT
-    assert published.task_files_published.files_sha256 == files_json(files)[1]
     # The manifest still reads back unchanged (schema unchanged).
     assert Manifest.load_json(published.dump_json()).task_files == f"tasks/{KEY}"
 
@@ -266,3 +265,72 @@ async def test_competing_publisher_accepts_identical_completed_content(
     assert result.skipped and not owned
     assert tree.content(f"tasks/{KEY}/seeds/data.tar") == b"tar-bytes"
     assert not any(p.startswith("tasks/.staging/") for p in {*tree.dirs, *tree.files})
+
+
+# ───────────────────────────── Flat per-environment publishing ─────────────────────────────
+
+TARGET = "tasks/ds/t/main"
+
+
+@pytest.mark.asyncio
+async def test_publish_task_dir_uploads_with_owner_and_mode(
+    anchor: Anchor, clock: ManualClock, tree: SharedTree, tmp_path: Path
+) -> None:
+    files = _files(tmp_path)
+    result = await publish_task_dir(anchor, TARGET, files)
+    assert result.task_files == TARGET and result.uploaded == 2
+    assert tree.content(f"{TARGET}/seeds/data.tar") == b"tar-bytes"
+    assert tree.modes[f"{TARGET}/binds/0/entrypoint.sh"] == "0755"
+    assert tree.owners[f"{TARGET}/binds/0/entrypoint.sh"] == f"{os.getuid()}:{os.getgid()}"
+    assert f"{TARGET}/{FILES_JSON}" not in tree.files  # no checksum manifest
+    assert not any(p.startswith("tasks/.staging/") for p in {*tree.dirs, *tree.files})
+    assert any(e.startswith("mv tasks/.staging/ds-t-main.") and e.endswith(TARGET) for e in tree.events)
+
+
+@pytest.mark.asyncio
+async def test_publish_task_dir_replaces_previous_content(
+    anchor: Anchor, clock: ManualClock, tree: SharedTree, tmp_path: Path
+) -> None:
+    files = _files(tmp_path)
+    await publish_task_dir(anchor, TARGET, files)
+    (files / "seeds" / "data.tar").write_bytes(b"new")
+    (files / "binds" / "0" / "entrypoint.sh").unlink()
+    await publish_task_dir(anchor, TARGET, files)
+    assert tree.content(f"{TARGET}/seeds/data.tar") == b"new"
+    assert f"{TARGET}/binds/0/entrypoint.sh" not in tree.files  # no stale files survive a replacement
+    assert not any(p.startswith(("tasks/.staging/", "tasks/.trash/")) for p in {*tree.dirs, *tree.files})
+
+
+@pytest.mark.asyncio
+async def test_publish_task_dir_restores_previous_content_when_swap_fails(
+    anchor: Anchor, clock: ManualClock, tree: SharedTree, platform: FakePlatform, tmp_path: Path
+) -> None:
+    files = _files(tmp_path)
+    await publish_task_dir(anchor, TARGET, files)
+    (files / "seeds" / "data.tar").write_bytes(b"new")
+
+    def failing_swap(iid: str, proc: ProcessSpec) -> ExecResult:
+        if proc.argv[0] == "mv" and "/tasks/.staging/" in proc.argv[-2]:
+            return ExecResult(exit_code=1, stdout=b"", stderr=b"Input/output error")
+        return tree._exec(iid, proc)
+
+    platform.set_exec_handler(failing_swap)
+    with pytest.raises(FlotillaError):
+        await publish_task_dir(anchor, TARGET, files)
+    assert tree.content(f"{TARGET}/seeds/data.tar") == b"tar-bytes"
+    assert not any(p.startswith(("tasks/.staging/", "tasks/.trash/")) for p in {*tree.dirs, *tree.files})
+
+
+@pytest.mark.asyncio
+async def test_publish_task_dir_rejects_symlinks_and_hidden_targets(
+    anchor: Anchor, clock: ManualClock, tree: SharedTree, tmp_path: Path
+) -> None:
+    files = _files(tmp_path)
+    with pytest.raises(PublishError, match="hidden segments"):
+        await publish_task_dir(anchor, "tasks/.staging/x", files)
+    with pytest.raises(PublishError, match="hidden segments"):
+        await publish_task_dir(anchor, "share/x", files)
+    os.symlink("entrypoint.sh", files / "binds" / "0" / "link")
+    with pytest.raises(PublishError, match="link"):
+        await publish_task_dir(anchor, TARGET, files)
+    assert TARGET not in tree.dirs

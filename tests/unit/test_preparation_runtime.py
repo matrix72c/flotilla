@@ -302,11 +302,11 @@ def test_removed_workflows_and_config_have_clear_migration_errors() -> None:
             Preparation.model_validate({field: "legacy"})
     with pytest.raises(ValueError, match="Extra inputs"):
         Build.model_validate({"prebuilt": {"reference": "r.io/{task}"}})
-    for name in ("Task", "TaskIndex", "RunRequest", "run_many", "PreparationReport", "PreparedEnvironment"):
+    for name in ("Task", "TaskIndex", "RunRequest", "run_many", "PreparationReport"):
         assert not hasattr(flotilla, name)
+    # Preparation is the offline `flotilla prepare` command, never a client method.
     assert not hasattr(Flotilla, "prepare")
-    with pytest.raises(SystemExit):
-        _build_parser().parse_args(["prepare"])
+    assert _build_parser().parse_args(["prepare", "ds", "--deployment", "d.toml", "--out", "o.jsonl"]).dirs
 
 
 @pytest.mark.asyncio

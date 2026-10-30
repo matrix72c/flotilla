@@ -284,9 +284,25 @@ class Preparation(_Model):
     @field_validator("docker_command")
     @classmethod
     def _command(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        if not value or any(not part for part in value):
-            raise ValueError("docker_command must be a nonempty argv")
-        return value
+        return _argv(value)
+
+
+class Prepare(_Model):
+    """Offline `flotilla prepare`: image builds/derivations and task-file publication."""
+
+    concurrency: PositiveInt = 4
+    docker_command: tuple[str, ...] = ("docker",)
+
+    @field_validator("docker_command")
+    @classmethod
+    def _command(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        return _argv(value)
+
+
+def _argv(value: tuple[str, ...]) -> tuple[str, ...]:
+    if not value or any(not part for part in value):
+        raise ValueError("docker_command must be a nonempty argv")
+    return value
 
 
 class FlotillaConfig(_Model):
@@ -296,6 +312,7 @@ class FlotillaConfig(_Model):
     storage: Storage
     build: Build = Build()
     preparation: Preparation = Preparation()
+    prepare: Prepare = Prepare()
     share: Share
     network: Network = Network()
     security: Security = Security()

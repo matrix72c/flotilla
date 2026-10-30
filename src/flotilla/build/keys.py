@@ -43,7 +43,8 @@ def _file_hash(path: Path) -> str:
     return digest.hexdigest()
 
 
-def entries(root: Path) -> list[dict[str, object]]:
+def entries(root: Path, *, digests: bool = True) -> list[dict[str, object]]:
+    """Path, type, mode and numeric owner of every entry under `root`; with `digests`, also file sha256."""
     metadata = root.parent / "file-identities.json"
     identities = json.loads(metadata.read_text()) if metadata.exists() else {}
     result: list[dict[str, object]] = []
@@ -59,7 +60,9 @@ def entries(root: Path) -> list[dict[str, object]]:
             "gid": owner[1],
         }
         if stat.S_ISREG(info.st_mode):
-            entry.update(size=info.st_size, sha256=_file_hash(root / relative))
+            entry["size"] = info.st_size
+            if digests:
+                entry["sha256"] = _file_hash(root / relative)
         elif stat.S_ISLNK(info.st_mode):
             entry["target"] = os.readlink(root / relative)
         result.append(entry)

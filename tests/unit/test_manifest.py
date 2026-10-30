@@ -26,7 +26,6 @@ def _manifest(project: Any, meta: dict[str, ImageMeta] | None = None, **kw: Any)
     meta = meta or {}
     return build_manifest(
         task="ds/task",
-        build_key="bk1",
         project=project,
         images={n: f"reg/r@sha256:{n}" for n in project.services},
         meta={n: meta.get(n, ImageMeta()) for n in project.services},
@@ -211,7 +210,7 @@ def test_manifest_json_roundtrip_and_strictness() -> None:
     assert f'"schema": {SCHEMA_VERSION}' in text
     assert Manifest.load_json(text) == m
     with pytest.raises(ValueError):
-        Manifest.load_json(text.replace('"build_key"', '"surprise": 1, "build_key"'))  # extra="forbid"
+        Manifest.load_json(text.replace('"agent_service"', '"surprise": 1, "agent_service"'))  # extra="forbid"
     with pytest.raises(ValueError):
         Manifest.load_json(text.replace(f'"schema": {SCHEMA_VERSION}', '"schema": 1'))
 
