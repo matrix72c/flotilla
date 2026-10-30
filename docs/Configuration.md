@@ -156,7 +156,7 @@ Precedence, lowest first: `[resources.default]`, resources declared in the Compo
 | `preparation.concurrency` | `4` | Concurrent task preparations per client |
 | `preparation.timeout_s` | `3600` | Cap on a single preparation |
 | `preparation.docker_command` | `["docker"]` | Docker argv prefix, e.g. `["sudo", "-n", "docker"]` |
-| `build.target` | `""` | Repository that built and mirrored images are pushed to, e.g. `registry.example.com/team/tasks` |
+| `build.target` | `""` | Repository that built and mirrored images are pushed to, e.g. `registry.example.com/team/tasks`. `flotilla prepare` pushes each dataset to `<target>/<dataset>` |
 | `build.pullable_registries` | `[]` | Registries or prefixes the platform can pull from directly; other images are mirrored to `build.target` |
 | `build.mirror_images` | `false` | Mirror every `image:` service, even from pullable registries |
 | `build.image_replacements` | `{}` | Map of image references to substitutes, e.g. to use an internal mirror |

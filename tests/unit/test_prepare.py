@@ -15,7 +15,7 @@ from flotilla.core.anchor import Anchor, AnchorSettings
 from flotilla.prepare import PrepareReport, prepare
 from flotilla.prepare.runner import failures_path
 from flotilla.prepared import load_prepared
-from flotilla.testing.build import _ctx, _task
+from flotilla.testing.build import FakeBuilder, _ctx, _task
 from flotilla.testing.config import config
 from flotilla.testing.platform import FakePlatform, ManualClock, SharedTree
 
@@ -140,6 +140,29 @@ async def test_multiple_verifiers_fail_the_task(
     report = await _run(cfg, [dataset / "plain"], out, anchors, environments=lambda p: [load_task(p)] * 3)
     assert report.failed == ("ds/plain",)
     assert "multiple verifier" in json.loads(failures_path(out).read_text())["reason"]
+
+
+@pytest.mark.asyncio
+async def test_each_dataset_pushes_to_its_own_repository(cfg: FlotillaConfig, anchors: Anchors, tmp_path: Path) -> None:
+    builder = FakeBuilder()
+    _task(tmp_path / "My_Set" / "group", "t", Dockerfile="FROM r.io/ns/base:1\n")  # main needs a build
+    out = tmp_path / "set.jsonl"
+    await prepare(
+        cfg, [tmp_path / "My_Set"], out, anchor=anchors.factory(), context=lambda journal: _ctx(builder=builder)
+    )
+    assert [row.id for row in load_prepared(out)] == ["My_Set/group/t"]
+    (tag,) = {request.tag for request in builder.requests if "-runtime" not in request.tag}
+    assert tag.startswith("r.io/ns/out/my-set:group--t--main--main--")
+
+
+@pytest.mark.asyncio
+async def test_datasets_sharing_a_repository_are_rejected(
+    cfg: FlotillaConfig, anchors: Anchors, tmp_path: Path
+) -> None:
+    _task(tmp_path / "a" / "My_Set", "t")
+    _task(tmp_path / "b" / "my-set", "t")
+    with pytest.raises(ValueError, match="same image repository"):
+        await _run(cfg, [tmp_path / "a" / "My_Set", tmp_path / "b" / "my-set"], tmp_path / "x.jsonl", anchors)
 
 
 def test_failures_path_and_dataset_rev(tmp_path: Path) -> None:

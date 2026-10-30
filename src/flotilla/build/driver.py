@@ -84,7 +84,7 @@ class BuildContext:
 def build_task(task: HarborTask, out_dir: Path, ctx: BuildContext, *, identity: str | None = None) -> BuildOutcome:
     """Always compile current inputs in an operation-private directory.
 
-    `identity` (e.g. `<dataset>--<task>--<role>`) names output image tags; without it tags derive from the
+    `identity` (e.g. `<task>--<role>`) names output image tags; without it tags derive from the
     environment directory path.
     """
     result = scan_task(task, ctx.caps)

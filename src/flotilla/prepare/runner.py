@@ -3,6 +3,8 @@
 A task is rebuilt only when its id has no row in the output (or with `force`); every rebuild republishes its task
 files, so a row and the files under `tasks/<id>/<role>` always come from the same run. Rows are appended as tasks
 finish, so an interrupted run resumes where it stopped; the output is compacted (deduplicated, sorted) at the end.
+
+Each dataset gets its own image repository, `<build.target>/<dataset>`, tagged `<task>--<role>--<service>--<key>`.
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ import subprocess
 import tempfile
 from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, TextIO
@@ -38,6 +40,7 @@ Environments = Callable[[Path], Sequence[HarborTask]]
 ContextFactory = Callable[[Path], BuildContext]  # journal directory -> build context
 AnchorFactory = Callable[[], Awaitable[Anchor]]  # returns a started anchor; prepare closes it
 _UNSAFE = re.compile(r"[^A-Za-z0-9_.-]+")
+_REPO_UNSAFE = re.compile(r"[^a-z0-9]+")
 
 
 @dataclass(frozen=True)
@@ -53,6 +56,11 @@ class _Source:
     id: str  # `<dataset>/<task path>`
     task_dir: Path
     dataset_root: Path
+
+    @property
+    def repository(self) -> str:
+        """Image repository component for the dataset: lowercase, runs of other characters become `-`."""
+        return _REPO_UNSAFE.sub("-", self.id.partition("/")[0].lower()).strip("-") or "dataset"
 
 
 class _Failed(Exception):
@@ -204,8 +212,11 @@ class _Session:
         )
 
     async def _environment(self, source: _Source, role: str, env: HarborTask, scratch: Path) -> PreparedEnvironment:
-        identity = f"{source.id.replace('/', '--')}--{role}"
-        outcome = await self._thread(build_task, env, scratch, self.ctx, identity=identity)
+        ctx = self.ctx
+        if ctx.settings.target:
+            ctx = replace(ctx, settings=replace(ctx.settings, target=f"{ctx.settings.target}/{source.repository}"))
+        identity = f"{source.id.partition('/')[2].replace('/', '--')}--{role}"
+        outcome = await self._thread(build_task, env, scratch, ctx, identity=identity)
         if outcome.manifest_path is None:
             stage = "scan" if outcome.status == "rejected" else "build"
             raise _Failed(stage, outcome.reason, role)
@@ -232,6 +243,13 @@ def _discover(roots: Sequence[Path]) -> list[_Source]:
             if ident in sources and sources[ident].task_dir != task_dir:
                 raise ValueError(f"two task directories map to id {ident}: {sources[ident].task_dir}, {task_dir}")
             sources[ident] = _Source(ident, task_dir, base)
+    repositories: dict[str, str] = {}
+    for source in sources.values():
+        dataset = source.id.partition("/")[0]
+        if repositories.setdefault(source.repository, dataset) != dataset:
+            raise ValueError(
+                f"datasets {repositories[source.repository]} and {dataset} map to the same image repository"
+            )
     return sorted(sources.values(), key=lambda s: s.id)
 
 
