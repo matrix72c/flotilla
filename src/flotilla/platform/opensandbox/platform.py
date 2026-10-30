@@ -251,7 +251,7 @@ class OpenSandboxPlatform:
         stage timeout still bounds the overall wait. Timeouts degrade to proceeding: the
         original command error is more informative than a readiness timeout.
         """
-        clock = execd._http.clock  # noqa: SLF001 - package-internal; virtual in tests
+        clock = execd._http.clock  # package-internal; the injectable clock is virtual in tests
         deadline = clock.monotonic() + timeout_s
         while True:
             try:
