@@ -14,6 +14,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - Explicit cluster DNS declarations: offline policies tolerate only the declared resolver IPs on TCP/UDP 53 and reject every other implicit egress exception.
 - Opt-in sandbox ingress enforcement using the shared OpenSandbox lifecycle route. Compose `network_mode: none` now checks both outbound exceptions and inbound isolation; upstream requests retain the standard egress-only schema by default.
 - Correlated execd request timing logs for send, response headers, command ID, and stream closure, without command contents or credentials.
+- Compose `${VAR:+alt}` / `${VAR+alt}` and nested references inside defaults and alternatives, plus Harbor's `CONTEXT_DIR` interpolation variable (the environment directory).
 
 ### Changed
 

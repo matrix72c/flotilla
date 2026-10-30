@@ -10,7 +10,7 @@ task/
   environment/
     Dockerfile             # optional
     docker-compose.yaml    # optional; the only Compose file name that is read
-    .env                   # optional; the only source of interpolation variables
+    .env                   # optional; with CONTEXT_DIR, the only source of interpolation variables
 ```
 
 - The main (agent) service is always named `main`. A task without a `main` service is rejected.
@@ -99,11 +99,11 @@ Compose `network_mode: none` also excludes the service from peer links and requi
 
 ## Variable interpolation
 
-Only values under `services` are interpolated, and variables come only from `environment/.env`; the host environment is never read.
+Only values under `services` are interpolated, and variables come only from `environment/.env`; the host environment is never read. As in Harbor, `CONTEXT_DIR` is always defined as the environment directory (`.`) and takes precedence over `.env`.
 
 | Syntax | Status |
 |---|---|
-| `${VAR}`, `${VAR:-default}`, `${VAR-default}`, `$$` | Supported |
-| `$VAR`, `${VAR:?err}`, `${VAR?err}`, `${VAR:+alt}`, nested `$` in defaults | Rejected |
+| `${VAR}`, `${VAR:-default}`, `${VAR-default}`, `${VAR:+alt}`, `${VAR+alt}`, `$$` | Supported; defaults and alternatives may contain nested references, e.g. `${NO_PROXY:+${NO_PROXY},}` |
+| `$VAR`, `${VAR:?err}`, `${VAR?err}` | Rejected |
 
 A variable referenced in a service's `environment` (or `env_file`) that `.env` does not define becomes a **runtime parameter**. Its value is supplied when the environment is opened, from `OpenOptions.runtime_params` or the deployment's `runtime_params` table (the request wins), or from the Compose default. Opening fails if a parameter has neither a value nor a default. An undefined variable without a default elsewhere in a service rejects the task.

@@ -21,6 +21,9 @@ TASK_FILE = "task.toml"
 ENV_DIR = "environment"
 COMPOSE_FILE = "docker-compose.yaml"
 PUBLIC = "public"
+#: Variables Harbor's docker environment injects into Compose interpolation, translated to flotilla's project-relative
+#: paths: `CONTEXT_DIR` is the environment directory. As in Harbor, they take precedence over `.env`.
+HARBOR_VARIABLES = {"CONTEXT_DIR": "."}
 
 
 class TaskError(ValueError):
@@ -105,7 +108,7 @@ def load_environment(
     )
     if environment.get("workdir") is not None:
         overlay["services"][MAIN]["working_dir"] = environment["workdir"]
-    variables = _dotenv(confined(env_dir, ".env"))
+    variables = {**_dotenv(confined(env_dir, ".env")), **HARBOR_VARIABLES}
     _env_files(overlay, env_dir)
     project = normalize(overlay, variables)
     if _network_mode(environment, baseline=True) == "no-network":
