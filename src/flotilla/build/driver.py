@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -188,6 +189,30 @@ def _build_one(task: HarborTask, name: str, plan: ServiceImage, key: str, ctx: B
     tag = image_tag(ctx.settings.target, name, service, key)
     svc = task.project.services[service]
     derive = service in image_changes(task.project)
+
+    # Registry cache: if this deterministic tag already exists, skip the build entirely.
+    # Enabled by [build] cache_images = true. The tag is stable across runs
+    # (task name + service + env-dir path hash), so a previously built image is
+    # safe to reuse when the Dockerfile, context, and bind sources are unchanged.
+    # Covers both plain builds and derive (bind-mount) builds: the final tag is
+    # deterministic either way.
+    if getattr(ctx.settings, "cache_images", False):
+        import subprocess as _sp
+        try:
+            r = _sp.run(["docker", "manifest", "inspect", tag],
+                        capture_output=True, text=True, timeout=30)
+            if r.returncode == 0:
+                # Pull the tag to resolve its digest (fast when layers are cached).
+                p = _sp.run(["docker", "pull", tag],
+                            capture_output=True, text=True, timeout=120)
+                if p.returncode == 0:
+                    for line in p.stdout.splitlines():
+                        if "Digest:" in line:
+                            digest = line.split("Digest:")[1].strip()
+                            return f"{ctx.settings.target}@{digest}"
+        except Exception:
+            pass  # registry unreachable or image not found; fall through to build
+
     if plan.ref is not None:
         assert plan.ref.digest is not None
         base = plan.ref.pinned(plan.ref.digest)

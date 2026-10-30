@@ -59,7 +59,10 @@ class BuildSettings:
     """Deployment config `[build]`."""
 
     pullable_registries: tuple[str, ...] = ()  # registries / prefixes the platform can pull; image services link
-    mirror_images: bool = False  # if true, image services always mirror (content pinned into the user's registry)
+    mirror_images: bool = False
+    #: Check the registry for an existing image with the deterministic tag before building;
+    #: skip the build when found. Off by default (tests use mock registries that always return digests).
+    cache_images: bool = False  # if true, image services always mirror (content pinned into the user's registry)
     target: str = ""  # push target repo for mirror / build, like `registry/namespace/repo`
     #: Public image substitutions (applied after parsing, before building): original ref -> substituted ref. Both
     #: service `image` and Dockerfile `FROM` are substituted. Points to internal copies when public registries are
