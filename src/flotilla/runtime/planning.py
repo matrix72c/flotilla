@@ -20,7 +20,7 @@ from flotilla.core.plan import (
 from flotilla.manifest import Manifest
 from flotilla.manifest import Unit as ManifestUnit
 from flotilla.platform.base import Resources, TmpfsMount
-from flotilla.platform.filesystem import memory_bytes
+from flotilla.platform.filesystem import unsized_tmpfs_bytes
 
 _REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
@@ -107,14 +107,9 @@ def _apply_runtime_params(
         env_by_unit[p.service][p.var] = str(result.value)
 
 
-_TMPFS_FLOOR_BYTES = 64 * 1024 * 1024
-
-
 def _resolve_tmpfs(mounts: tuple[TmpfsMount, ...], resources: Resources) -> tuple[TmpfsMount, ...]:
-    """Give unsized tmpfs mounts a concrete size: docker bounds them only by the container memory,
-    so half the service memory (the Linux tmpfs convention) is the closest fixed approximation,
-    floored at the historical 64 MiB so small services keep working."""
-    default = max(_TMPFS_FLOOR_BYTES, memory_bytes(resources.memory) // 2)
+    """Give unsized tmpfs mounts their concrete size (see `unsized_tmpfs_bytes`)."""
+    default = unsized_tmpfs_bytes(resources.memory)
     return tuple(m if m.size_bytes is not None else replace(m, size_bytes=default) for m in mounts)
 
 

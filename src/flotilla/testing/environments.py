@@ -39,7 +39,9 @@ def definition(task: Task, root: Path) -> EnvironmentDefinition:
             "restart": unit.restart,
             "read_only": unit.readonly_rootfs,
             "tmpfs": [
-                f"{m.mount_path}:size={m.size_bytes},mode={m.mode:04o},uid={m.uid},gid={m.gid}"
+                # An unsized mount stays unsized, so the generated Compose is re-read with the same meaning.
+                f"{m.mount_path}:{'' if m.size_bytes is None else f'size={m.size_bytes},'}"
+                f"mode={m.mode:04o},uid={m.uid},gid={m.gid}"
                 for m in unit.tmpfs_mounts
             ],
             **({"shm_size": unit.shm_size_bytes} if unit.shm_size_bytes is not None else {}),

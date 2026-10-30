@@ -104,8 +104,10 @@ def test_filesystem_admission_and_internal_limits(caps: Capabilities) -> None:
     ]:
         with pytest.raises(ValueError):
             supported.require_filesystem(False, tmpfs, memory=memory)
-    # unsized mounts are memory-bounded at runtime, not statically checkable
-    supported.require_filesystem(False, (TmpfsMount("/tmp"),), memory="32Mi")
+    # Admission counts unsized mounts at the size planning resolves (max(64 MiB, memory / 2)).
+    supported.require_filesystem(False, (TmpfsMount("/tmp"),), memory="128Mi")
+    with pytest.raises(ValueError, match="exceed"):
+        supported.require_filesystem(False, (TmpfsMount("/tmp"),), memory="32Mi")
     with pytest.raises(ValueError, match="privileged"):
         supported.require_filesystem(True, (), privileged=True)
     with pytest.raises(ValueError, match="privileged"):
@@ -117,6 +119,21 @@ def test_unsized_tmpfs_resolves_to_half_service_memory_at_planning() -> None:
     assert planned == (TmpfsMount("/tmp", 1024**3), TmpfsMount("/cache", 8 * 1024**2))
     small = _resolve_tmpfs((TmpfsMount("/tmp"),), Resources(cpu="1", memory="128Mi"))
     assert small == (TmpfsMount("/tmp", 64 * 1024**2),)
+
+
+def test_scan_and_planning_agree_on_unsized_tmpfs_with_shm_size(caps: Capabilities) -> None:
+    supported = replace(caps, native_tmpfs=True, shm_size=True, filesystem_limits=INTERNAL_LIMITS)
+    for shm, status in (("1g", "accepted"), ("1100m", "rejected")):  # unsized /tmp takes 1 GiB of 2 GiB
+        raw = {"services": {"main": {"image": "r.io/app", "tmpfs": ["/tmp"], "shm_size": shm, "mem_limit": "2g"}}}
+        project = normalize(raw, {})
+        assert scan("fs", project, supported).status == status, shm
+        svc = project.services["main"]
+        planned = _resolve_tmpfs(svc.tmpfs, Resources(cpu="1", memory="2Gi"))
+        if status == "accepted":
+            supported.require_filesystem(False, planned, memory="2Gi", shm_size_bytes=svc.shm_size_bytes)
+        else:
+            with pytest.raises(ValueError, match="exceed"):
+                supported.require_filesystem(False, planned, memory="2Gi", shm_size_bytes=svc.shm_size_bytes)
 
 
 def test_readonly_rootfs_promotes_single_writer_mounts_to_real_storage() -> None:

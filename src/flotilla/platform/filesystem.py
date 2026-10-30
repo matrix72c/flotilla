@@ -33,7 +33,7 @@ def overlaps(a: str, b: str) -> bool:
 class TmpfsMount:
     mount_path: str
     # None mirrors docker's unsized tmpfs: bounded by the sandbox memory, not a fixed cap.
-    # The runtime resolves it before the instance spec is built (see runtime/planning.py).
+    # The runtime resolves it with `unsized_tmpfs_bytes` before the instance spec is built.
     size_bytes: int | None = None
     mode: int = 0o1777
     uid: int = 0
@@ -78,6 +78,14 @@ class FilesystemState:
 
 
 NO_FILESYSTEM_LIMITS = FilesystemLimits()
+_TMPFS_FLOOR_BYTES = 64 * 1024 * 1024
+
+
+def unsized_tmpfs_bytes(memory: str) -> int:
+    """Concrete size for an unsized tmpfs: docker bounds it only by the container memory, so half the service
+    memory (the Linux tmpfs convention) is the closest fixed approximation, floored at the historical 64 MiB so
+    small services keep working. Admission and planning share it, so both check the size that is created."""
+    return max(_TMPFS_FLOOR_BYTES, memory_bytes(memory) // 2)
 
 
 def validate_shm_size(size_bytes: int | None) -> None:
@@ -106,10 +114,7 @@ def validate_mounts(
             raise ValueError(f"tmpfs path {path} duplicates or overlaps another tmpfs mount")
         if any(overlaps(path, other) for other in paths):
             raise ValueError(f"tmpfs path {path} conflicts with a volume mount")
-    if (
-        (mounts or shm_size_bytes)
-        and limits.memory_budget
-        and memory is not None
-        and sum(m.size_bytes or 0 for m in mounts) + (shm_size_bytes or 0) > memory_bytes(memory)
-    ):  # unsized mounts are not statically checkable; the runtime memory-bounds them
-        raise ValueError("tmpfs and shm_size capacities exceed the sandbox requested memory")
+    if (mounts or shm_size_bytes) and limits.memory_budget and memory is not None:
+        tmpfs = sum(m.size_bytes if m.size_bytes is not None else unsized_tmpfs_bytes(memory) for m in mounts)
+        if tmpfs + (shm_size_bytes or 0) > memory_bytes(memory):
+            raise ValueError("tmpfs and shm_size capacities exceed the sandbox requested memory")
