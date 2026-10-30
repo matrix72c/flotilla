@@ -10,6 +10,8 @@ from flotilla.platform.base import Capabilities, FilesystemLimits, FilesystemSta
 from flotilla.platform.filesystem import memory_bytes
 
 FilesystemProtocol = Literal["upstream", "sandbox-system-v1"]
+#: Internal `/dev/shm` size extension (Kubernetes quantity, at most the requested memory). Managed per instance.
+SHM_SIZE_EXTENSION = "sandbox-system.io/shm-size"
 INTERNAL_LIMITS = FilesystemLimits(
     max_tmpfs_mounts=8,
     forbidden_paths=(
@@ -34,9 +36,14 @@ class FilesystemSettings:
     def capabilities(self, caps: Capabilities) -> Capabilities:
         if self.protocol == "sandbox-system-v1":
             return replace(caps, filesystem_limits=INTERNAL_LIMITS)
-        if caps.readonly_rootfs or caps.native_tmpfs:
-            return replace(caps, readonly_rootfs=False, native_tmpfs=False)
+        if caps.readonly_rootfs or caps.native_tmpfs or caps.shm_size:
+            return replace(caps, readonly_rootfs=False, native_tmpfs=False, shm_size=False)
         return caps
+
+    def extensions(self, spec: InstanceSpec) -> dict[str, str]:
+        if self.protocol == "upstream" or spec.shm_size_bytes is None:
+            return {}
+        return {SHM_SIZE_EXTENSION: str(spec.shm_size_bytes)}
 
     def compile(self, spec: InstanceSpec) -> dict[str, Any]:
         if self.protocol == "upstream":

@@ -31,7 +31,7 @@ from flotilla.platform.base import (
 )
 from flotilla.platform.opensandbox import address
 from flotilla.platform.opensandbox.execd import Execd, ExecdSettings
-from flotilla.platform.opensandbox.filesystem import UPSTREAM_FILESYSTEM, FilesystemSettings
+from flotilla.platform.opensandbox.filesystem import SHM_SIZE_EXTENSION, UPSTREAM_FILESYSTEM, FilesystemSettings
 from flotilla.platform.opensandbox.http import DEFAULT_RETRY, Http, RetryPolicy
 from flotilla.platform.opensandbox.lifecycle import Lifecycle
 from flotilla.platform.opensandbox.network import NetworkSettings, compile_policy
@@ -111,6 +111,10 @@ class OpenSandboxPlatform:
             raise ValueError(
                 f"extensions cannot set the placement group key {group_extension!r}: flotilla writes it per trial"
             )
+        if SHM_SIZE_EXTENSION in (extensions or {}) or SHM_SIZE_EXTENSION in (privileged_extensions or {}):
+            raise ValueError(
+                f"extensions cannot set {SHM_SIZE_EXTENSION!r}: flotilla writes it per instance from Compose shm_size"
+            )
         self.caps = filesystem.capabilities(caps)
         self._filesystem = filesystem
         self._lifecycle = lifecycle
@@ -138,6 +142,7 @@ class OpenSandboxPlatform:
                 privileged=spec.privileged,
                 memory=spec.resources.memory,
                 volume_paths=tuple(v.mount_path for v in spec.volumes),
+                shm_size_bytes=spec.shm_size_bytes,
             )
         except ValueError as exc:
             raise FlotillaError(str(exc), stage="create", category=ErrorCategory.INVALID, retryable=False) from exc
@@ -293,6 +298,7 @@ class OpenSandboxPlatform:
             extensions.update(self._privileged_extensions)
         if spec.group is not None and self._group_extension is not None:
             extensions[self._group_extension] = spec.group
+        extensions.update(self._filesystem.extensions(spec))
         resources = {"cpu": spec.resources.cpu, "memory": spec.resources.memory}
         body: dict[str, Any] = {
             **self._create_fields,

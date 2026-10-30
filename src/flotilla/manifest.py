@@ -59,6 +59,7 @@ class Unit(_Model):
     privileged: bool = False
     readonly_rootfs: bool = False
     tmpfs_mounts: list[TmpfsMount] = []
+    shm_size_bytes: Annotated[int, Field(gt=0)] | None = None
 
 
 class Network(_Model):

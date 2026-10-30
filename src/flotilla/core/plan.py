@@ -74,6 +74,7 @@ class Unit:
     privileged: bool = False
     readonly_rootfs: bool = False
     tmpfs_mounts: tuple[TmpfsMount, ...] = ()
+    shm_size_bytes: int | None = None
 
 
 @dataclass(frozen=True)
@@ -159,7 +160,7 @@ class TrialPlan:
         if len(keys) != len(set(keys)):
             raise ValueError("duplicate trial volume key")
         for name, unit in self.units.items():
-            validate_mounts(unit.tmpfs_mounts, (m.target for m in unit.mounts))
+            validate_mounts(unit.tmpfs_mounts, (m.target for m in unit.mounts), shm_size_bytes=unit.shm_size_bytes)
             if unit.readonly_rootfs and unit.privileged:
                 raise ValueError(f"{name}: readonly_rootfs cannot be combined with privileged")
             for m in unit.mounts:

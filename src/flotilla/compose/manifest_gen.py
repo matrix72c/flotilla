@@ -120,6 +120,7 @@ def _unit(
         privileged=svc.privileged,
         readonly_rootfs=svc.readonly_rootfs,
         tmpfs_mounts=list(svc.tmpfs),
+        shm_size_bytes=svc.shm_size_bytes,
     )
 
 

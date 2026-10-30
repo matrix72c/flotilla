@@ -32,7 +32,7 @@ from flotilla.platform.base import (
     Topology,
 )
 from flotilla.platform.opensandbox import ExecdSettings, OpenSandboxPlatform, StorageSettings, build
-from flotilla.platform.opensandbox.filesystem import UPSTREAM_FILESYSTEM, FilesystemSettings
+from flotilla.platform.opensandbox.filesystem import SHM_SIZE_EXTENSION, UPSTREAM_FILESYSTEM, FilesystemSettings
 from flotilla.platform.opensandbox.network import NetworkSettings
 from flotilla.platform.opensandbox.platform import EXECD_TOKEN_HEADER, MANAGED_CREATE_FIELDS
 from flotilla.testing.platform import ManualClock
@@ -187,6 +187,31 @@ async def test_filesystem_wire_format_is_explicit_and_upstream_unchanged(
     assert body["tmpfsMounts"] == [{"mountPath": "/tmp", "size": "16777216", "mode": "0750", "uid": 1000, "gid": 1001}]
     default = await _create_body(clock, caps, _spec("plain"), filesystem=FilesystemSettings("sandbox-system-v1"))
     assert default["readOnlyRootFilesystem"] is False and default["tmpfsMounts"] == []
+
+
+@pytest.mark.asyncio
+async def test_shm_size_is_a_per_instance_internal_extension(clock: ManualClock, caps: Capabilities) -> None:
+    internal = FilesystemSettings("sandbox-system-v1")
+    spec = dataclasses.replace(_spec("db"), shm_size_bytes=1073741824)
+    with pytest.raises(FlotillaError, match="shm_size") as failure:
+        await _create_body(clock, dataclasses.replace(caps, shm_size=True), spec)  # upstream clears the capability
+    assert not failure.value.retryable
+    with pytest.raises(FlotillaError, match="shm_size"):
+        await _create_body(clock, caps, spec, filesystem=internal)  # no probed evidence
+    caps = dataclasses.replace(caps, shm_size=True)
+    body = await _create_body(clock, caps, spec, filesystem=internal)
+    assert body["extensions"] == {"project": "p1", SHM_SIZE_EXTENSION: "1073741824"}
+    plain = await _create_body(clock, caps, _spec("plain"), filesystem=internal)
+    assert plain["extensions"] == {"project": "p1"}
+    with pytest.raises(FlotillaError, match="exceed"):  # 2Gi request: 1Gi tmpfs + 1.5Gi shm
+        await _create_body(
+            clock,
+            dataclasses.replace(caps, native_tmpfs=True),
+            dataclasses.replace(spec, tmpfs_mounts=(TmpfsMount("/tmp", 1073741824),), shm_size_bytes=1610612736),
+            filesystem=internal,
+        )
+    with pytest.raises(ValueError, match="shm-size"):
+        _platform(lambda r: httpx.Response(200), clock, caps=caps, extensions={SHM_SIZE_EXTENSION: "8Gi"})
 
 
 @pytest.mark.asyncio

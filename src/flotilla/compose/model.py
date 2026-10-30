@@ -83,6 +83,7 @@ class Service:
     networks: Mapping[str, NetworkAttachment] = field(default_factory=dict)  # empty = network_mode: none
     volumes: tuple[VolumeMount, ...] = ()
     tmpfs: tuple[TmpfsMount, ...] = ()
+    shm_size_bytes: int | None = None
     readonly_rootfs: bool = False
     restart: RestartPolicy = "no"
     privileged: bool = False

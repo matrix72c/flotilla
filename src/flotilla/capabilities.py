@@ -82,6 +82,7 @@ class Storage(_Model):
     dir_management: Item  # required
     volume_file: Item  # feature
     native_tmpfs: Item = Item(ok=False, source="declared", evidence="not measured")
+    shm_size: Item = Item(ok=False, source="declared", evidence="not measured")
 
 
 class Runtime(_Model):
@@ -180,6 +181,7 @@ class CapabilityReport(_Model):
             devices=frozenset(self.runtime.devices) if self.runtime.privileged_runtime.ok else frozenset(),
             readonly_rootfs=self.runtime.readonly_rootfs.ok and self.runtime.readonly_rootfs.source == "probed",
             native_tmpfs=self.storage.native_tmpfs.ok and self.storage.native_tmpfs.source == "probed",
+            shm_size=self.storage.shm_size.ok and self.storage.shm_size.source == "probed",
         )
 
     def dump_json(self) -> str:

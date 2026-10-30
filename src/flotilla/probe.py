@@ -44,6 +44,8 @@ PROBE_LABEL = "flotilla/probe"  # run id; with the launch and unit labels it ide
 _EXEC_TIMEOUT_S = 30.0
 _MEMORY = "512Mi"
 _MEMORY_BYTES = 512 * 1024 * 1024
+#: Differs from Docker's 64 MiB and from a memory-sized default, so a passing check reflects the request.
+_SHM_PROBE_BYTES = 96 * 1024 * 1024
 _PUBLIC_IP = "1.1.1.1"  # egress none: a public address outside any deployment
 _NONE = ExternalPolicy(mode="none")
 _INBOUND_PORT = 48080  # port the member listens on
@@ -79,6 +81,7 @@ class Declared(BaseModel):
     notes: tuple[str, ...] = ()
     probe_readonly_rootfs: bool = False
     probe_native_tmpfs: bool = False
+    probe_shm_size: bool = False
 
     @field_validator("cluster_dns")
     @classmethod
@@ -136,6 +139,7 @@ class Declared(BaseModel):
             devices=frozenset(),
             readonly_rootfs=self.probe_readonly_rootfs,
             native_tmpfs=self.probe_native_tmpfs,
+            shm_size=self.probe_shm_size,
         )
 
 
@@ -177,6 +181,7 @@ async def probe(
         inbound = await run.inbound(declared.inbound_isolation)
         storage = await run.storage()
         readonly, tmpfs = await run.filesystem(declared.probe_readonly_rootfs, declared.probe_native_tmpfs)
+        shm = await run.shm_size(declared.probe_shm_size)
     finally:
         leaked = await run.cleanup()
     if leaked:  # labeled flotilla/probe with finite TTL, so platform TTL reclaims them; report notes it
@@ -225,6 +230,7 @@ async def probe(
             dir_management=storage["dir_management"],
             volume_file=declared.volume_file,
             native_tmpfs=tmpfs,
+            shm_size=shm,
         ),
         runtime=Runtime(
             exec_auth=declared.exec_auth,
@@ -399,6 +405,34 @@ class _Run:
         except (FlotillaError, ValueError, Expired) as exc:
             # Do not copy remote output or configuration into persistent evidence.
             return _probed(False, f"filesystem probe failed ({type(exc).__name__})")
+
+    async def shm_size(self, requested: bool) -> Item:
+        """Request a size distinct from common defaults; check the mounted capacity and its enforcement."""
+        if not requested:
+            return Item(ok=False, source="declared", evidence="not requested; enable probe_shm_size")
+        size = _SHM_PROBE_BYTES
+        try:
+            handle = await self._create(replace(self._spec("shm"), shm_size_bytes=size))
+            result = await self.platform.exec(
+                handle,
+                _sh(
+                    "# flotilla shm_size probe\n"
+                    'test "$(stat -f -c %T /dev/shm)" = tmpfs && '
+                    "set -- $(stat -f -c '%b %S' /dev/shm) && "
+                    f"test $(($1 * $2)) -eq {size} && "
+                    f"err=$(dd if=/dev/zero of=/dev/shm/flotilla-shm-probe bs=1048576 count={size // 2**20 + 1} 2>&1); "
+                    "rc=$?; rm -f /dev/shm/flotilla-shm-probe; "
+                    'test $rc -ne 0 && printf "%s" "$err" | grep -q "No space left on device"',
+                    uid=1000,
+                    gid=1000,
+                    LC_ALL="C",
+                ),
+            )
+            if result.exit_code != 0 or result.timed_out:
+                return _probed(False, "/dev/shm type, requested capacity, non-root write or limit check failed")
+            return _probed(True, f"/dev/shm mounted as tmpfs with the requested {size} bytes, enforced")
+        except (FlotillaError, ValueError, Expired) as exc:
+            return _probed(False, f"shm_size probe failed ({type(exc).__name__})")
 
     async def _wait_running(self, handle: InstanceHandle) -> None:
         running = wait_running(self.platform, self.clock, handle.iid, stage="create")

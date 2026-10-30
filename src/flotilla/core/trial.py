@@ -225,6 +225,7 @@ class Trial:
             privileged=u.privileged,
             readonly_rootfs=u.readonly_rootfs,
             tmpfs_mounts=u.tmpfs_mounts,
+            shm_size_bytes=u.shm_size_bytes,
             group=self._group if unit in self._grouped else None,
         )
 
