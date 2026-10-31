@@ -117,7 +117,7 @@ What happens:
 2. **Your code runs.** `env.agent` is the `main` service; `env.service("web")` selects the sidecar.
 3. **Cleanup.** Leaving `fleet.environment(...)` deletes both sandboxes and waits until the platform confirms deletion. Leaving `Flotilla(...)` deletes the client's anchor sandbox and records the result in `fleet.cleanup_report`.
 
-`startup_timeout` bounds step 1. `lifetime` starts when the environment is ready; after it passes, the environment is released even if your code is still using it.
+`startup_timeout` bounds step 1, counted from when the open gets an admission slot; waiting for a slot is bounded by `admission_timeout`. `lifetime` starts when the environment is ready; after it passes, the environment is released even if your code is still using it.
 
 Opening builds nothing and uploads no task files, so every run takes only the sandbox startup time.
 

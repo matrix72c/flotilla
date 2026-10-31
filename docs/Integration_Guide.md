@@ -71,7 +71,7 @@ per_episode = fleet.reservation(main).instances  # services x 2: one active gene
 overhead = fleet.client_reservation().instances  # the anchor
 ```
 
-Use these numbers when sizing a worker pool against `limits.instance_budget` and `limits.trial_concurrency`, especially when one episode opens a main and a verifier environment. They are upper bounds computed locally, not a remote quota check. Flotilla also enforces the limits itself: excess opens wait in its admission queue until `startup_timeout` expires.
+Use these numbers when sizing a worker pool against `limits.instance_budget` and `limits.trial_concurrency`, especially when one episode opens a main and a verifier environment. They are upper bounds computed locally, not a remote quota check. Flotilla also enforces the limits itself: excess opens wait in its admission queue for up to `admission_timeout` and then raise `AdmissionTimeout`. Time spent queued does not count against `startup_timeout`.
 
 ## Running an episode
 
@@ -80,7 +80,8 @@ from flotilla import ErrorCategory, ExecOutcomeUnknown, FlotillaError, OpenOptio
 
 options = OpenOptions(
     request_id=episode_id,         # reported in events and env.info() for correlation
-    startup_timeout=900,           # admission and sandbox startup
+    admission_timeout=3600,        # waiting for a trial_concurrency / instance_budget slot
+    startup_timeout=900,           # from admission until ready
     lifetime=3600,                 # starts when the environment is ready
     runtime_params={"FLAG": flag}, # values for variables the task's .env leaves undefined
     exec_env={"main": {"OPENAI_BASE_URL": proxy_url}},  # added to every command in that service

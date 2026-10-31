@@ -190,10 +190,11 @@ class Limits(_Model):
     exec_rate: PositiveFloat = 500.0
     exec_timeout: PositiveFloat = 21600.0
     exec_concurrency: PositiveInt = 64
+    admission_timeout: PositiveFloat = 3600.0  # default wait for a trial_concurrency/instance_budget slot
 
 
 class Runtime(_Model):
-    startup_timeout_s: PositiveFloat = 1800.0  # default open budget: start, admission and startup
+    startup_timeout_s: PositiveFloat = 1800.0  # default open budget, from admission to ready
     check_timeout_s: PositiveFloat = 60.0
     run_timeout_s: PositiveFloat = 21600.0
     exec_default_timeout_s: PositiveFloat = 300.0
@@ -215,6 +216,7 @@ class Timeouts(_Model):
     prepare: PositiveFloat = 600.0
     start_max: PositiveFloat = 1800.0
     close: PositiveFloat = 60.0
+    client_start: PositiveFloat = 300.0  # starting the client's anchor and checking the share, once per client
 
     @model_validator(mode="after")
     def _create_request(self) -> Timeouts:

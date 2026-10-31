@@ -18,9 +18,9 @@ Import public types from `flotilla`. Configuration is loaded locally at construc
 
 A `PreparedEnvironment` comes from a row of the jsonl that `flotilla prepare` writes: `load_prepared(path)` returns `PreparedTask` rows, `row.environment()` is the main environment, and `row.verifier` is the separate verifier environment or `None`. Images are digest-pinned and task files already published, so opening does not need Docker. Harbor verifier selection happens during preparation; the adapter opens the row's environment for its environment directory.
 
-`OpenOptions` accepts `request_id`, `startup_timeout`, `lifetime`, `runtime_params`, per-service `exec_env` and `resources`, and `disable_internet`. Resource overrides support CPU and memory.
+`OpenOptions` accepts `request_id`, `admission_timeout`, `startup_timeout`, `lifetime`, `runtime_params`, per-service `exec_env` and `resources`, and `disable_internet`. Resource overrides support CPU and memory.
 
-`startup_timeout` (default `runtime.startup_timeout_s`) includes initialization, admission queueing, and startup. `lifetime` starts at readiness and cannot exceed `runtime.run_timeout_s`. Runtime parameters are literal substitution values; only explicit network-policy targets are interpreted as network destinations.
+Each phase of an open has its own budget. Client start (once per client) is bounded by `timeouts.client_start`. Waiting for a `trial_concurrency` / `instance_budget` slot is bounded by `admission_timeout` (default `limits.admission_timeout`) and raises `AdmissionTimeout` with the current counts. `startup_timeout` (default `runtime.startup_timeout_s`) starts at admission and ends when the environment is ready. `lifetime` starts at readiness and cannot exceed `runtime.run_timeout_s`. Runtime parameters are literal substitution values; only explicit network-policy targets are interpreted as network destinations.
 
 ## Services and processes
 

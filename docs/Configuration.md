@@ -95,7 +95,7 @@ The optional `probe_readonly_rootfs`, `probe_native_tmpfs`, and `probe_shm_size`
 
 | Key | Default | Meaning |
 |---|---|---|
-| `startup_timeout_s` | `1800` | Default `OpenOptions.startup_timeout`: initialization, admission queueing, and startup |
+| `startup_timeout_s` | `1800` | Default `OpenOptions.startup_timeout`: from admission until the environment is ready. Queueing and client start are bounded separately |
 | `run_timeout_s` | `21600` | Upper bound for `OpenOptions.lifetime` |
 | `exec_default_timeout_s` | `300` | Command timeout when none is given |
 | `cancel_confirm_timeout_s` | `15` | How long to wait for confirmation that an interrupted command stopped |
@@ -116,10 +116,11 @@ Set these from measured platform quotas.
 | `exec_rate` | `500.0` | Command requests per second |
 | `exec_concurrency` | `64` | Concurrent commands |
 | `exec_timeout` | `21600` | Maximum timeout accepted for a single command |
+| `admission_timeout` | `3600` | Default `OpenOptions.admission_timeout`: how long an open waits for a `trial_concurrency` / `instance_budget` slot. On expiry it raises `AdmissionTimeout` (a `TimeoutError`) with the current counts; nothing has been created |
 
 ### `[timeouts]`
 
-Per-stage startup deadlines. The whole startup is also bounded by `OpenOptions.startup_timeout`.
+Per-stage startup deadlines. The whole startup, from admission to ready, is also bounded by `OpenOptions.startup_timeout`.
 
 | Key | Default | Stage |
 |---|---|---|
@@ -132,6 +133,7 @@ Per-stage startup deadlines. The whole startup is also bounded by `OpenOptions.s
 | `hosts` | `30` | Writing `/etc/hosts` entries |
 | `start_max` | `1800` | Upper bound for starting services and waiting for health gates |
 | `close` | `60` | Default timeout for `fleet.drain()` and `fleet.close()` |
+| `client_start` | `300` | Starting the client's anchor and checking the pinned share release, once per client before its first open. The check downloads `RELEASE.json`, compares its sha256 and confirms `bin/busybox`; `flotilla share verify` checks every file |
 
 `[process].poll_interval` (default `2`) sets how often background process status is polled.
 
