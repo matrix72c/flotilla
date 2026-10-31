@@ -281,3 +281,48 @@ async def test_collect_launch_catches_instance_appearing_within_visibility(
     assert straggler.iid not in _of(platform, "L0")
     assert clock.monotonic() - start >= VIS
     assert tree.events[-1] == "rm launches/L0"
+
+
+@pytest.mark.asyncio
+async def test_launch_without_directory_is_found_by_labels(
+    platform: FakePlatform, clock: ManualClock, tree: SharedTree, gc: Gc
+) -> None:
+    # The process died after creating sandboxes but before `launches/<id>` existed.
+    tree.dirs.add("launches")
+    await platform.create(_unit("L0"))
+    await clock.advance(VIS)
+    assert (await clock.run(gc.run_once())).candidates == {"L0"}
+    await clock.advance(W)
+    assert (await clock.run(gc.run_once())).removed == {"L0"}
+    assert _of(platform, "L0") == []
+
+
+@pytest.mark.asyncio
+async def test_platform_only_mode_deletes_sandboxes_and_reports_directories(
+    platform: FakePlatform, clock: ManualClock, tree: SharedTree
+) -> None:
+    await _orphan(platform, tree, "L0")
+    gc = Gc(platform, clock, None, Deleter(platform, clock), window_s=W)
+    await clock.advance(VIS)
+    first = await clock.run(gc.run_once())
+    assert first.mode == "platform" and first.candidates == {"L0"}
+    await clock.advance(W)
+    second = await clock.run(gc.run_once())
+    assert second.directories_skipped == {"L0"} and not second.removed
+    assert _of(platform, "L0") == []
+    assert "launches/L0" in tree.dirs  # nothing on shared storage is touched without an anchor
+
+
+@pytest.mark.asyncio
+async def test_staging_collection_removes_only_old_timestamped_entries(
+    clock: ManualClock, tree: SharedTree, gc: Gc
+) -> None:
+    now = int(clock.now().timestamp())
+    old, fresh = f"a.{now - 90_000}.0123456789ab", f"b.{now - 60}.0123456789ab"
+    tree.dirs.update(
+        {"tasks", "tasks/.staging", f"tasks/.staging/{old}", f"tasks/.staging/{fresh}", "tasks/.staging/legacy"}
+    )
+    report = await clock.run(gc.collect_staging(24 * 3600))
+    assert report.removed == (f"tasks/.staging/{old}",)
+    assert report.unrecognized == ("tasks/.staging/legacy",)
+    assert f"tasks/.staging/{fresh}" in tree.dirs and "tasks/.staging/legacy" in tree.dirs

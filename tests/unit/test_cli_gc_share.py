@@ -160,3 +160,42 @@ async def test_share_gc_preview_matches_real_deletion(
     assert "removed ['stale']" in capsys.readouterr().out
     assert "share/releases/stale" not in tree.dirs
     assert "share/releases/2026-10-07.1" in tree.dirs
+
+
+@pytest.mark.asyncio
+async def test_gc_without_anchor_deletes_sandboxes_and_leaves_directories(
+    tmp_path: Path,
+    platform: FakePlatform,
+    clock: ManualClock,
+    tree: SharedTree,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from flotilla import cli
+    from flotilla.core import labels
+    from flotilla.platform.base import ErrorCategory, ExternalPolicy, FlotillaError, InstanceSpec, Resources
+
+    tree.dirs.update({"launches", "launches/L0"})
+    spec = InstanceSpec(
+        image="svc@sha256:abc",
+        entrypoint=("sleep",),
+        labels={labels.LAUNCH: "L0", labels.TRIAL: "t1", labels.UNIT: "web", labels.ROLE: labels.ROLE_UNIT},
+        timeout_seconds=3600,
+        resources=Resources(cpu="1", memory="2Gi"),
+        volumes=(),
+        external=ExternalPolicy(mode="none"),
+    )
+    orphan = (await platform.create(spec)).iid
+    # The anchor image cannot be pulled: its create is rejected.
+    platform.inject_fault(
+        "create", FlotillaError("image pull failed", stage="create", category=ErrorCategory.IMAGE, retryable=False)
+    )
+    monkeypatch.setattr(cli, "SystemClock", lambda: clock)
+    monkeypatch.setattr(FlotillaConfig, "build_platform", lambda *_, **__: platform)
+    monkeypatch.setattr(platform, "aclose", AsyncMock(), raising=False)
+    args = cli._build_parser().parse_args(["gc", "--deployment", str(_deployment(tmp_path)), "--launch", "L0"])
+    assert await clock.run(cli._gc(args)) == 1  # directories could not be collected
+    captured = capsys.readouterr()
+    assert "anchor unavailable" in captured.err and "directory left" in captured.out
+    assert orphan not in platform.iids()
+    assert "launches/L0" in tree.dirs

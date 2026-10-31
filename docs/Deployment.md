@@ -57,4 +57,4 @@ flotilla gc --deployment deployment.toml
 flotilla share gc --deployment deployment.toml --keep previous --dry-run
 ```
 
-GC is an explicit operator command, not a background schedule. `gc --launch ID` skips the two-observation wait and is appropriate only after confirming that owner has exited. Shared task publications and previous storage formats are never automatically migrated or deleted. Review share GC's dry-run before running it without `--dry-run`.
+GC is an explicit operator command, not a background schedule. It also removes `tasks/.staging`, `tasks/.trash` and `share/staging` entries older than `--staging-age` (default 24 h), judged by the timestamp in their names; entries without one are listed, not removed. When its anchor cannot start, GC deletes sandboxes by label only, reports the directories it left, and exits 1. `gc --launch ID` skips the two-observation wait and is appropriate only after confirming that owner has exited. Shared task publications and previous storage formats are never automatically migrated or deleted. Review share GC's dry-run before running it without `--dry-run`.

@@ -29,6 +29,7 @@ class Deleter:
         self.clock = clock
         self.retry_deadline_s = retry_deadline_s
         self._slots = asyncio.Semaphore(concurrency)
+        self.errors: dict[str, str] = {}  # iid -> last deletion error, for cleanup diagnostics
 
     def scope(self) -> DeleteScope:
         return DeleteScope(self)
@@ -44,11 +45,15 @@ class Deleter:
                     await self.platform.get(iid)
             except FlotillaError as exc:
                 if exc.category is ErrorCategory.NOT_FOUND:
+                    self.errors.pop(iid, None)
                     return True
+                self.errors[iid] = _brief(exc)
                 if not exc.retryable:
                     log.error("Deletion of %s was rejected; cleanup remains unconfirmed: %s", iid, exc)
                     return False
                 log.warning("Deleting instance %s failed, retrying: %s", iid, exc)
+            else:
+                self.errors[iid] = "instance still listed after delete"
             # get still returned a state: platform not done yet (e.g. terminating); delete and confirm again later.
             if self.clock.monotonic() >= give_up:
                 log.error("Could not confirm deletion of instance %s within %ss", iid, self.retry_deadline_s)
@@ -88,6 +93,13 @@ class DeleteScope:
             if t.done() and not t.cancelled() and t.exception() is None and t.result()
         }
 
+    def last_error(self) -> str | None:
+        """Most recent deletion error among this scope's unconfirmed instances."""
+        for iid in sorted(self.pending()):
+            if iid in self._deleter.errors:
+                return self._deleter.errors[iid]
+        return None
+
     def pending(self) -> set[str]:
         """Known instances whose deletion has not been confirmed, including sweep discoveries."""
         return set(self._tasks) - self.gone()
@@ -123,6 +135,11 @@ class DeleteScope:
     def cancel(self) -> None:
         for task in self._tasks.values():
             task.cancel()
+
+
+def _brief(exc: BaseException, limit: int = 300) -> str:
+    text = f"{type(exc).__name__}: {exc}"
+    return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
 def _retrieve(task: asyncio.Task[bool]) -> None:

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
+from typing import Literal
 
 from flotilla.core import labels
 from flotilla.core.anchor import Anchor
@@ -20,18 +22,35 @@ class GcReport:
 
     alive: frozenset[str]  # launches with an anchor
     candidates: frozenset[str]  # candidates not yet past W
-    removed: frozenset[str]  # instances gone, directory removed
+    removed: frozenset[str]  # instances gone, directory removed (anchor mode)
     pending: frozenset[str]  # past W but not fully deleted; retried next round
+    mode: Literal["anchor", "platform"] = "anchor"
+    # Platform-only mode: launches whose instances are gone but whose `launches/<id>` was not removed.
+    directories_skipped: frozenset[str] = frozenset()
+
+
+# Staging names end in `.<unix seconds>.<12 hex>`; anything else is listed, never deleted.
+_STAGED = re.compile(r"\.(\d{9,11})\.[0-9a-f]{12}$")
+STAGING_DIRS = ("tasks/.staging", "tasks/.trash", "share/staging")
+
+
+@dataclass(frozen=True)
+class StagingReport:
+    removed: tuple[str, ...] = ()
+    unrecognized: tuple[str, ...] = field(default=())  # no timestamp in the name: may belong to another tool
 
 
 class Gc:
     """Per-process gc state: candidates and when each was first observed. The operator explicitly calls `run_once`.
 
     `anchor` is this process's anchor: it performs directory operations, and its launch is never a candidate.
-    `window_s` is `W`.
+    With `anchor=None` (the anchor could not start) gc runs platform-only: it finds launches by instance labels,
+    deletes their instances, and reports their directories as skipped. `window_s` is `W`.
     """
 
-    def __init__(self, platform: Platform, clock: Clock, anchor: Anchor, deleter: Deleter, *, window_s: float) -> None:
+    def __init__(
+        self, platform: Platform, clock: Clock, anchor: Anchor | None, deleter: Deleter, *, window_s: float
+    ) -> None:
         if window_s <= 0:
             raise ValueError("window_s must be > 0")
         self._platform = platform
@@ -46,8 +65,12 @@ class Gc:
         must never be taken as "no anchor"."""
         observed = self._clock.monotonic()
         alive = await self._alive_launches()
-        dirs = set(await self._anchor.listdir(LAUNCHES, stage="run"))
-        orphans = dirs - alive - {self._anchor.launch_id}
+        # A launch can have instances but no directory yet (it died before mkdir), or a directory but no instances.
+        found = await self._labelled_launches()
+        if self._anchor is not None:
+            found |= set(await self._anchor.listdir(LAUNCHES, stage="run"))
+        own = {self._anchor.launch_id} if self._anchor is not None else set()
+        orphans = found - alive - own
 
         # Stop tracking candidates that revived (anchor reappeared) or whose directory vanished; record new ones.
         for launch in list(self._first_seen):
@@ -65,8 +88,10 @@ class Gc:
         report = GcReport(
             alive=frozenset(alive),
             candidates=frozenset(orphans - due),
-            removed=frozenset(removed),
+            removed=frozenset(removed) if self._anchor is not None else frozenset(),
             pending=frozenset(due - removed),
+            mode="anchor" if self._anchor is not None else "platform",
+            directories_skipped=frozenset(removed) if self._anchor is None else frozenset(),
         )
         if report.removed or report.pending:
             log.info("gc: removed %s, pending %s", sorted(report.removed), sorted(report.pending))
@@ -80,7 +105,7 @@ class Gc:
         process exited may not be listed yet: repeatedly list by label and delete until a listing after
         `list_visibility_s` is empty. Returns whether all are gone.
         """
-        if launch == self._anchor.launch_id:
+        if self._anchor is not None and launch == self._anchor.launch_id:
             raise ValueError("cannot collect this process's own launch")
         if launch in await self._alive_launches():
             raise FlotillaError(
@@ -95,6 +120,30 @@ class Gc:
         anchors = await self._platform.list({labels.ROLE: labels.ROLE_ANCHOR})
         return {st.labels[labels.LAUNCH] for st in anchors if labels.LAUNCH in st.labels}
 
+    async def _labelled_launches(self) -> set[str]:
+        units = await self._platform.list({labels.ROLE: labels.ROLE_UNIT})
+        return {st.labels[labels.LAUNCH] for st in units if labels.LAUNCH in st.labels}
+
+    async def collect_staging(self, max_age_s: float) -> StagingReport:
+        """Remove staging and trash entries older than `max_age_s` (by the timestamp in their names). Anchor mode."""
+        if self._anchor is None:
+            raise ValueError("staging collection needs an anchor")
+        now = self._clock.now().timestamp()
+        removed: list[str] = []
+        unrecognized: list[str] = []
+        for directory in STAGING_DIRS:
+            if not await self._anchor.exists(directory, stage="run"):
+                continue
+            for name in sorted(await self._anchor.listdir(directory, stage="run")):
+                key = f"{directory}/{name}"
+                match = _STAGED.search(name)
+                if match is None:
+                    unrecognized.append(key)
+                elif now - int(match.group(1)) >= max_age_s:
+                    await self._anchor.remove(key, stage="run")
+                    removed.append(key)
+        return StagingReport(tuple(removed), tuple(unrecognized))
+
     async def _remove_launch(self, launch: str, *, until: float | None = None) -> bool:
         """Delete all of the launch's instances (empty listing after `until`), then its directory.
         Returns whether everything completed.
@@ -108,7 +157,8 @@ class Gc:
             if not await scope.sweep({labels.LAUNCH: launch}, until=deadline):
                 log.warning("gc: instances of launch %s not fully deleted; keeping directory", launch)
                 return False
-            await self._anchor.remove(launch_key(launch), stage="run")
+            if self._anchor is not None:
+                await self._anchor.remove(launch_key(launch), stage="run")
         except FlotillaError as exc:
             log.warning("gc: collecting launch %s failed, retrying next round: %s", launch, exc)
             return False

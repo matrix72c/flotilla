@@ -19,6 +19,8 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Changed
 
+- `flotilla gc` finds launches from sandbox labels as well as `launches/`, and when its anchor cannot start it deletes sandboxes by label only (`GcReport.mode = "platform"`, `directories_skipped`) and exits 1. With an anchor it also removes `tasks/.staging`, `tasks/.trash` and `share/staging` entries older than `--staging-age` (default 24 h). Share release staging names now carry a timestamp.
+- `CleanupRecord` gains `reason` and `error`, naming what is still unconfirmed and the last related error.
 - **Breaking:** an open's budgets are split by phase. Waiting for a `trial_concurrency` / `instance_budget` slot is bounded by `OpenOptions.admission_timeout` (default `limits.admission_timeout`, 3600 s) and raises the new `AdmissionTimeout` (a `TimeoutError`) with the current counts. `startup_timeout` now starts at admission, so queueing no longer consumes it. Client start (anchor and share check) is bounded by the new `timeouts.client_start` (300 s) instead of `timeouts.prepare`.
 - The share check at client start downloads only `RELEASE.json`, compares its sha256 and confirms `bin/busybox`. Per-file verification stays in `flotilla share verify`.
 - **Breaking:** opening no longer prepares anything. `fleet.open(prepared)` / `fleet.environment(prepared)` take a `PreparedEnvironment` from a prepared row and run no Docker, builds, or uploads; `open_task`, `open_environment`, `inspect`, `inspect_environment`, `EnvironmentDefinition`, `EnvironmentInspection`, `OpenOptions.force_build`, `PreparationResidual` and `CleanupReport.preparation_residuals` are removed. Use `fleet.reservation(prepared)` for admission budgets and `flotilla inspect` for Docker-free checks.
