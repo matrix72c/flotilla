@@ -34,6 +34,7 @@ from flotilla.platform.execution import confirm_stopped
 from flotilla.runtime.planning import AgentOverlay, to_plan
 from flotilla.runtime.types import (
     ENVIRONMENT_RESERVATION_COPIES,
+    AdmissionTimeout,
     CleanupError,
     CleanupReport,
     EnvironmentInfo,
@@ -41,7 +42,7 @@ from flotilla.runtime.types import (
     RuntimeEvent,
     ServiceInfo,
 )
-from flotilla.share.release import verify_release
+from flotilla.share.release import ReleaseError, check_release
 
 
 def invalid(message: str) -> FlotillaError:
@@ -126,16 +127,16 @@ class Manager:
         await self.anchor.start()
         if not await self.anchor.exists("", stage="prepare"):
             raise invalid("shared storage root does not exist")
-        report = await verify_release(
-            self.anchor, self.cfg.share.release, expected_sha256=self.cfg.share.release_sha256
-        )
-        if not report.ok:
-            raise invalid("pinned share release failed verification")
-        if not await self.anchor.exists(f"share/releases/{self.cfg.share.release}/bin/busybox", stage="prepare"):
-            raise invalid("share release has no bin/busybox")
+        try:
+            await check_release(self.anchor, self.cfg.share.release, expected_sha256=self.cfg.share.release_sha256)
+        except ReleaseError as exc:
+            raise invalid(f"pinned share release failed its startup check: {exc}") from exc
         self.launch_directory_attempted = True
         await self.anchor.mkdir(f"launches/{self.launch_id}", stage="prepare")
         self.started = True
+
+    def _active(self) -> int:
+        return sum(not run.released for run in self.runs.values())
 
     def plan(self, request: RunRequest) -> TrialPlan:
         manifest = request.task.manifest()
@@ -198,7 +199,8 @@ class Manager:
             raise invalid("network_mode none requires inbound isolation or sandbox ingress enforcement")
         return plan
 
-    async def open(self, eid: str, request: RunRequest, deadline: float) -> EnvironmentInfo:
+    async def open(self, eid: str, request: RunRequest, *, admission_s: float, startup_s: float) -> EnvironmentInfo:
+        """Wait up to `admission_s` for a slot, then up to `startup_s` from admission until ready."""
         if self.closing or not self.started:
             raise RuntimeError("Flotilla is not accepting environments")
         queued = time.monotonic()
@@ -207,27 +209,38 @@ class Manager:
         reservation = len(plan.units) * ENVIRONMENT_RESERVATION_COPIES
         if reservation + 1 > self.cfg.limits.instance_budget:
             raise invalid("task exceeds instance_budget (includes startup retry reservations and anchor)")
+        limits = self.cfg.limits
         try:
-            async with asyncio.timeout(max(0, deadline - time.monotonic())):
-                async with self.changed:
-                    await self.changed.wait_for(
-                        lambda: (
-                            self.closing
-                            or (
-                                sum(not run.released for run in self.runs.values()) < self.cfg.limits.trial_concurrency
-                                and self.reserved + reservation <= self.cfg.limits.instance_budget
+            try:
+                async with asyncio.timeout(admission_s):
+                    async with self.changed:
+                        await self.changed.wait_for(
+                            lambda: (
+                                self.closing
+                                or (
+                                    self._active() < limits.trial_concurrency
+                                    and self.reserved + reservation <= limits.instance_budget
+                                )
                             )
                         )
-                    )
-                    if self.closing:
-                        raise RuntimeError("Flotilla is closing")
-                    self.anchor.ensure_alive("create")
-                    run = Run(request, plan, deadline, reservation)
-                    run.opening = asyncio.current_task()
-                    self.runs[eid] = run
-                    self.reserved += reservation
-                    self.reaper.track(eid)
-                self.emit("admitted", eid, elapsed_s=time.monotonic() - queued)
+                        if self.closing:
+                            raise RuntimeError("Flotilla is closing")
+                        self.anchor.ensure_alive("create")
+                        # The startup budget starts at admission: queueing never consumes it.
+                        run = Run(request, plan, time.monotonic() + startup_s, reservation)
+                        run.opening = asyncio.current_task()
+                        self.runs[eid] = run
+                        self.reserved += reservation
+                        self.reaper.track(eid)
+            except TimeoutError:
+                if eid in self.runs:
+                    raise
+                raise AdmissionTimeout(
+                    f"no admission slot within {admission_s:g}s: active={self._active()}/{limits.trial_concurrency}, "
+                    f"reserved={self.reserved}+{reservation}/{limits.instance_budget}"
+                ) from None
+            self.emit("admitted", eid, elapsed_s=time.monotonic() - queued)
+            async with asyncio.timeout(startup_s):
                 settings = self.cfg.trial_settings()
                 if request.disable_internet:
                     settings = replace(settings, external=ExternalPolicy(mode="none"))

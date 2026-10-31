@@ -8,6 +8,7 @@ from flotilla.prepared import PreparedEnvironment, PreparedTask, load_prepared
 from flotilla.runtime.client import Flotilla
 from flotilla.runtime.environment import Environment, Process, Service
 from flotilla.runtime.types import (
+    AdmissionTimeout,
     CleanupError,
     CleanupReport,
     EnvironmentInfo,
@@ -18,6 +19,7 @@ from flotilla.runtime.types import (
 )
 
 __all__ = [
+    "AdmissionTimeout",
     "CleanupError",
     "CleanupReport",
     "Environment",

@@ -88,6 +88,7 @@ class CleanupError(RuntimeError):
 @dataclass(frozen=True)
 class OpenOptions:
     request_id: str | None = None
+    admission_timeout: float | None = None
     startup_timeout: float | None = None
     lifetime: float | None = None
     runtime_params: dict[str, str] = field(default_factory=dict)
@@ -96,11 +97,15 @@ class OpenOptions:
     disable_internet: bool = False
 
     def __post_init__(self) -> None:
-        for value in (self.startup_timeout, self.lifetime):
+        for value in (self.admission_timeout, self.startup_timeout, self.lifetime):
             if value is not None and (not math.isfinite(value) or value <= 0):
                 raise ValueError("timeouts must be finite and positive")
         if self.request_id == "":
             raise ValueError("request_id must be nonempty")
+
+
+class AdmissionTimeout(TimeoutError):
+    """No trial_concurrency/instance_budget slot freed up within the admission timeout; nothing was created."""
 
 
 # One active generation plus one reserved generation for retries/deferred deletion.

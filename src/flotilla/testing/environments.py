@@ -23,6 +23,7 @@ class FixtureRequest:
 def options(request: FixtureRequest) -> OpenOptions:
     return OpenOptions(
         request_id=request.request_id,
+        admission_timeout=request.timeout,
         startup_timeout=request.timeout,
         lifetime=request.timeout,
         runtime_params=request.runtime_params,

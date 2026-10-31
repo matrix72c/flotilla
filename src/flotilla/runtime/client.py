@@ -64,7 +64,7 @@ class Flotilla:
         if self._on_event is not None:
             self._events = EventDispatcher(self._on_event)
             self._manager.on_event = self._events.emit
-        async with asyncio.timeout(cfg.timeouts.prepare):
+        async with asyncio.timeout(cfg.timeouts.client_start):
             await self._manager.start()
 
     async def start(self) -> None:
@@ -125,11 +125,11 @@ class Flotilla:
         if not isinstance(prepared, PreparedEnvironment):
             raise TypeError("open takes a PreparedEnvironment; run `flotilla prepare` and load its rows")
         options = copy.deepcopy(options or OpenOptions())
+        admission = options.admission_timeout or self._deployment.limits.admission_timeout
         startup = options.startup_timeout or self._deployment.runtime.startup_timeout_s
         lifetime = options.lifetime or self._deployment.runtime.run_timeout_s
         if lifetime > self._deployment.runtime.run_timeout_s:
             raise ValueError("lifetime exceeds runtime.run_timeout_s")
-        deadline = time.monotonic() + startup
         eid = uuid.uuid4().hex
         request = RunRequest(
             prepared,
@@ -141,10 +141,13 @@ class Flotilla:
             lifetime=lifetime,
         )
         try:
-            async with asyncio.timeout(startup):
-                await self.start()
-                info = await self._call(lambda manager: manager.open(eid, request, deadline))
-                return Environment(self, info)
+            # Each budget bounds its own phase: client start (timeouts.client_start, inside start()), the admission
+            # queue, then startup from admission to ready.
+            await self.start()
+            info = await self._call(
+                lambda manager: manager.open(eid, request, admission_s=admission, startup_s=startup)
+            )
+            return Environment(self, info)
         except BaseException:
             self._release_background(eid)
             raise

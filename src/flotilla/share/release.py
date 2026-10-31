@@ -212,6 +212,22 @@ async def _discard(anchor: Anchor, staging: str) -> None:
         await anchor.remove(staging, stage="run")
 
 
+async def check_release(anchor: Anchor, release: str, *, expected_sha256: str) -> None:
+    """Startup check: the pinned RELEASE.json digest matches and `bin/busybox` exists. Raises `ReleaseError`.
+
+    One download and one existence check; per-file verification is `verify_release` (`flotilla share verify`).
+    """
+    target = f"{RELEASES}/{release}"
+    manifest_key = f"{target}/{RELEASE_JSON}"
+    if not await anchor.exists(manifest_key, stage="prepare"):
+        raise ReleaseError(f"{manifest_key} does not exist")
+    actual = hashlib.sha256(await anchor.download(manifest_key, stage="prepare")).hexdigest()
+    if actual != expected_sha256:
+        raise ReleaseError(f"{manifest_key} sha256 is {actual}, but the config pins {expected_sha256}")
+    if not await anchor.exists(f"{target}/bin/busybox", stage="prepare"):
+        raise ReleaseError(f"share release {release} has no bin/busybox")
+
+
 async def verify_release(anchor: Anchor, release: str, *, expected_sha256: str) -> VerifyReport:
     """Fully verify a release: the manifest's own digest first, then each file's size, content and mode.
 

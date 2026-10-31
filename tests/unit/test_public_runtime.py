@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from flotilla import Flotilla
+from flotilla import AdmissionTimeout, Flotilla
 from flotilla.config import FlotillaConfig
 from flotilla.core import labels
 from flotilla.platform.base import ErrorCategory, ExecResult, FlotillaError, ProcessSpec
@@ -96,7 +96,7 @@ async def test_queue_deadline_and_instance_budget(deployment: tuple[FlotillaConf
     cfg = cfg.model_copy(update={"limits": cfg.limits.model_copy(update={"instance_budget": 3})})
     async with Flotilla(deployment=cfg) as fleet:
         first = await open_fixture(fleet, RunRequest(task(), "first"))
-        with pytest.raises(TimeoutError):
+        with pytest.raises(AdmissionTimeout, match=r"active=1/\d+, reserved=3\+2/3"):
             await open_fixture(fleet, RunRequest(task(), "queued", timeout=0.05))
         await first.release()
         async with environment(fleet, RunRequest(task(), "after-cleanup", timeout=2)):
@@ -484,3 +484,43 @@ async def test_configured_create_timeout_reaches_http(
         assert built["max_connections"] == 100  # the default pool size
     finally:
         await platform.aclose()
+
+
+@pytest.mark.asyncio
+async def test_queueing_does_not_consume_the_startup_budget(
+    deployment: tuple[FlotillaConfig, FakePlatform, SharedTree],
+) -> None:
+    from flotilla import OpenOptions
+
+    cfg, _, _ = deployment
+    cfg = cfg.model_copy(update={"limits": cfg.limits.model_copy(update={"trial_concurrency": 1})})
+    async with Flotilla(deployment=cfg) as fleet:
+        first = await open_fixture(fleet, RunRequest(task(), "first"))
+        # Startup alone fits in 0.3s; the queue wait (0.4s) is longer and must not count against it.
+        queued = asyncio.create_task(
+            fleet.open(task(), OpenOptions(request_id="queued", admission_timeout=5, startup_timeout=0.3))
+        )
+        await asyncio.sleep(0.4)
+        assert not queued.done()
+        await first.release()
+        env = await asyncio.wait_for(queued, 5)
+        await env.release()
+        assert (await fleet.drain(2)).clean
+
+
+@pytest.mark.asyncio
+async def test_client_start_downloads_only_the_release_manifest(
+    deployment: tuple[FlotillaConfig, FakePlatform, SharedTree],
+) -> None:
+    cfg, platform, _ = deployment
+    downloads: list[str] = []
+    original = platform.read_file
+
+    async def read_file(handle: Any, path: str) -> bytes:
+        downloads.append(path)
+        return await original(handle, path)
+
+    platform.read_file = read_file  # type: ignore[method-assign]
+    async with Flotilla(deployment=cfg) as fleet:
+        await fleet.start()
+    assert len(downloads) == 1 and downloads[0].endswith("/RELEASE.json")

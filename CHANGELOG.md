@@ -19,6 +19,8 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Changed
 
+- **Breaking:** an open's budgets are split by phase. Waiting for a `trial_concurrency` / `instance_budget` slot is bounded by `OpenOptions.admission_timeout` (default `limits.admission_timeout`, 3600 s) and raises the new `AdmissionTimeout` (a `TimeoutError`) with the current counts. `startup_timeout` now starts at admission, so queueing no longer consumes it. Client start (anchor and share check) is bounded by the new `timeouts.client_start` (300 s) instead of `timeouts.prepare`.
+- The share check at client start downloads only `RELEASE.json`, compares its sha256 and confirms `bin/busybox`. Per-file verification stays in `flotilla share verify`.
 - **Breaking:** opening no longer prepares anything. `fleet.open(prepared)` / `fleet.environment(prepared)` take a `PreparedEnvironment` from a prepared row and run no Docker, builds, or uploads; `open_task`, `open_environment`, `inspect`, `inspect_environment`, `EnvironmentDefinition`, `EnvironmentInspection`, `OpenOptions.force_build`, `PreparationResidual` and `CleanupReport.preparation_residuals` are removed. Use `fleet.reservation(prepared)` for admission budgets and `flotilla inspect` for Docker-free checks.
 - **Breaking:** `[preparation]` is removed and rejected with a migration message: `docker_command` and `concurrency` move to `[prepare]`, and `timeout_s` becomes `runtime.startup_timeout_s` (default 1800 s), the default open budget.
 - **Breaking:** the Harbor adapter takes `--ek prepared=<jsonl>` and opens the row's environment for the environment directory Harbor gives it; `force_build` is rejected.
