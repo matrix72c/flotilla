@@ -264,10 +264,18 @@ class Execd:
         # timeout attribution, so ordinary signal exits are never called timeouts.
         remote = replace(proc, timeout_s=proc.timeout_s + self.HTTP_SLACK_S)
         body = command_body(remote, background=False, settings=self.settings)
+        sent = asyncio.Event()
         work = asyncio.create_task(
-            self._stream_command(body, stage="run", deadline_s=proc.timeout_s + 2 * self.HTTP_SLACK_S, attempt=attempt)
+            self._stream_command(
+                body,
+                stage="run",
+                deadline_s=proc.timeout_s + 2 * self.HTTP_SLACK_S,
+                attempt=attempt,
+                on_send=sent.set,
+            )
         )
-        timer = asyncio.create_task(self._http.clock.sleep(proc.timeout_s))
+        # The command's time starts when it is sent, not while it waits for a connection.
+        timer = asyncio.create_task(self._after(sent, proc.timeout_s))
         try:
             await asyncio.wait({work, timer}, return_when=asyncio.FIRST_COMPLETED)
             if work.done():
@@ -293,6 +301,10 @@ class Execd:
             work.cancel()
             timer.cancel()
             await asyncio.gather(work, timer, return_exceptions=True)
+
+    async def _after(self, event: asyncio.Event, seconds: float) -> None:
+        await event.wait()
+        await self._http.clock.sleep(seconds)
 
     async def start_process(self, proc: ProcessSpec, *, attempt: ExecAttempt | None = None) -> str:
         attempt = attempt if attempt is not None else ExecAttempt()
@@ -400,7 +412,13 @@ class Execd:
             )
 
     async def _stream_command(
-        self, body: Mapping[str, Any], *, stage: Stage, deadline_s: float, attempt: ExecAttempt | None = None
+        self,
+        body: Mapping[str, Any],
+        *,
+        stage: Stage,
+        deadline_s: float,
+        attempt: ExecAttempt | None = None,
+        on_send: Callable[[], None] | None = None,
     ) -> str:
         """`POST /command`, reading the whole NDJSON stream as text. Not idempotent; not retried even on errors."""
         if self._command_gate is not None:
@@ -412,6 +430,7 @@ class Execd:
             deadline_s=deadline_s,
             attempt=attempt,
             max_bytes=self.settings.output_limit_bytes,
+            on_send=on_send,
         )
 
 

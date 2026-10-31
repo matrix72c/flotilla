@@ -456,7 +456,10 @@ async def test_configured_create_timeout_reaches_http(
         requests.append(request)
         return httpx.Response(200, json={"id": "owned"})
 
+    built: dict[str, Any] = {}
+
     def factory(**kwargs: Any) -> Any:
+        built.update(kwargs)
         return build(**kwargs, transport=httpx.MockTransport(handle))
 
     monkeypatch.setattr(config, "build_opensandbox", factory)
@@ -478,5 +481,6 @@ async def test_configured_create_timeout_reaches_http(
             )
         )
         assert requests[0].extensions["timeout"]["read"] == 45.0
+        assert built["max_connections"] == 100  # the default pool size
     finally:
         await platform.aclose()

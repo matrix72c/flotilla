@@ -27,6 +27,7 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Fixed
 
+- Commands waiting for a free HTTP connection are no longer counted as sent and no longer run down their timeout while they wait. Previously a burst of internal commands (for example every environment's health check at once) queued inside the 100-connection pool, expired there, and was reported as an unknown outcome, so healthy environments were marked lost. Requests now wait in Flotilla for one of `opensandbox.max_connections` (new, default 100) connections per pool.
 - A create request whose response was lost no longer holds its trial for the whole `timeouts.create` budget. The request now has its own `timeouts.create_request` (default 60 s), after which the sandbox is found by its labels and adopted; previously the request timeout equalled the stage timeout, so this recovery could never run.
 - Preserve non-root image `USER` for workload execution while preparing a root-default runtime image for the exec daemon, including linked and mirrored source images.
 - Retry confirmed timeouts of the internal no-op health probe within the existing check budget instead of immediately losing the environment; user commands are never replayed.

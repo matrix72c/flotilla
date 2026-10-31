@@ -8,6 +8,7 @@ import logging
 import re
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any
 
@@ -93,12 +94,16 @@ class Http:
         *,
         prefix: str = "",
         headers: Mapping[str, str] | None = None,
+        slots: asyncio.Semaphore | None = None,
     ) -> None:
         self._client = client
         self._clock = clock
         self._retry = retry
         self._prefix = prefix
         self._headers = dict(headers or {})
+        # One slot per pooled connection: requests queue here, before any deadline starts or a command counts as sent,
+        # instead of inside httpx's pool, where the wait would count against them.
+        self._slots = slots
 
     @property
     def clock(self) -> Clock:
@@ -110,11 +115,25 @@ class Http:
 
     def with_prefix(self, prefix: str) -> Http:
         """Same client, clock, and retry policy, with `prefix` appended to the path (e.g. an instance's execd proxy)."""
-        return Http(self._client, self._clock, self._retry, prefix=self._prefix + prefix, headers=self._headers)
+        return Http(
+            self._client,
+            self._clock,
+            self._retry,
+            prefix=self._prefix + prefix,
+            headers=self._headers,
+            slots=self._slots,
+        )
 
     def with_headers(self, headers: Mapping[str, str]) -> Http:
         """Same base, adding `headers` to each request (merged with per-call headers, which win). Never logged."""
-        return Http(self._client, self._clock, self._retry, prefix=self._prefix, headers={**self._headers, **headers})
+        return Http(
+            self._client,
+            self._clock,
+            self._retry,
+            prefix=self._prefix,
+            headers={**self._headers, **headers},
+            slots=self._slots,
+        )
 
     def _merged(self, headers: Mapping[str, str] | None) -> dict[str, str] | None:
         if not self._headers:
@@ -201,6 +220,7 @@ class Http:
         deadline_s: float,
         attempt: ExecAttempt | None = None,
         max_bytes: int = 8 * 1024 * 1024,
+        on_send: Callable[[], None] | None = None,
     ) -> str:
         """POST and read the whole response stream, returning raw text (execd `/command` NDJSON). Not retried.
 
@@ -229,6 +249,8 @@ class Http:
             )
             if attempt is not None:
                 attempt.sent = True
+            if on_send is not None:
+                on_send()
             async with self._client.stream("POST", url, json=json, headers=headers) as response:
                 status = response.status_code
                 request_id = _safe_id(response.headers.get("x-request-id"))
@@ -343,7 +365,8 @@ class Http:
         delay = self._retry.initial_s
         for attempt in range(1, self._retry.attempts + 1):
             try:
-                response = await send()
+                async with self._slots if self._slots is not None else nullcontext():
+                    response = await send()
             except httpx.TransportError as exc:  # incl. timeouts and connection errors: outcome unknown, transient
                 error = FlotillaError(
                     f"{method} {path}: {type(exc).__name__}",

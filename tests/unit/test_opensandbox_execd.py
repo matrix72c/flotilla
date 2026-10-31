@@ -687,3 +687,41 @@ def test_home_defaults_follow_execution_user_and_preserve_overrides(
     assert execute(1000) == {"HOME": "/changed home;$(literal)"}
     passwd.unlink()
     assert execute(1000) == {"HOME": "/"}
+
+
+@pytest.mark.asyncio
+async def test_command_waiting_for_a_connection_is_not_sent_or_timed() -> None:
+    # A command queued behind a full connection pool must not be counted as sent, and its timeout must not run
+    # while it waits: otherwise it expires as "outcome unknown" without ever reaching the exec daemon.
+    import asyncio
+
+    from flotilla.platform.base import ExecAttempt
+    from flotilla.platform.clock import SystemClock
+
+    release = asyncio.Event()
+
+    class Stream(httpx.AsyncByteStream):
+        def __init__(self, hold: bool) -> None:
+            self._hold = hold
+
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            yield b'{"type":"init","text":"cmd"}\n\n'
+            if self._hold:
+                await release.wait()
+            yield b'{"type":"execution_complete"}\n\n'
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=Stream(hold=b"first" in request.content))
+
+    async with httpx.AsyncClient(base_url="http://execd.test", transport=httpx.MockTransport(handler)) as client:
+        execd = Execd(Http(client, SystemClock(), slots=asyncio.Semaphore(1)), CURRENT)
+        first = asyncio.create_task(execd.exec(_proc(("echo", "first"))))
+        await asyncio.sleep(0.01)
+        attempt = ExecAttempt()
+        queued = asyncio.create_task(execd.exec(_proc(("echo", "second"), timeout_s=0.05), attempt=attempt))
+        await asyncio.sleep(0.3)  # well past the queued command's own timeout
+        assert not queued.done() and not attempt.sent
+        release.set()
+        result = await asyncio.wait_for(queued, 1)
+        assert result.exit_code == 0 and not result.timed_out
+        assert (await first).exit_code == 0
