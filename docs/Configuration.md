@@ -27,6 +27,7 @@ A configuration contains exactly one backend table: `[opensandbox]` for the buil
 | `privileged_extensions` | `{}` | Extra `extensions` sent only for `privileged: true` services |
 | `create_fields` | `{}` | Extra top-level create-request fields. Fields managed by Flotilla (`image`, `entrypoint`, `metadata`, `timeout`, `resourceLimits`, `resourceRequests`, `volumes`, `networkPolicy`, `extensions`, `env`, `readOnlyRootFilesystem`, `tmpfsMounts`) are rejected |
 | `group_extension` | unset | Extension key used to place all sandboxes of one environment in one scheduling group. Set only if the deployment implements it |
+| `max_connections` | `100` | HTTP connections per pool. There are three pools: control plane, internal commands (health probes, address and hosts setup), and user commands. Requests beyond this wait in Flotilla; a command's timeout starts when it is sent, not while it waits |
 
 `[opensandbox.network]`:
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import secrets
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
@@ -46,7 +47,7 @@ MIN_TTL_SECONDS = 60  # minimum timeout
 #: Default per-request timeout (command streams have a total deadline, see `http.stream_post`). The 30s read
 #: timeout is well above execd's ping interval (3s).
 DEFAULT_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
-DEFAULT_MAX_CONNECTIONS = 100  # httpx default; each in-flight foreground exec holds one connection
+DEFAULT_MAX_CONNECTIONS = 100  # per pool; each in-flight foreground exec holds one connection
 #: Create request fields managed by flotilla, forbidden in `create_fields`. Includes `env`: it holds only the execd
 #: access token; workload env is passed per execution.
 MANAGED_CREATE_FIELDS = frozenset(
@@ -410,9 +411,9 @@ def build(
         )
 
     control_client, maintenance_client, workload_client = client(), client(), client()
-    control = Http(control_client, clock, retry)
-    maintenance = Http(maintenance_client, clock, retry)
-    workload = Http(workload_client, clock, retry)
+    control = Http(control_client, clock, retry, slots=asyncio.Semaphore(max_connections))
+    maintenance = Http(maintenance_client, clock, retry, slots=asyncio.Semaphore(max_connections))
+    workload = Http(workload_client, clock, retry, slots=asyncio.Semaphore(max_connections))
 
     def execd_http(iid: str) -> Http:
         return maintenance.with_prefix(f"/sandboxes/{quote(iid, safe='')}/proxy/{execd_port}")
@@ -422,8 +423,6 @@ def build(
 
     async def close() -> None:
         # Close all pools even if one transport close fails.
-        import asyncio
-
         await asyncio.gather(control_client.aclose(), maintenance_client.aclose(), workload_client.aclose())
 
     return OpenSandboxPlatform(

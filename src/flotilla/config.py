@@ -84,6 +84,9 @@ class OpenSandbox(BackendSettings):
     group_extension: str | None = (
         None  # `extensions` key for the placement group; unset if the deployment lacks group scheduling
     )
+    # Connections per HTTP pool (control plane, internal commands, user commands). Requests beyond it wait in
+    # flotilla before their deadlines start.
+    max_connections: PositiveInt = 100
 
 
 class Build(_Model):
@@ -629,4 +632,5 @@ class OpenSandboxBackend(Backend[OpenSandbox]):
             group_extension=settings.group_extension,
             privileged_extensions=settings.privileged_extensions,
             create_timeout_s=cfg.timeouts.create_request,
+            max_connections=settings.max_connections,
         )
