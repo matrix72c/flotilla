@@ -236,7 +236,8 @@ class DockerImageExport:
                 diagnostic = errors.read(4096).decode(errors="replace")
                 if "Could not find the file" in diagnostic and "in container" in diagnostic:
                     return False
-                raise ImageError(f"image export failed with status {result.returncode}")
+                detail = " ".join(diagnostic.split())[:300]
+                raise ImageError(f"image export failed with status {result.returncode}: {detail}")
             archive.seek(0)
             return extract_archive(archive, dest, identities if identities is not None else {})
 

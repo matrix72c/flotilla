@@ -163,6 +163,7 @@ Used by `flotilla prepare` only; opening prepared rows reads neither.
 |---|---|---|
 | `prepare.concurrency` | `4` | Tasks prepared concurrently |
 | `prepare.docker_command` | `["docker"]` | Docker argv prefix, e.g. `["sudo", "-n", "docker"]` |
+| `prepare.export_timeout` | `600` | Seconds allowed for each `docker cp` that exports an image volume's initial content. Raise it for tasks with large volumes |
 | `build.target` | `""` | Repository that built and mirrored images are pushed to, e.g. `registry.example.com/team/tasks`. `flotilla prepare` pushes each dataset to `<target>/<dataset>` |
 | `build.pullable_registries` | `[]` | Registries or prefixes the platform can pull from directly; other images are mirrored to `build.target` |
 | `build.mirror_images` | `false` | Mirror every `image:` service, even from pullable registries |

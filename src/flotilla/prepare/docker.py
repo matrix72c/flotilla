@@ -14,7 +14,7 @@ from flotilla.config import FlotillaConfig
 def docker_context(cfg: FlotillaConfig, journal: Path) -> BuildContext:
     """Export containers are journaled under `journal` before creation, so a killed run can remove them."""
     command = cfg.prepare.docker_command
-    exporter = DockerImageExport(docker_cmd=command, ownership_dir=journal)
+    exporter = DockerImageExport(docker_cmd=command, timeout_s=cfg.prepare.export_timeout, ownership_dir=journal)
     return BuildContext(
         settings=cfg.build.settings(),
         caps=cfg.platform_capabilities(),
