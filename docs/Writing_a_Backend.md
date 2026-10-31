@@ -121,7 +121,7 @@ class MyCloudBackend(Backend[MyCloudSettings]):
             caps=caps,
             clock=clock,
             command_gate=command_gate,
-            create_timeout_s=cfg.timeouts.create,
+            create_timeout_s=cfg.timeouts.create_request,
         )
 ```
 

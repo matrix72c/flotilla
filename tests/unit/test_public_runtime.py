@@ -73,6 +73,24 @@ async def test_cancel_open_reclaims_late_creation(deployment: tuple[FlotillaConf
 
 
 @pytest.mark.asyncio
+async def test_lost_create_response_is_adopted_within_the_create_stage(
+    deployment: tuple[FlotillaConfig, FakePlatform, SharedTree],
+) -> None:
+    # The platform creates the sandbox but its response never arrives in time. The request deadline, not the whole
+    # create stage, decides when to look the sandbox up by labels and adopt it.
+    cfg, platform, _ = deployment
+    timeouts = cfg.timeouts.model_copy(update={"create_request": 0.1, "create": 3.0})
+    cfg = cfg.model_copy(update={"timeouts": timeouts})
+    async with Flotilla(deployment=cfg) as fleet:
+        platform.set_latency("create", 30.0, phase="after")
+        began = time.monotonic()
+        async with environment(fleet, RunRequest(task(), "lost-response", timeout=5)) as env:
+            assert time.monotonic() - began < 2
+            assert (await env.agent.exec(["true"])).exit_code == 0
+        assert (await fleet.drain(2)).clean
+
+
+@pytest.mark.asyncio
 async def test_queue_deadline_and_instance_budget(deployment: tuple[FlotillaConfig, FakePlatform, SharedTree]) -> None:
     cfg, _, _ = deployment
     cfg = cfg.model_copy(update={"limits": cfg.limits.model_copy(update={"instance_budget": 3})})
@@ -430,7 +448,7 @@ async def test_configured_create_timeout_reaches_http(
     from flotilla.runtime import manager
 
     cfg, fake, _ = deployment
-    cfg = cfg.model_copy(update={"timeouts": cfg.timeouts.model_copy(update={"create": 180.0})})
+    cfg = cfg.model_copy(update={"timeouts": cfg.timeouts.model_copy(update={"create_request": 45.0})})
     monkeypatch.setenv("FLOTILLA_CRED", "test-only")
     requests: list[httpx.Request] = []
 
@@ -459,6 +477,6 @@ async def test_configured_create_timeout_reaches_http(
                 external=ExternalPolicy(mode="none"),
             )
         )
-        assert requests[0].extensions["timeout"]["read"] == 180.0
+        assert requests[0].extensions["timeout"]["read"] == 45.0
     finally:
         await platform.aclose()
