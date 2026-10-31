@@ -94,3 +94,33 @@ def test_lost_create_response_uses_registered_name_for_cleanup(
         docker.DockerImageExport(ownership_dir=journal).accounts("fixture")
     assert created == removed and len(created) == 1
     assert list(journal.iterdir()) == ([journal / created[0]] if cleanup_fails else [])
+
+
+def test_export_uses_the_configured_timeout_and_reports_docker_stderr(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from flotilla.config import FlotillaConfig
+    from flotilla.prepare.docker import docker_context
+    from flotilla.testing.config import config_data
+    from flotilla.testing.reports import report
+
+    caps = tmp_path / "caps.json"
+    caps.write_text(report().dump_json())
+    data = config_data(prepare={"export_timeout": 1234})
+    data["opensandbox"]["capabilities"] = str(caps)
+    cfg = FlotillaConfig.from_mapping(data)
+    exporter = docker_context(cfg, tmp_path / "journal").image_export
+    assert isinstance(exporter, docker.DockerImageExport) and exporter.timeout_s == 1234
+
+    seen: list[float] = []
+
+    def copy(cmd: Sequence[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        seen.append(kwargs["timeout"])
+        kwargs["stderr"].write(b"Error response from daemon: \n  disk quota exceeded\n")
+        return subprocess.CompletedProcess(cmd, 1, "", "")
+
+    monkeypatch.setattr(subprocess, "run", copy)
+    monkeypatch.setattr(docker, "_docker", lambda args, **kwargs: "owned-container")
+    with pytest.raises(ImageError, match="status 1: Error response from daemon: disk quota exceeded"):
+        exporter.extract("test-image", "/data", tmp_path / "out")
+    assert seen == [1234]

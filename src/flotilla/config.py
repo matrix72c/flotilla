@@ -304,6 +304,7 @@ class Prepare(_Model):
 
     concurrency: PositiveInt = 4
     docker_command: tuple[str, ...] = ("docker",)
+    export_timeout: PositiveFloat = 600.0  # per `docker cp` of an image volume's initial content
 
     @field_validator("docker_command")
     @classmethod

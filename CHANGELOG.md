@@ -6,6 +6,7 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Added
 
+- `prepare.export_timeout` (default 600 s, the previous fixed value) bounds each `docker cp` that exports an image volume's initial content, so tasks with large volumes can be prepared. Export failures now include docker's error output.
 - `flotilla prepare`: builds images and publishes task files once per task, offline, and writes a jsonl with one row per task (`load_prepared`, `PreparedTask`, `PreparedEnvironment`). Rows carry filter attributes and the digest-pinned main and separate verifier environments; filtering a dataset is filtering lines. Interrupted runs resume, `--force` rebuilds, and each dataset's images go to `<build.target>/<dataset>`. Task files are published flat under `tasks/<dataset>/<task>/<role>`.
 - Pluggable sandbox backends. A package registers a `flotilla.backends.Backend` subclass in the `flotilla.backends` entry-point group; a deployment selects it with `backend = "<name>"` and configures it in `[backends.<name>]`. The built-in OpenSandbox backend keeps its `[opensandbox]` table, and existing configurations and capability-report fingerprints are unchanged. See [Writing a backend](docs/Writing_a_Backend.md).
 - Opt-in internal lifecycle support for Compose read-only root filesystems and native tmpfs, with independent behavioral probes, effective-configuration verification, private framework scratch mounts, and strict upstream-compatible request defaults.
