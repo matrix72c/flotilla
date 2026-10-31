@@ -103,14 +103,18 @@ async def wait_all(clock: Clock, tasks: Collection[asyncio.Future[Any]], timeout
     return not pending
 
 
-async def wait_running(platform: Platform, clock: Clock, iid: str, *, stage: Stage) -> InstanceState:
+async def wait_running(
+    platform: Platform, clock: Clock, iid: str, *, stage: Stage, pending_limit_s: float | None = None
+) -> InstanceState:
     """Poll `get` with backoff until the instance is `RUNNING`.
 
     Fails if the instance terminates, disappears, or the query is definitively rejected; keeps waiting on
-    retryable query errors and `PENDING` / `UNKNOWN`. No deadline here; callers wrap it in `within` with the
-    stage timeout.
+    retryable query errors and `PENDING` / `UNKNOWN`. With `pending_limit_s`, also fails (retryably) once the
+    instance has been seen `PENDING` that long after the wait began, so the caller can replace an instance the
+    platform never starts. Otherwise no deadline here; callers wrap it in `within` with the stage timeout.
     """
     backoff = Backoff(0.5, cap=5.0)
+    began = clock.monotonic()
     while True:
         try:
             state = await platform.get(iid)
@@ -131,6 +135,14 @@ async def wait_running(platform: Platform, clock: Clock, iid: str, *, stage: Sta
                 # core does not interpret native reasons (normalized status): report retryable, reason in message.
                 raise FlotillaError(
                     f"instance {iid} terminated before becoming ready: {describe(state)}",
+                    stage=stage,
+                    category=ErrorCategory.TRANSIENT,
+                    retryable=True,
+                )
+            waited = clock.monotonic() - began
+            if state.status is InstanceStatus.PENDING and pending_limit_s is not None and waited >= pending_limit_s:
+                raise FlotillaError(
+                    f"instance {iid} still pending after {waited:.0f}s: {describe(state)}",
                     stage=stage,
                     category=ErrorCategory.TRANSIENT,
                     retryable=True,

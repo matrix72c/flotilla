@@ -40,6 +40,7 @@ class TrialSettings:
     external: ExternalPolicy  # caller egress policy `[network] external`
     ttl_s: int = 6 * 3600  # platform TTL per instance; capped at the deployment max_ttl_seconds
     create_timeout_s: float = 600.0
+    pending_timeout_s: float | None = None  # per instance: replace one still pending after this long (once)
     address_timeout_s: float = 30.0
     wire_timeout_s: float = 60.0
     hosts_timeout_s: float = 30.0
@@ -204,7 +205,9 @@ class Trial:
             spec = replace(spec, volumes=(*spec.volumes, SharedVolume(key, RUNTIME_MOUNT, False)))
         handle = await self._reaper.create(self._trial_id, unit, spec)
         self._handles[unit] = handle
-        await wait_running(self._platform, self._clock, handle.iid, stage="create")
+        await wait_running(
+            self._platform, self._clock, handle.iid, stage="create", pending_limit_s=self._settings.pending_timeout_s
+        )
 
     def _spec(self, unit: str) -> InstanceSpec:
         u = self._plan.units[unit]

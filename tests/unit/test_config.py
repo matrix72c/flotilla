@@ -233,6 +233,14 @@ def test_create_request_timeout_is_separate_from_the_stage() -> None:
         config(timeouts={"create": 60, "create_request": 60})
 
 
+def test_pending_limit_is_below_the_create_stage() -> None:
+    assert config(timeouts={"create": 900, "pending": 120}).trial_settings().pending_timeout_s == 120
+    assert config().trial_settings().pending_timeout_s == 300
+    assert config(timeouts={"create": 300}).trial_settings().pending_timeout_s is None  # default not below create
+    with pytest.raises(ValidationError, match=r"timeouts\.pending"):
+        config(timeouts={"create": 300, "pending": 300})
+
+
 def test_anchor_image_required_for_anchor_settings() -> None:
     with pytest.raises(ConfigError, match="anchor_image"):
         config(reaper={}).anchor_settings()
