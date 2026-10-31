@@ -1,37 +1,40 @@
-"""Public selected-context inspection and confirmed background process control."""
+"""Public admission reservations and confirmed background process control."""
 
 import asyncio
-from pathlib import Path
 
 import pytest
 
-from flotilla import EnvironmentDefinition, Flotilla
-from flotilla.config import FlotillaConfig
+from flotilla import Flotilla
+from flotilla.config import FlotillaConfig, Resource
+from flotilla.manifest import Resources
 from flotilla.platform.base import ExecOutcomeUnknown
+from flotilla.runtime.types import Task
 from flotilla.testing.environments import FixtureRequest, open_fixture
 from flotilla.testing.platform import FakePlatform, SharedTree
 from flotilla.testing.runtime import deployment as deployment
 from flotilla.testing.runtime import task
 
 
-def test_selected_environment_inspection_matches_resource_overrides(
-    tmp_path: Path, deployment: tuple[FlotillaConfig, FakePlatform, SharedTree]
+def test_reservation_uses_prepared_resources_and_deployment_overrides(
+    deployment: tuple[FlotillaConfig, FakePlatform, SharedTree],
 ) -> None:
     cfg, _, _ = deployment
-    source = tmp_path / "native"
-    (source / "environment").mkdir(parents=True)
-    (source / "tests").mkdir()
-    (source / "task.toml").write_text('[environment]\ndocker_image="r.io/main:1"\ncpus=1\nmemory_mb=512\n')
-    fleet = Flotilla(deployment=cfg)
-    main = fleet.inspect(source)[0]
-    verifier = fleet.inspect_environment(
-        EnvironmentDefinition(
-            source, source / "tests", source.name, {"docker_image": "r.io/verifier:1", "cpus": 8, "memory_mb": 16384}
+    main = task()
+    manifest = main.manifest()
+    unit = manifest.units["main"]
+    verifier = Task(
+        manifest.model_copy(
+            update={"units": {"main": unit.model_copy(update={"resources": Resources(cpu="8", memory="16Gi")})}}
         )
     )
-    assert main.resources["main"]["cpu"] == "1"
-    assert verifier.resources["main"]["cpu"] == "8"
-    assert verifier.reservation.instances == 2
+    fleet = Flotilla(deployment=cfg)
+    assert fleet.reservation(main).resources["main"]["cpu"] == "1"
+    assert fleet.reservation(verifier).resources["main"] == {"cpu": "8", "memory": "16Gi"}
+    assert fleet.reservation(verifier).instances == 2  # one active and one reserved generation
+    overridden = cfg.model_copy(
+        update={"resources": cfg.resources.model_copy(update={"services": {"main": Resource(cpu="3", memory="1Gi")}})}
+    )
+    assert Flotilla(deployment=overridden).reservation(main).resources["main"]["cpu"] == "3"
     assert fleet.client_reservation().instances == 1
 
 

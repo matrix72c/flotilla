@@ -21,6 +21,7 @@ from flotilla.core import labels
 from flotilla.integrations.harbor import FlotillaEnvironment
 from flotilla.integrations.harbor_source import task_environments
 from flotilla.platform.base import ExecResult, FlotillaError, ProcessSpec
+from flotilla.testing.build import prepared_task, write_prepared
 from flotilla.testing.platform import FakePlatform, SharedTree
 from flotilla.testing.reports import report
 from flotilla.testing.runtime import deployment as runtime_deployment
@@ -57,11 +58,19 @@ def test_scan_checks_verifier_context_and_continues_after_invalid_harbor_input(t
     deployment_path.write_text(toml.dumps(config))
     assert main(["inspect", str(tasks / "valid"), "--deployment", str(deployment_path), "--out", str(output)]) == 0
     # Invalid sources are rejected independently by the same library resolver.
-    from flotilla.preparation.service import inspect
+    from flotilla.prepare.inspect import inspect
 
     for name in ("bad-verifier",):
         assert all(entry.status == "accepted" for entry in inspect(FlotillaConfig.load(deployment_path), tasks / name))
         assert task_environments(tasks / name)[1].project.rejected
+
+
+def source(tmp_path: Path, toml_text: str = '[environment]\ndocker_image="r.io/main:1"\ncpus=1\n') -> Path:
+    path = tmp_path / "dataset" / "task"
+    (path / "environment").mkdir(parents=True, exist_ok=True)
+    (path / "tests").mkdir(exist_ok=True)
+    (path / "task.toml").write_text(toml_text)
+    return path
 
 
 def adapter(
@@ -70,22 +79,85 @@ def adapter(
     fleet: Flotilla,
     *,
     network_policy: NetworkPolicy | None = None,
+    environment: str = "environment",
+    prepared: bool = True,
+    **kwargs: object,
 ) -> FlotillaEnvironment:
     config = tmp_path / "deployment.toml"
     config.write_text(toml.dumps(cfg.model_dump(exclude_none=True, exclude={"base_dir"})))
-    source = tmp_path / "dataset" / "task"
-    (source / "environment").mkdir(parents=True)
-    (source / "task.toml").write_text('[environment]\ndocker_image="r.io/main:1"\n')
+    path = source(tmp_path) if not (tmp_path / "dataset" / "task").exists() else tmp_path / "dataset" / "task"
+    rows = write_prepared(tmp_path / "prepared.jsonl", [prepared_task(path, cfg, environments=task_environments)])
     return FlotillaEnvironment(
-        environment_dir=source / "environment",
+        environment_dir=path / environment,
         environment_name="task",
         session_id="harbor-test",
         trial_paths=TrialPaths(tmp_path / "trial"),
         task_env_config=EnvironmentConfig(docker_image="r.io/main:1"),
         network_policy=network_policy,
         deployment=str(config),
+        prepared=str(rows) if prepared else None,
         fleet=fleet,
+        **kwargs,  # type: ignore[arg-type]
     )
+
+
+@pytest.mark.asyncio
+async def test_harbor_opens_the_prepared_role_of_its_environment_directory(
+    tmp_path: Path, deployment: tuple[FlotillaConfig, FakePlatform, SharedTree]
+) -> None:
+    cfg, _, _ = deployment
+    source(tmp_path, '[environment]\ndocker_image="r.io/main:1"\n[verifier]\nenvironment_mode="separate"\n')
+    (tmp_path / "dataset/task/tests/docker-compose.yaml").write_text("services:\n  main:\n    image: r.io/verifier:1\n")
+    async with Flotilla(deployment=cfg) as fleet:
+        for directory, image in (("environment", "r.io/main@"), ("tests", "r.io/verifier@")):
+            env = adapter(tmp_path, cfg, fleet, environment=directory)
+            await env.start()
+            assert (await env.handle.info()).services[0].image.startswith(image)
+            await env.stop()
+
+
+@pytest.mark.asyncio
+async def test_harbor_requires_prepared_rows_and_rejects_force_build(
+    tmp_path: Path, deployment: tuple[FlotillaConfig, FakePlatform, SharedTree]
+) -> None:
+    cfg, platform, _ = deployment
+    async with Flotilla(deployment=cfg) as fleet:
+        with pytest.raises(ValueError, match="prepared jsonl"):
+            await adapter(tmp_path, cfg, fleet, prepared=False).start()
+        with pytest.raises(ValueError, match="force_build is unsupported"):
+            await adapter(tmp_path, cfg, fleet).start(force_build=True)
+        other = tmp_path / "other"
+        (other / "environment").mkdir(parents=True)
+        (other / "task.toml").write_text('[environment]\ndocker_image="r.io/main:1"\n')
+        missing = adapter(tmp_path, cfg, fleet)
+        missing._task_root, missing._directory = other.resolve(), (other / "environment").resolve()
+        with pytest.raises(ValueError, match="has no row"):
+            await missing.start()
+    assert not await platform.list({labels.ROLE: labels.ROLE_UNIT})
+
+
+@pytest.mark.asyncio
+async def test_harbor_cpu_override_and_borrowed_stop_is_non_owning(
+    tmp_path: Path, deployment: tuple[FlotillaConfig, FakePlatform, SharedTree]
+) -> None:
+    cfg, _, _ = deployment
+    async with Flotilla(deployment=cfg) as fleet:
+        owner = adapter(tmp_path, cfg, fleet, override_cpus=2)
+        await owner.start()
+        assert (await owner.handle.info()).services[0].cpu == "2"
+        view = FlotillaEnvironment.view(
+            owner.handle,
+            fleet=fleet,
+            deployment=str(tmp_path / "deployment.toml"),
+            environment_dir=tmp_path / "dataset/task/environment",
+            environment_name="task",
+            session_id="borrowed",
+            trial_paths=TrialPaths(tmp_path / "borrowed"),
+            task_env_config=EnvironmentConfig(docker_image="r.io/main:1", cpus=1),
+        )
+        await view.stop()
+        await owner.handle.check()  # stopping a borrowed view leaves the owner's environment running
+        await owner.stop()
 
 
 @pytest.mark.parametrize("extra", [False, True])

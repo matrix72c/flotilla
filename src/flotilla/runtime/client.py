@@ -10,24 +10,20 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Callable, Coroutine
 from contextlib import asynccontextmanager, suppress
-from dataclasses import replace
 from pathlib import Path
 from types import TracebackType
 from typing import Any
 
 from flotilla.config import FlotillaConfig
-from flotilla.preparation.service import Preparer, inspect, inspect_environment
+from flotilla.prepared import PreparedEnvironment
 from flotilla.runtime.environment import Environment
 from flotilla.runtime.events import EventDispatcher
 from flotilla.runtime.manager import Manager
 from flotilla.runtime.types import (
+    ENVIRONMENT_RESERVATION_COPIES,
     CleanupError,
     CleanupReport,
-    EnvironmentDefinition,
-    EnvironmentInfo,
-    EnvironmentInspection,
     OpenOptions,
-    PreparationResidual,
     ResourceReservation,
     RunRequest,
     RuntimeEvent,
@@ -55,7 +51,6 @@ class Flotilla:
         self._closed = False
         self._stop_callback_registered = False
         self.cleanup_report: CleanupReport | None = None
-        self._preparer: Preparer | None = None
 
     @property
     def config(self) -> FlotillaConfig:
@@ -69,7 +64,6 @@ class Flotilla:
         if self._on_event is not None:
             self._events = EventDispatcher(self._on_event)
             self._manager.on_event = self._events.emit
-        self._preparer = Preparer(cfg, self._manager.anchor)
         async with asyncio.timeout(cfg.timeouts.prepare):
             await self._manager.start()
 
@@ -110,59 +104,46 @@ class Flotilla:
             cancel_result=(lambda value: cancel_result(manager, value)) if cancel_result is not None else None,
         )
 
-    def inspect(self, task_path: str | Path) -> tuple[EnvironmentInspection, ...]:
-        return inspect(self._deployment, task_path)
-
-    def inspect_environment(self, definition: EnvironmentDefinition) -> EnvironmentInspection:
-        return inspect_environment(self._deployment, definition)
+    def reservation(self, prepared: PreparedEnvironment) -> ResourceReservation:
+        """Admission budget of one environment at this deployment's effective resources."""
+        manifest = prepared.manifest()
+        resources = {
+            name: self._deployment.resources.effective(
+                manifest.task, name, unit.resources.model_dump(exclude_none=True)
+            )
+            for name, unit in manifest.units.items()
+        }
+        return ResourceReservation(resources, copies=ENVIRONMENT_RESERVATION_COPIES)
 
     def client_reservation(self) -> ResourceReservation:
         """Per-client anchor overhead, in addition to environment reservations."""
         resource = self._deployment.anchor_settings().resources
         return ResourceReservation({"anchor": {"cpu": resource.cpu, "memory": resource.memory}})
 
-    async def open_task(self, task_path: str | Path, options: OpenOptions | None = None) -> Environment:
-        return await self._open_source(Path(task_path), options)
-
-    async def open_environment(
-        self,
-        definition: EnvironmentDefinition,
-        options: OpenOptions | None = None,
-    ) -> Environment:
-        return await self._open_source(definition, options)
-
-    async def _open_source(self, definition: EnvironmentDefinition | Path, options: OpenOptions | None) -> Environment:
+    async def open(self, prepared: PreparedEnvironment, options: OpenOptions | None = None) -> Environment:
+        """Open one prepared environment (a row's `environment(role)`); no images are built or files published."""
+        if not isinstance(prepared, PreparedEnvironment):
+            raise TypeError("open takes a PreparedEnvironment; run `flotilla prepare` and load its rows")
         options = copy.deepcopy(options or OpenOptions())
-        definition = copy.deepcopy(definition)
-        startup = options.startup_timeout or self._deployment.preparation.timeout_s
+        startup = options.startup_timeout or self._deployment.runtime.startup_timeout_s
         lifetime = options.lifetime or self._deployment.runtime.run_timeout_s
         if lifetime > self._deployment.runtime.run_timeout_s:
             raise ValueError("lifetime exceeds runtime.run_timeout_s")
         deadline = time.monotonic() + startup
         eid = uuid.uuid4().hex
+        request = RunRequest(
+            prepared,
+            options.request_id or eid,
+            runtime_params=options.runtime_params,
+            exec_env=options.exec_env,
+            disable_internet=options.disable_internet,
+            resources=options.resources,
+            lifetime=lifetime,
+        )
         try:
             async with asyncio.timeout(startup):
                 await self.start()
-
-                async def open_prepared(manager: Manager) -> EnvironmentInfo:
-                    assert self._preparer is not None
-                    task, timings = await self._preparer.resolve(definition, force_build=options.force_build)
-                    request = RunRequest(
-                        task,
-                        options.request_id or eid,
-                        runtime_params=options.runtime_params,
-                        exec_env=options.exec_env,
-                        disable_internet=options.disable_internet,
-                        resources=options.resources,
-                        lifetime=lifetime,
-                    )
-                    info = await manager.open(eid, request, deadline)
-                    ready = manager.runs[eid].ready
-                    assert ready is not None
-                    manager.runs[eid].ready = replace(ready, timings={**ready.timings, **dict(timings)})
-                    return replace(info, timings=(*timings, *info.timings))
-
-                info = await self._call(open_prepared)
+                info = await self._call(lambda manager: manager.open(eid, request, deadline))
                 return Environment(self, info)
         except BaseException:
             self._release_background(eid)
@@ -170,15 +151,9 @@ class Flotilla:
 
     @asynccontextmanager
     async def environment(
-        self,
-        source: str | Path | EnvironmentDefinition,
-        options: OpenOptions | None = None,
+        self, prepared: PreparedEnvironment, options: OpenOptions | None = None
     ) -> AsyncIterator[Environment]:
-        env = (
-            await self.open_environment(source, options)
-            if isinstance(source, EnvironmentDefinition)
-            else await self.open_task(source, options)
-        )
+        env = await self.open(prepared, options)
         try:
             yield env
         except BaseException as primary:
@@ -228,12 +203,7 @@ class Flotilla:
         if self._worker is None:
             return CleanupReport("", 0)
 
-        async def drain_owned(manager: Manager) -> CleanupReport:
-            report = await manager.drain(timeout)
-            residuals = tuple(self._preparer.residuals) if self._preparer is not None else ()
-            return replace(report, preparation_residuals=residuals)
-
-        return await self._call(drain_owned)
+        return await self._call(lambda manager: manager.drain(timeout))
 
     async def close(self, timeout: float | None = None) -> CleanupReport:
         from flotilla.runtime.manager import _timeout
@@ -261,11 +231,7 @@ class Flotilla:
                     manager = self._manager
                     if manager is None:
                         return CleanupReport("", 0)
-                    residuals: tuple[PreparationResidual, ...] = ()
-                    if self._preparer is not None:
-                        residuals = await self._preparer.close(max(0.001, deadline - time.monotonic()))
-                    report = await manager.close(max(0.001, deadline - time.monotonic()))
-                    return replace(report, preparation_residuals=residuals)
+                    return await manager.close(max(0.001, deadline - time.monotonic()))
 
                 self._close_future = worker.submit(finish)
             future = self._close_future
@@ -275,18 +241,12 @@ class Flotilla:
             if not worker.thread.is_alive() or worker.loop.is_closed():
                 return
 
-            async def finish_preparation() -> None:
-                # close may exhaust its budget before an owned cleanup finishes.
-                # Keep its loop alive; Worker finalization must not cancel that cleanup.
-                if self._preparer is not None:
-                    pending = list(self._preparer.pending)
-                    if pending:
-                        await asyncio.gather(*pending, return_exceptions=True)
+            async def stop_loop() -> None:
                 if self._events is not None:
                     self._events.close()
                 worker.loop.stop()
 
-            worker.submit(finish_preparation)
+            worker.submit(stop_loop)
 
         with self._lock:
             if not self._stop_callback_registered:
@@ -294,10 +254,6 @@ class Flotilla:
                 future.add_done_callback(stop_after_owned_cleanup)
         report = await asyncio.shield(asyncio.wrap_future(future))
         self.cleanup_report = report
-        if any(record.kind == "operation" for record in report.preparation_residuals):
-            # The bounded close result reports unconfirmed cleanup; its independent
-            # task retains ownership and stops the loop when it has finished.
-            return report
         await asyncio.to_thread(worker.thread.join, 5)
         if worker.thread.is_alive():
             raise RuntimeError("Flotilla background thread failed to stop")

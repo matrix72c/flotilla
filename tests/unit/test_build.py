@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +16,6 @@ from flotilla.build.builder import (
     image_tag,
 )
 from flotilla.build.images import BuildSettings, ImageError, plan_image
-from flotilla.build.keys import files_json
 from flotilla.build.meta import parse_config, parse_user
 from flotilla.compose.model import Project, Service
 
@@ -90,33 +88,6 @@ def test_parse_config_empty_entrypoint_differs_from_missing() -> None:
 
 
 # ───────────────────────────── Content hash ─────────────────────────────
-
-
-def _tree(root: Path) -> None:
-    (root / "sub").mkdir(parents=True)
-    (root / "sub" / "a.txt").write_bytes(b"hello")
-    (root / "empty").mkdir()
-    os.symlink("sub/a.txt", root / "link")
-
-
-def test_file_manifest_is_stable_and_content_sensitive(tmp_path: Path) -> None:
-    a, b = tmp_path / "a", tmp_path / "b"
-    _tree(a)
-    _tree(b)
-    assert files_json(a)[1] == files_json(b)[1]
-    # mtime is not counted.
-    os.utime(a / "sub" / "a.txt", (0, 0))
-    assert files_json(a)[1] == files_json(b)[1]
-    # Content, mode, symlink targets and empty directories are counted.
-    (a / "sub" / "a.txt").write_bytes(b"world")
-    assert files_json(a)[1] != files_json(b)[1]
-    (a / "sub" / "a.txt").write_bytes(b"hello")
-    (a / "sub" / "a.txt").chmod(0o700)
-    assert files_json(a)[1] != files_json(b)[1]
-    (a / "sub" / "a.txt").chmod((b / "sub" / "a.txt").stat().st_mode & 0o7777)
-    assert files_json(a)[1] == files_json(b)[1]
-    (a / "empty").rmdir()
-    assert files_json(a)[1] != files_json(b)[1]
 
 
 # ───────────────────────────── Build key ─────────────────────────────

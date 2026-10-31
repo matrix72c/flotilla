@@ -94,6 +94,7 @@ The optional `probe_readonly_rootfs`, `probe_native_tmpfs`, and `probe_shm_size`
 
 | Key | Default | Meaning |
 |---|---|---|
+| `startup_timeout_s` | `1800` | Default `OpenOptions.startup_timeout`: initialization, admission queueing, and startup |
 | `run_timeout_s` | `21600` | Upper bound for `OpenOptions.lifetime` |
 | `exec_default_timeout_s` | `300` | Command timeout when none is given |
 | `cancel_confirm_timeout_s` | `15` | How long to wait for confirmation that an interrupted command stopped |
@@ -149,13 +150,14 @@ memory = "8Gi"
 
 Precedence, lowest first: `[resources.default]`, resources declared in the Compose file, `[resources.services.*]`, `[resources.tasks.*]`, and finally `OpenOptions.resources` at runtime.
 
-### `[preparation]` and `[build]`
+### `[prepare]` and `[build]`
+
+Used by `flotilla prepare` only; opening prepared rows reads neither.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `preparation.concurrency` | `4` | Concurrent task preparations per client |
-| `preparation.timeout_s` | `3600` | Cap on a single preparation |
-| `preparation.docker_command` | `["docker"]` | Docker argv prefix, e.g. `["sudo", "-n", "docker"]` |
+| `prepare.concurrency` | `4` | Tasks prepared concurrently |
+| `prepare.docker_command` | `["docker"]` | Docker argv prefix, e.g. `["sudo", "-n", "docker"]` |
 | `build.target` | `""` | Repository that built and mirrored images are pushed to, e.g. `registry.example.com/team/tasks`. `flotilla prepare` pushes each dataset to `<target>/<dataset>` |
 | `build.pullable_registries` | `[]` | Registries or prefixes the platform can pull from directly; other images are mirrored to `build.target` |
 | `build.mirror_images` | `false` | Mirror every `image:` service, even from pullable registries |

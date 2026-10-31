@@ -13,7 +13,7 @@ from typing import Any
 
 import yaml
 
-from flotilla import EnvironmentDefinition, Flotilla, OpenOptions
+from flotilla import Flotilla, OpenOptions, PreparedEnvironment, load_prepared
 from flotilla.config import FlotillaConfig
 from flotilla.core import labels
 from flotilla.core.anchor import Anchor
@@ -21,6 +21,7 @@ from flotilla.core.deletion import Deleter
 from flotilla.platform.base import FlotillaError
 from flotilla.platform.clock import SystemClock
 from flotilla.platform.opensandbox import build
+from flotilla.prepare import prepare
 
 CASES = {
     "readonly": (True, False, 0),
@@ -70,6 +71,25 @@ async def run(deployment: Path, image: str, output: Path, *, cases: tuple[str, .
         create_fields=cfg.opensandbox_settings().create_fields,
         group_extension=cfg.opensandbox_settings().group_extension,
     )
+
+    async def start_anchor() -> Anchor:
+        anchor = Anchor(observer, SystemClock(), "prepare-" + uuid.uuid4().hex[:12], cfg.anchor_settings())
+        try:
+            await anchor.start()
+        except BaseException:
+            await anchor.close()
+            raise
+        return anchor
+
+    async def prepare_fixture(directory: Path) -> PreparedEnvironment:
+        """`flotilla prepare` for one fixture task (needs Docker on this machine)."""
+        rows = directory.with_suffix(".jsonl")
+        report = await prepare(cfg, [directory], rows, anchor=start_anchor, work=directory.with_suffix(".work"))
+        if report.failed:
+            raise ValueError(f"fixture preparation failed: {rows.with_suffix('.failures.jsonl').read_text()}")
+        [row] = load_prepared(rows)
+        return row.environment()
+
     fleet = Flotilla(deployment=cfg)
     try:
         with TemporaryDirectory(prefix="flotilla-filesystem-contract-") as folder:
@@ -83,7 +103,8 @@ async def run(deployment: Path, image: str, output: Path, *, cases: tuple[str, .
                 if uid:
                     name += f"-uid-{uid}"
                 directory = root / name
-                directory.mkdir()
+                (directory / "environment").mkdir(parents=True)
+                (directory / "task.toml").write_text("[environment]\n")
                 service: dict[str, Any] = {
                     "image": image,
                     "user": f"{uid}:{1001 if uid else 0}",
@@ -100,9 +121,9 @@ async def run(deployment: Path, image: str, output: Path, *, cases: tuple[str, .
                 if tmpfs:
                     service["tmpfs"] = ["/tmp:size=1m,mode=0750,uid=1000,gid=1001"]
                 compose = {"services": {"main": service}, "volumes": {"results": {}}}
-                (directory / "docker-compose.yaml").write_text(yaml.safe_dump(compose))
-                definition = EnvironmentDefinition(directory, directory, name)
-                async with fleet.environment(definition, OpenOptions(startup_timeout=600)) as env:
+                (directory / "environment" / "docker-compose.yaml").write_text(yaml.safe_dump(compose))
+                environment = await prepare_fixture(directory)
+                async with fleet.environment(environment, OpenOptions(startup_timeout=600)) as env:
                     info = await env.info()
                     state = await observer.get(info.services[0].instance_id)
                     result.setdefault("environments", []).append(
@@ -227,7 +248,7 @@ async def run(deployment: Path, image: str, output: Path, *, cases: tuple[str, .
                             recovered.exit_code == 0 and recovered.stdout == b"after-free\n",
                         )
                 if tmpfs:
-                    async with fleet.environment(definition, OpenOptions(startup_timeout=600)) as fresh:
+                    async with fleet.environment(environment, OpenOptions(startup_timeout=600)) as fresh:
                         result.setdefault("environments", []).append(
                             {"case": name + "-fresh", **asdict(await fresh.info())}
                         )

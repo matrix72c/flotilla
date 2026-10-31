@@ -1,6 +1,7 @@
-"""End-to-end task-path preparation, service operations and confirmed cleanup.
+"""End-to-end open of a prepared task, service operations and confirmed cleanup.
 
-Run with --deployment deployment.toml --task /path/to/harbor/task --check true.
+Prepare first with `flotilla prepare <task or dataset> --deployment deployment.toml --out prepared.jsonl`, then run
+with --deployment deployment.toml --prepared prepared.jsonl --task <row id or task directory> --check true.
 """
 
 from __future__ import annotations
@@ -13,18 +14,26 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from flotilla import Environment, Flotilla, OpenOptions
+from flotilla import Environment, Flotilla, OpenOptions, PreparedTask, load_prepared
 from flotilla.platform.base import FlotillaError
 
 
+def _row(prepared: Path, task: str) -> PreparedTask:
+    for row in load_prepared(prepared):
+        if row.id == task or Path(row.task_dir).resolve() == Path(task).resolve():
+            return row
+    raise SystemExit(f"{prepared} has no row for {task}; run `flotilla prepare` on it")
+
+
 async def run(args: argparse.Namespace) -> tuple[dict[str, object], list[Check]]:
+    row = _row(args.prepared, args.task)
     fleet = Flotilla(deployment=args.deployment)
-    out: dict[str, object] = {"task": str(args.task)}
+    out: dict[str, object] = {"task": row.id}
     checks: list[Check] = []
     began = time.monotonic()
     try:
         async with fleet.environment(
-            args.task, OpenOptions(request_id="task-e2e", startup_timeout=args.timeout)
+            row.environment(), OpenOptions(request_id="task-e2e", startup_timeout=args.timeout)
         ) as env:
             info = await env.info()
             out["ready_s"] = round(time.monotonic() - began, 1)
@@ -101,15 +110,16 @@ def _print(out: dict[str, object], checks: list[Check]) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="python -m tests.e2e.task_trial",
-        description="Deliver an environment directly from a Harbor task directory",
+        description="Open a prepared task's main environment and run checks in it",
     )
     parser.add_argument("--deployment", required=True, type=Path, help="deployment config")
-    parser.add_argument("--task", required=True, type=Path, help="Harbor task directory")
+    parser.add_argument("--prepared", required=True, type=Path, help="jsonl written by flotilla prepare")
+    parser.add_argument("--task", required=True, help="row id or task directory")
     parser.add_argument(
         "--check", action="append", default=[], help="command to run in the agent service once ready; repeatable"
     )
     parser.add_argument("--out", type=Path, help="write results as JSON")
-    parser.add_argument("--timeout", type=float, default=3600, help="time limit for preparation, queueing and startup")
+    parser.add_argument("--timeout", type=float, default=3600, help="time limit for queueing and startup")
     args = parser.parse_args()
     out, checks = asyncio.run(run(args))
     _print(out, checks)

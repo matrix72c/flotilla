@@ -67,9 +67,6 @@ def deployment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Flotill
         return Manager(config, platform=platform, clock=clock)
 
     monkeypatch.setattr("flotilla.runtime.client.Manager", manager)
-    from flotilla.testing.preparation import fake_build_process
-
-    monkeypatch.setattr("flotilla.preparation.service.Preparer._build_process", fake_build_process)
     return cfg, platform, tree
 
 

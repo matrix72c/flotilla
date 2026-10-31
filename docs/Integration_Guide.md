@@ -4,11 +4,11 @@ This guide is for authors of evaluation runners, RL rollout workers, and agent f
 
 ## Who owns what
 
-Flotilla owns environment resources: images, sandboxes, network policies, shared directories, renewal, and cleanup. Your framework owns everything about the episode: which environment definition to open for each phase, the order of phases, verifier selection, scoring, retries, and admission into training.
+Flotilla owns environment resources: images, sandboxes, network policies, shared directories, renewal, and cleanup. Your framework owns everything about the episode: which prepared environment to open for each phase, the order of phases, verifier selection, scoring, retries, and admission into training.
 
 Two consequences follow:
 
-- `fleet.inspect(task)` inspects only the task's main environment. If your framework runs a separate verifier environment, inspect and open that definition explicitly.
+- `flotilla prepare` prepares a task's main environment and, for Harbor tasks with a separate verifier, its verifier environment. Your framework opens each one explicitly, with its own options.
 - A score never makes a cleanup failure acceptable. Check `CleanupReport.clean` separately and treat an unclean report as an infrastructure problem.
 
 ## One client per process
@@ -35,34 +35,39 @@ finally:
 
 `on_event` receives best-effort diagnostic events: lifecycle kinds such as `queued`, `admitted`, `open_failed`, `operation_started`, `operation_finished`, `cancel_requested`, `service_terminated`, and `cleanup_finished`, plus one timing event per startup stage with `elapsed_s` set. They never contain argv, output, environment values, or credentials. Don't use them as lifecycle acknowledgements; the return values and exceptions are authoritative.
 
-## Selecting the environment
+## Preparing and selecting tasks
 
-Frameworks that decide the environment themselves pass an `EnvironmentDefinition`, which is confined to its task root:
+Prepare each dataset once, on a machine with Docker, and keep the jsonl with your experiment:
 
-```python
-from pathlib import Path
-
-from flotilla import EnvironmentDefinition
-
-definition = EnvironmentDefinition(
-    task_root=Path("tasks/web-sqli"),
-    directory=Path("tasks/web-sqli/environment"),
-    name="web-sqli",
-    config={"cpus": 2, "memory_mb": 4096},  # the effective [environment] table for this phase
-)
+```sh
+flotilla prepare harbor/web-bench --deployment deployment.toml --out web-bench.jsonl
 ```
 
-`config` takes the same keys as the `[environment]` table in `task.toml` (see [Compose support](Compose_Support.md#tasktoml)). Resolve any inheritance between phases in your framework and pass the result.
+Each line is one task: `id` (`<dataset>/<task path>`), `task_dir`, filter attributes, `dataset_rev`, `flotilla_version`, and the prepared environments under `env`. Filtering a dataset or deriving a subset is filtering lines. The filter attributes describe the main environment at the deployment's effective resources:
+
+| Attribute | Meaning |
+|---|---|
+| `services` | Number of Compose services |
+| `cpu`, `memory_mib` | Total CPU and memory across services |
+| `privileged` | Whether any service is privileged |
+| `has_verifier` | Whether the row has a separate verifier environment |
+
+Other top-level keys are kept as they are, so your framework may add its own fields to the lines. `env` belongs to Flotilla: regenerate it with `flotilla prepare --force` when a task or Flotilla's preparation rules change, and only while no job is using the rows.
+
+```python
+from flotilla import load_prepared
+
+rows = [row for row in load_prepared("web-bench.jsonl") if not row.attrs["privileged"]]
+main = rows[0].environment()  # the "main" environment
+verifier = rows[0].verifier     # None unless the task has a separate verifier
+```
 
 ## Budgeting concurrent work
 
-Before opening many environments, compute what they will reserve. Inspection is local and creates nothing:
+Before opening many environments, compute what they will reserve. This is local and creates nothing:
 
 ```python
-inspection = fleet.inspect_environment(definition)
-if inspection.status == "rejected":
-    raise ValueError(inspection.findings)
-per_episode = inspection.reservation.instances  # services x 2: one active generation plus one for retries
+per_episode = fleet.reservation(main).instances  # services x 2: one active generation plus one for retries
 overhead = fleet.client_reservation().instances  # the anchor
 ```
 
@@ -75,14 +80,14 @@ from flotilla import ErrorCategory, ExecOutcomeUnknown, FlotillaError, OpenOptio
 
 options = OpenOptions(
     request_id=episode_id,         # reported in events and env.info() for correlation
-    startup_timeout=900,           # parsing, image preparation, publication, sandbox startup
+    startup_timeout=900,           # admission and sandbox startup
     lifetime=3600,                 # starts when the environment is ready
     runtime_params={"FLAG": flag}, # values for variables the task's .env leaves undefined
     exec_env={"main": {"OPENAI_BASE_URL": proxy_url}},  # added to every command in that service
     disable_internet=True,
 )
 try:
-    async with fleet.environment(definition, options) as env:
+    async with fleet.environment(main, options) as env:
         for action in agent.actions():
             result = await env.agent.shell(action, timeout=120)
             if result.timed_out:
@@ -137,13 +142,14 @@ A process that dies without closing its client leaves its sandboxes and director
 
 ## Testing your integration
 
-Install the `testing` extra and use the public helpers in `flotilla.testing`. They run the real client, preparation, and runtime against an in-memory platform, without a deployment, Docker, or credentials:
+Install the `testing` extra and use the public helpers in `flotilla.testing`. They run the real preparation, client, and runtime against an in-memory platform and fake image tooling, without a deployment, Docker, or credentials:
 
 ```python
 import pytest
 
 from flotilla import Flotilla
 from flotilla.config import FlotillaConfig
+from flotilla.testing.build import prepared_environment
 from flotilla.testing.platform import FakePlatform, SharedTree
 from flotilla.testing.runtime import deployment as deployment  # pytest fixture
 
@@ -157,7 +163,7 @@ async def test_episode_releases_its_environment(
     (task / "environment").mkdir(parents=True)
     (task / "task.toml").write_text('[environment]\ndocker_image = "registry.example/main:1"\n')
     async with Flotilla(deployment=cfg) as fleet:
-        async with fleet.environment(task) as env:
+        async with fleet.environment(prepared_environment(task, cfg)) as env:
             assert (await env.agent.exec(["true"], timeout=10)).exit_code == 0
     assert fleet.cleanup_report is not None and fleet.cleanup_report.clean
     assert platform.instances() == []

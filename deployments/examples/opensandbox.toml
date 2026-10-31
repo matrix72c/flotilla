@@ -85,10 +85,10 @@ memory = "2Gi"
 # cpu = "4"
 # memory = "8Gi"
 
-# Opening a task prepares it automatically; this machine needs Docker/BuildKit and registry access.
-[preparation]
+# `flotilla prepare` builds images and publishes task files; the machine running it needs Docker/BuildKit and
+# registry access. Opening prepared rows needs neither.
+[prepare]
 concurrency = 4
-timeout_s = 3600
 # docker_command = ["sudo", "-n", "docker"]
 
 [build]

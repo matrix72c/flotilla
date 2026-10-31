@@ -1,15 +1,12 @@
-"""Content checksums for file publication; not task-version or build-cache keys."""
+"""File metadata (type, mode, numeric owner) for task-file publication."""
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import stat
 from collections.abc import Iterator
 from pathlib import Path
-
-_CHUNK = 1 << 20
 
 
 def _walk(root: Path) -> Iterator[tuple[str, os.stat_result]]:
@@ -35,16 +32,8 @@ def _kind(info: os.stat_result) -> str:
     return "file" if stat.S_ISREG(info.st_mode) else "other"
 
 
-def _file_hash(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while chunk := handle.read(_CHUNK):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def entries(root: Path, *, digests: bool = True) -> list[dict[str, object]]:
-    """Path, type, mode and numeric owner of every entry under `root`; with `digests`, also file sha256."""
+def entries(root: Path) -> list[dict[str, object]]:
+    """Path, type, mode and numeric owner of every entry under `root`, plus file size or link target."""
     metadata = root.parent / "file-identities.json"
     identities = json.loads(metadata.read_text()) if metadata.exists() else {}
     result: list[dict[str, object]] = []
@@ -61,14 +50,7 @@ def entries(root: Path, *, digests: bool = True) -> list[dict[str, object]]:
         }
         if stat.S_ISREG(info.st_mode):
             entry["size"] = info.st_size
-            if digests:
-                entry["sha256"] = _file_hash(root / relative)
         elif stat.S_ISLNK(info.st_mode):
             entry["target"] = os.readlink(root / relative)
         result.append(entry)
     return sorted(result, key=lambda entry: str(entry["path"]))
-
-
-def files_json(root: Path) -> tuple[bytes, str]:
-    blob = json.dumps(entries(root), sort_keys=True, ensure_ascii=False, indent=2).encode() + b"\n"
-    return blob, hashlib.sha256(blob).hexdigest()

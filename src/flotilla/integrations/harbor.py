@@ -1,7 +1,8 @@
 """Harbor 0.24 environment plugin. Install the harbor extra to import this module.
 
-Use --env flotilla.integrations.harbor:FlotillaEnvironment with a deployment kwarg.
-An explicitly injected fleet is shared; otherwise the adapter owns a fleet for its trial.
+Use --env flotilla.integrations.harbor:FlotillaEnvironment with `deployment` and `prepared` kwargs; `prepared` is
+the jsonl written by `flotilla prepare` for the tasks being run. An explicitly injected fleet is shared; otherwise the
+adapter owns a fleet for its trial.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ import copy
 import json
 import logging
 import shutil
+import threading
 from collections.abc import Sequence
 from dataclasses import asdict
 from pathlib import Path
@@ -23,11 +25,30 @@ from harbor.models.trial.config import ResourceMode, ServiceVolumeConfig
 from harbor.models.trial.paths import EnvironmentPaths, TrialPaths
 
 from flotilla._io import owned_io
-from flotilla.compose.task import load_task
 from flotilla.config import FlotillaConfig
+from flotilla.integrations.harbor_source import task_environments
+from flotilla.prepared import ROLES, PreparedEnvironment, PreparedTask, load_prepared
 from flotilla.runtime.client import Flotilla
 from flotilla.runtime.environment import Environment, Service
-from flotilla.runtime.types import CleanupError, EnvironmentDefinition, OpenOptions
+from flotilla.runtime.types import CleanupError, OpenOptions
+
+# Rows of each prepared jsonl by resolved task directory, reloaded when the file changes. Trials of one job
+# share the file, so it is parsed once per process rather than once per trial.
+_ROWS: dict[tuple[str, int, int], dict[Path, PreparedTask]] = {}
+_ROWS_LOCK = threading.Lock()
+
+
+def _rows(path: Path) -> dict[Path, PreparedTask]:
+    info = path.stat()
+    key = (str(path.resolve()), info.st_mtime_ns, info.st_size)
+    with _ROWS_LOCK:
+        rows = _ROWS.get(key)
+        if rows is None:
+            rows = {Path(row.task_dir).resolve(): row for row in load_prepared(path)}
+            for stale in [k for k in _ROWS if k[0] == key[0]]:
+                del _ROWS[stale]
+            _ROWS[key] = rows
+        return rows
 
 
 class FlotillaEnvironment(BaseEnvironment):  # type: ignore[misc]
@@ -55,6 +76,7 @@ class FlotillaEnvironment(BaseEnvironment):  # type: ignore[misc]
         stream: bool = False,
         enable_environment_dir_upload: bool = True,
         deployment: str,
+        prepared: str | None = None,
         fleet: Flotilla | None = None,
         run_timeout: float | None = None,
         runtime_params: dict[str, str] | None = None,
@@ -64,6 +86,7 @@ class FlotillaEnvironment(BaseEnvironment):  # type: ignore[misc]
         self._owns_environment = True
         self._fleet = fleet or Flotilla(deployment=self._cfg)
         self._owns_fleet = fleet is None
+        self._prepared = Path(prepared) if prepared is not None else None
         self._environment: Environment | None = None
         self._service_error: BaseException | None = None
         self._stopped: set[str] = set()
@@ -79,7 +102,6 @@ class FlotillaEnvironment(BaseEnvironment):  # type: ignore[misc]
             raise ValueError("storage, GPU and TPU overrides are unsupported")
         if extra_docker_compose:
             raise ValueError("additional Compose overlays are unsupported")
-        self._source_env_config = copy.deepcopy(task_env_config)
         super().__init__(
             environment_dir=environment_dir,
             environment_name=environment_name,
@@ -116,14 +138,23 @@ class FlotillaEnvironment(BaseEnvironment):  # type: ignore[misc]
 
     def _validate_definition(self) -> None:
         directory = Path(self.environment_dir).resolve()
-        root = next((p for p in directory.parents if (p / "task.toml").is_file()), directory.parent)
-        source_config = self._source_env_config
-        self._definition = EnvironmentDefinition(
-            root,
-            directory,
-            load_task(root).name,
-            source_config.model_dump(mode="json", exclude_unset=True),
-        )
+        self._directory = directory
+        self._task_root = next((p for p in directory.parents if (p / "task.toml").is_file()), directory.parent)
+
+    def _prepared_environment(self) -> PreparedEnvironment:
+        """The prepared row's environment for this task directory and environment role."""
+        if self._prepared is None:
+            raise ValueError("pass the prepared jsonl written by `flotilla prepare` as the `prepared` kwarg")
+        row = _rows(self._prepared).get(self._task_root)
+        if row is None:
+            raise ValueError(f"{self._prepared} has no row for {self._task_root}; run `flotilla prepare` on it")
+        directories = [task.env_dir.resolve() for task in task_environments(self._task_root)]
+        if self._directory not in directories:
+            raise ValueError(f"{self._directory} is not an environment of {self._task_root}")
+        role = ROLES[directories.index(self._directory)]
+        if role not in row.environments:
+            raise ValueError(f"row {row.id} has no {role} environment; rerun `flotilla prepare --force` on it")
+        return row.environment(role)
 
     @classmethod
     def view(
@@ -154,15 +185,17 @@ class FlotillaEnvironment(BaseEnvironment):  # type: ignore[misc]
 
     async def start(self, force_build: bool = False) -> None:
         self._check_resources()
+        if force_build:
+            raise ValueError("force_build is unsupported: images come from `flotilla prepare`; rerun it with --force")
         if self._environment is not None:
             return
         try:
+            prepared = await owned_io(self._prepared_environment)
             await self._fleet.start()
             mode = self._network_policy.network_mode
-            self._environment = await self._fleet.open_environment(
-                self._definition,
+            self._environment = await self._fleet.open(
+                prepared,
                 OpenOptions(
-                    force_build=force_build,
                     request_id=self.session_id,
                     lifetime=self._run_timeout,
                     resources={"main": self._resource_overrides} if self._resource_overrides else {},

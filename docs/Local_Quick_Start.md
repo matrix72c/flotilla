@@ -278,10 +278,10 @@ For a deployment that does provide these, follow the [deployment guide](Deployme
 
 ## Using sudo
 
-If Docker needs `sudo`, prefix the `docker` commands above with it, pass `DOCKER="sudo docker"` to the two `build.sh` scripts, and tell Flotilla how to run Docker for image preparation:
+If Docker needs `sudo`, prefix the `docker` commands above with it, pass `DOCKER="sudo docker"` to the two `build.sh` scripts, and tell `flotilla prepare` how to run Docker:
 
 ```toml
-[preparation]
+[prepare]
 docker_command = ["sudo", "-n", "docker"]
 ```
 

@@ -1,4 +1,4 @@
-"""Public preparation and file transfers with a read-only root and framework scratch mount."""
+"""Public open and file transfers with a read-only root and framework scratch mount."""
 
 from __future__ import annotations
 
@@ -8,17 +8,15 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-import yaml
 
 from flotilla import Flotilla
 from flotilla.capabilities import Item
-from flotilla.compose.normalize import normalize
 from flotilla.config import FlotillaConfig
 from flotilla.platform.base import ExecAttempt, ExecResult, FlotillaError, InstanceHandle, ProcessSpec, TmpfsMount
 from flotilla.platform.opensandbox.filesystem import INTERNAL_LIMITS
 from flotilla.runtime.manager import Manager
 from flotilla.runtime.types import RunRequest, Task
-from flotilla.testing.environments import FixtureRequest, definition, environment
+from flotilla.testing.environments import FixtureRequest, environment
 from flotilla.testing.platform import FakePlatform, SharedTree
 from flotilla.testing.runtime import deployment as deployment
 from flotilla.testing.runtime import task
@@ -43,16 +41,6 @@ def test_tmpfs_budget_uses_final_resource_defaults_and_overrides(
     with pytest.raises(FlotillaError, match="capacities exceed") as failure:
         manager.plan(replace(request, resources={"main": {"memory": "32Mi"}}))
     assert not failure.value.retryable and platform.calls["create"] == 0
-
-
-def test_fixture_compose_keeps_unsized_tmpfs_unsized(tmp_path: Path) -> None:
-    manifest = task().manifest()
-    mounts = (TmpfsMount("/tmp"), TmpfsMount("/cache", 8 * 1024**2, 0o750, 1000, 1000))
-    unit = manifest.units["main"].model_copy(update={"tmpfs_mounts": list(mounts)})
-    definition(Task(manifest.model_copy(update={"units": {"main": unit}})), tmp_path)
-    project = normalize(yaml.safe_load((tmp_path / "docker-compose.yaml").read_text()), {})
-    assert not [f for f in project.findings if "tmpfs" in f.path]
-    assert project.services["main"].tmpfs == mounts
 
 
 @pytest.mark.asyncio

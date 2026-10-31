@@ -7,21 +7,20 @@ Import public types from `flotilla`. Configuration is loaded locally at construc
 | Operation | Behavior |
 |---|---|
 | `Flotilla(deployment=..., on_event=None)` | Owns a configuration snapshot and one runtime; do not share across processes |
-| `fleet.inspect(task_path)` | Synchronous local inspection of the main environment |
+| `fleet.reservation(prepared)` | Local admission budget of one environment: services x 2 |
 | `await fleet.start()` | Shared, idempotent initialization |
-| `await fleet.open_task(path, options=None)` | Parses and prepares the main environment |
-| `await fleet.open_environment(definition, options=None)` | Prepares an explicitly selected effective environment |
-| `async with fleet.environment(source, options=None)` | Opens and releases on exit; accepts a path or definition |
+| `await fleet.open(prepared, options=None)` | Opens a prepared environment; builds and uploads nothing |
+| `async with fleet.environment(prepared, options=None)` | Opens and releases on exit |
 | `await env.info()` / `await env.check()` | Resource metadata / current health and ownership check |
 | `await env.release(timeout=None)` | Idempotent, confirmed environment cleanup |
 | `await fleet.drain(timeout=None)` | Waits for pending cleanup; does not release active environments |
 | `await fleet.close(timeout=None)` | Releases owned environments and closes the runtime; returns a cleanup report |
 
-`EnvironmentDefinition(task_root, directory, name, config={})` selects a source directory confined to its task root. `config` is the effective environment configuration. Harbor inheritance and verifier selection belong to the adapter, not to core optional-dependency discovery.
+A `PreparedEnvironment` comes from a row of the jsonl that `flotilla prepare` writes: `load_prepared(path)` returns `PreparedTask` rows, `row.environment()` is the main environment, and `row.verifier` is the separate verifier environment or `None`. Images are digest-pinned and task files already published, so opening does not need Docker. Harbor verifier selection happens during preparation; the adapter opens the row's environment for its environment directory.
 
-`OpenOptions` accepts `request_id`, `startup_timeout`, `lifetime`, `runtime_params`, per-service `exec_env` and `resources`, `disable_internet`, and `force_build`. Resource overrides support CPU and memory. `force_build` selects source build when a Dockerfile exists; it does not disable Docker's layer cache.
+`OpenOptions` accepts `request_id`, `startup_timeout`, `lifetime`, `runtime_params`, per-service `exec_env` and `resources`, and `disable_internet`. Resource overrides support CPU and memory.
 
-`startup_timeout` includes initialization, source parsing, preparation queueing, builds, publication, and startup. Preparation also has the deployment's `preparation.timeout_s` cap. `lifetime` starts at readiness and cannot exceed `runtime.run_timeout_s`. Default preparation concurrency is 4. Runtime parameters are literal substitution values; only explicit network-policy targets are interpreted as network destinations.
+`startup_timeout` (default `runtime.startup_timeout_s`) includes initialization, admission queueing, and startup. `lifetime` starts at readiness and cannot exceed `runtime.run_timeout_s`. Runtime parameters are literal substitution values; only explicit network-policy targets are interpreted as network destinations.
 
 ## Services and processes
 

@@ -9,6 +9,10 @@ import pytest
 
 import flotilla
 from flotilla.config import FlotillaConfig
+from flotilla.core.anchor import Anchor
+from flotilla.platform.clock import SystemClock
+from flotilla.prepare import prepare
+from flotilla.testing.build import _ctx, prepared_task, write_prepared
 from flotilla.testing.platform import FakePlatform, SharedTree
 from flotilla.testing.runtime import deployment as deployment
 
@@ -29,6 +33,7 @@ async def test_readme_example(
     (source / "task.toml").write_text("[environment]\n")
     [compose] = re.findall(r"```yaml\n(.*?)```", readme, re.S)
     (source / "environment" / "docker-compose.yaml").write_text(compose)
+    write_prepared(tmp_path / "prepared.jsonl", [prepared_task(source, cfg)])  # `flotilla prepare task ...`
     client = flotilla.Flotilla
     monkeypatch.setattr(flotilla, "Flotilla", lambda **_: client(deployment=cfg))
     code = re.findall(r"```python\n(.*?)```", readme, re.S)[0]
@@ -55,6 +60,21 @@ async def test_quick_start_example(
     [compose] = re.findall(r"```yaml\n(.*?)```", doc, re.S)
     (task / "environment" / "docker-compose.yaml").write_text(compose)
     monkeypatch.chdir(tmp_path)
+
+    async def anchor() -> Anchor:
+        started = Anchor(platform, SystemClock(), "prepare-docs", cfg.anchor_settings())
+        await started.start()
+        return started
+
+    # `flotilla prepare hello-web ...`, with fake image tooling; site/ is published to the fake shared storage.
+    report = await prepare(
+        cfg,
+        [task],
+        tmp_path / "prepared.jsonl",
+        anchor=anchor,
+        context=lambda _: _ctx(caps=cfg.platform_capabilities()),
+    )
+    assert len(report.prepared) == 1 and not report.failed, report
     client = flotilla.Flotilla
     monkeypatch.setattr(flotilla, "Flotilla", lambda **_: client(deployment=cfg))
     [code] = [block for block in re.findall(r"```python\n(.*?)```", doc, re.S) if "async def main" in block]

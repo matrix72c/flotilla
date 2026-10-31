@@ -26,13 +26,14 @@ from typing import Any, TextIO
 
 from flotilla._version import __version__
 from flotilla.build.driver import BuildContext, build_task
-from flotilla.compose.task import HarborTask, TaskError, find_tasks, load_task
+from flotilla.compose.task import HarborTask, TaskError, find_tasks
 from flotilla.config import FlotillaConfig
 from flotilla.core.anchor import Anchor
 from flotilla.manifest import Manifest
 from flotilla.platform.base import FlotillaError
 from flotilla.platform.filesystem import memory_bytes
 from flotilla.prepare.docker import docker_context, sweep_journal
+from flotilla.prepare.inspect import main_only
 from flotilla.prepared import ROLES, PreparedEnvironment, PreparedTask, dump_row, load_prepared
 from flotilla.share.publish import TASKS, PublishError, mark_published, publish_task_dir
 
@@ -67,10 +68,6 @@ class _Failed(Exception):
     def __init__(self, stage: str, reason: str, environment: str | None = None) -> None:
         super().__init__(reason)
         self.stage, self.reason, self.environment = stage, reason, environment
-
-
-def main_only(path: Path) -> list[HarborTask]:
-    return [load_task(path)]
 
 
 def failures_path(out: Path) -> Path:

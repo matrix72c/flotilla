@@ -134,16 +134,16 @@ async def _probe(args: argparse.Namespace) -> int:
 async def _tasks(args: argparse.Namespace) -> int:
     from dataclasses import asdict
 
-    from flotilla import Flotilla
+    from flotilla.prepare.inspect import inspect
 
-    runtime = Flotilla(deployment=args.deployment)
+    cfg = FlotillaConfig.load(args.deployment)
     paths = tuple(find_tasks(args.tasks))
     if not paths:
         raise ValueError("no Harbor tasks found")
     rows: list[dict[str, Any]] = []
     for path in paths:
         try:
-            rows.extend({**asdict(entry), "path": str(path)} for entry in runtime.inspect(path))
+            rows.extend({**asdict(entry), "path": str(path)} for entry in inspect(cfg, path))
         except (ValueError, OSError) as exc:
             rows.append({"path": str(path), "status": "rejected", "error": str(exc)})
     failed = any(row["status"] == "rejected" for row in rows)
@@ -158,7 +158,8 @@ async def _tasks(args: argparse.Namespace) -> int:
 
 async def _prepare(args: argparse.Namespace) -> int:
     from flotilla.prepare import prepare
-    from flotilla.prepare.runner import Environments, failures_path, main_only
+    from flotilla.prepare.inspect import main_only
+    from flotilla.prepare.runner import Environments, failures_path
 
     if args.concurrency is not None and args.concurrency < 1:
         print("--concurrency must be positive", file=sys.stderr)
