@@ -27,6 +27,7 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Fixed
 
+- A create request whose response was lost no longer holds its trial for the whole `timeouts.create` budget. The request now has its own `timeouts.create_request` (default 60 s), after which the sandbox is found by its labels and adopted; previously the request timeout equalled the stage timeout, so this recovery could never run.
 - Preserve non-root image `USER` for workload execution while preparing a root-default runtime image for the exec daemon, including linked and mirrored source images.
 - Retry confirmed timeouts of the internal no-op health probe within the existing check budget instead of immediately losing the environment; user commands are never replayed.
 - Treat execd command-stream `409 CONFLICT` responses as explicit `CommandBusy` rejections: healthchecks skip that round, foreground and background calls preserve the rejection, and commands are never automatically replayed. Other conflicts retain their existing classification.

@@ -225,7 +225,8 @@ async def test_release_drops_queued_creates_immediately(platform: FakePlatform, 
 async def test_queued_create_after_deactivation_reports_lost(platform: FakePlatform, clock: ManualClock) -> None:
     a = Anchor(platform, clock, "L1", ANCHOR)
     await clock.run(a.start())
-    reaper = Reaper(platform, clock, a, Deleter(platform, clock), ReaperSettings(create_concurrency=1))
+    settings = ReaperSettings(create_concurrency=1, create_request_timeout_s=10_000.0)  # still in flight at G
+    reaper = Reaper(platform, clock, a, Deleter(platform, clock), settings)
     reaper.track("t1")
     platform.set_latency("create", 10_000.0)
     hog = asyncio.create_task(reaper.create("t1", "x", _spec("t1", "x")))

@@ -31,7 +31,7 @@ class ReaperSettings:
 
     create_rate: float = 5.0  # per second, process-wide
     create_concurrency: int = 64
-    create_request_timeout_s: float = 600.0  # per create request; exceeding it is treated as an unknown outcome
+    create_request_timeout_s: float = 60.0  # per create request; exceeding it is treated as an unknown outcome
     close_timeout_s: float = 20.0
 
     def __post_init__(self) -> None:

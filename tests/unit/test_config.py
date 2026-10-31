@@ -225,6 +225,14 @@ def test_translates_to_core_and_backend_settings() -> None:
     assert cfg.resources.effective("task", "main", {})["memory"] == "2Gi"
 
 
+def test_create_request_timeout_is_separate_from_the_stage() -> None:
+    cfg = config(timeouts={"create": 300, "create_request": 20})
+    assert cfg.trial_settings().create_timeout_s == 300
+    assert cfg.reaper_settings().create_request_timeout_s == 20
+    with pytest.raises(ValidationError, match="create_request"):
+        config(timeouts={"create": 60, "create_request": 60})
+
+
 def test_anchor_image_required_for_anchor_settings() -> None:
     with pytest.raises(ConfigError, match="anchor_image"):
         config(reaper={}).anchor_settings()

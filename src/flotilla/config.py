@@ -200,12 +200,22 @@ class Runtime(_Model):
 
 class Timeouts(_Model):
     create: PositiveFloat = 600.0
+    # One create request. A response lost in transit is recovered by listing labels, which only starts after this.
+    create_request: PositiveFloat = 60.0
     address: PositiveFloat = 30.0
     wire: PositiveFloat = 60.0
     hosts: PositiveFloat = 30.0
     prepare: PositiveFloat = 600.0
     start_max: PositiveFloat = 1800.0
     close: PositiveFloat = 60.0
+
+    @model_validator(mode="after")
+    def _create_request(self) -> Timeouts:
+        if self.create_request >= self.create:
+            raise ValueError(
+                "timeouts.create_request must be below timeouts.create, or lost responses are never recovered"
+            )
+        return self
 
 
 class Process(_Model):
@@ -485,7 +495,7 @@ class FlotillaConfig(_Model):
         return ReaperSettings(
             create_rate=self.limits.create_rate,
             create_concurrency=self.limits.create_concurrency,
-            create_request_timeout_s=self.timeouts.create,
+            create_request_timeout_s=self.timeouts.create_request,
             close_timeout_s=self.timeouts.close,
         )
 
@@ -618,5 +628,5 @@ class OpenSandboxBackend(Backend[OpenSandbox]):
             create_fields=settings.create_fields,
             group_extension=settings.group_extension,
             privileged_extensions=settings.privileged_extensions,
-            create_timeout_s=cfg.timeouts.create,
+            create_timeout_s=cfg.timeouts.create_request,
         )
