@@ -242,6 +242,9 @@ class Manager:
             self.emit("admitted", eid, elapsed_s=time.monotonic() - queued)
             async with asyncio.timeout(startup_s):
                 settings = self.cfg.trial_settings()
+                # Startup is not renewed: an instance must outlive the whole startup budget, then the monitor renews.
+                startup_ttl = math.ceil(startup_s + self.cfg.reaper.renew_before_s)
+                settings = replace(settings, ttl_s=max(settings.ttl_s, startup_ttl))
                 if request.disable_internet:
                     settings = replace(settings, external=ExternalPolicy(mode="none"))
                 trial = Trial(self.platform, self.clock, self.anchor, self.reaper, plan, eid, settings)
