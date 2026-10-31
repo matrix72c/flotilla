@@ -3,17 +3,14 @@
 
 from __future__ import annotations
 
-import builtins
 import json
 from pathlib import Path
-from typing import Any
 
 import pytest
 
 from flotilla.cli import main
 from flotilla.compose.task import TaskError, find_tasks, load_task
 from flotilla.platform.base import Capabilities
-from flotilla.preparation.source import task_environments
 from flotilla.scan import scan_task
 from flotilla.testing.reports import report
 
@@ -108,22 +105,6 @@ def test_find_tasks_stops_at_task_dirs_and_skips_hidden(tmp_path: Path) -> None:
     _task(tmp_path / "set" / ".cache", "hidden")
     assert list(find_tasks([tmp_path])) == [a, b]
     assert list(find_tasks([a])) == [a]
-
-
-@pytest.mark.parametrize("missing", ["harbor", "harbor.models.task.verifier_mode", "missing_dependency"])
-def test_harbor_fallback_only_when_optional_package_is_absent(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, missing: str
-) -> None:
-    path = _task(tmp_path, "optional-harbor")
-    original = builtins.__import__
-
-    def load(name: str, *args: Any, **kwargs: Any) -> Any:
-        if name.startswith("harbor."):
-            raise ModuleNotFoundError(f"missing {missing}", name=missing)
-        return original(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", load)
-    assert len(task_environments(path)) == 1
 
 
 # ───────────────────────────── network_policy ─────────────────────────────

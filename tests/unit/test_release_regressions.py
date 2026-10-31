@@ -25,7 +25,6 @@ from flotilla.config import FlotillaConfig
 from flotilla.platform.base import ExecAttempt, InstanceHandle, ProcessSpec
 from flotilla.platform.opensandbox.execd import Execd, ExecdSettings, multipart_upload
 from flotilla.platform.opensandbox.http import Http, RetryPolicy
-from flotilla.preparation.service import Preparer
 from flotilla.runtime.events import EventDispatcher
 from flotilla.runtime.types import RuntimeEvent
 from flotilla.testing.environments import FixtureRequest, open_fixture
@@ -184,46 +183,6 @@ async def test_background_start_cancel_accounts_for_remote_effect(
             with pytest.raises(FlotillaError):
                 await env.check()
             assert (await fleet.drain(2)).clean
-
-
-@pytest.mark.asyncio
-async def test_preparation_limits_work_and_cancelled_queue_has_no_operation(
-    deployment: tuple[FlotillaConfig, FakePlatform, SharedTree],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    cfg, _, _ = deployment
-    cfg = cfg.model_copy(update={"preparation": cfg.preparation.model_copy(update={"concurrency": 2})})
-    original = Preparer._build_process
-    active = peak = 0
-    entered, finish = threading.Event(), threading.Event()
-
-    async def blocked(self: Preparer, request: Path) -> None:
-        nonlocal active, peak
-        active += 1
-        peak = max(peak, active)
-        if active == 2:
-            entered.set()
-        try:
-            while not finish.is_set():
-                await asyncio.sleep(0.005)
-            await original(self, request)
-        finally:
-            active -= 1
-
-    monkeypatch.setattr(Preparer, "_build_process", blocked)
-    async with Flotilla(deployment=cfg) as fleet:
-        pending = [asyncio.create_task(open_fixture(fleet, FixtureRequest(task(), str(i)))) for i in range(3)]
-        try:
-            assert await asyncio.to_thread(entered.wait, 2)
-            pending[-1].cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await pending[-1]
-            assert fleet._preparer is not None and len(fleet._preparer.operations) == 2
-        finally:
-            finish.set()
-        envs = await asyncio.gather(*pending[:2])
-        assert peak == 2
-        await asyncio.gather(*(env.release() for env in envs))
 
 
 @pytest.mark.asyncio

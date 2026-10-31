@@ -50,15 +50,24 @@ services:
       retries: 15
 ```
 
+Prepare it once. This resolves or builds the images, publishes task files, and writes one row per task:
+
+```sh
+flotilla prepare task --deployment deployment.toml --out prepared.jsonl
+```
+
+Then open the row:
+
 ```python
 import asyncio
 
-from flotilla import Flotilla, OpenOptions
+from flotilla import Flotilla, OpenOptions, load_prepared
 
 
 async def main():
+    [task] = load_prepared("prepared.jsonl")
     async with Flotilla(deployment="deployment.toml") as fleet:
-        async with fleet.environment("task", OpenOptions(startup_timeout=600, lifetime=300)) as env:
+        async with fleet.environment(task.environment(), OpenOptions(startup_timeout=600, lifetime=300)) as env:
             pong = await env.service("cache").exec(["redis-cli", "ping"], timeout=30)
             print("cache:", pong.stdout.decode().strip())
             result = await env.agent.shell("printf 'PING\\r\\n' | nc -w 2 cache 6379", timeout=30)
@@ -70,7 +79,7 @@ async def main():
 asyncio.run(main())
 ```
 
-Flotilla resolves or builds the images, waits for `cache` to pass its healthcheck before starting `main`, makes `cache` resolvable by name from `main`, and confirms on exit that both sandboxes and their shared directories have been deleted. Harbor tasks run the same way through the [Harbor adapter](docs/Harbor_Quick_Start.md).
+Opening a row only creates sandboxes: images were pinned and task files published by `flotilla prepare`. Flotilla waits for `cache` to pass its healthcheck before starting `main`, makes `cache` resolvable by name from `main`, and confirms on exit that both sandboxes and their shared directories have been deleted. Harbor tasks run the same way through the [Harbor adapter](docs/Harbor_Quick_Start.md).
 
 ## Features
 

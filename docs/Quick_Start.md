@@ -1,8 +1,8 @@
 # Quick start
 
-This tutorial writes a two-service task, checks it locally, and runs it from Python. It assumes you have a working `deployment.toml` and the platform credential. If you don't, use the [local quick start](Local_Quick_Start.md) to set one up on a single machine, or the [deployment guide](Deployment.md) for a shared platform.
+This tutorial writes a two-service task, checks it locally, prepares it once, and runs it from Python. It assumes you have a working `deployment.toml` and the platform credential. If you don't, use the [local quick start](Local_Quick_Start.md) to set one up on a single machine, or the [deployment guide](Deployment.md) for a shared platform.
 
-You need Linux x86_64, Python 3.12, and Docker with BuildKit on the machine that runs Flotilla, because it builds the task images.
+You need Linux x86_64 and Python 3.12. The machine that runs `flotilla prepare` also needs Docker with BuildKit, because it builds the task images; opening prepared tasks does not.
 
 ```sh
 python -m pip install .
@@ -68,7 +68,17 @@ The output is a JSON object with an `environments` array. `"status": "accepted"`
 {"path": "services.web.ports[0]", "kind": "reject", "reason": "target must be one numeric port; ranges are unsupported"}
 ```
 
-## 3. Run it
+## 3. Prepare it
+
+```sh
+flotilla prepare hello-web --deployment deployment.toml --out prepared.jsonl
+```
+
+`prepare` builds `main` from the Dockerfile and pushes it to `[build].target`. `nginx:1.27-alpine` is used as is when its registry is listed in `[build].pullable_registries`, and is otherwise copied to `[build].target` first; `[build].image_replacements` can point it at an internal mirror instead. It then publishes `site/` to shared storage under `tasks/<dataset>/<task>/main` and writes one line to `prepared.jsonl` with the digest-pinned images and the published file location.
+
+Pass a dataset directory instead of one task to prepare every task in it. Tasks that already have a row are skipped, so an interrupted run resumes where it stopped. After you change a task, rerun with `--force`. Failures go to `prepared.failures.jsonl`.
+
+## 4. Run it
 
 `run_hello.py`:
 
@@ -76,13 +86,14 @@ The output is a JSON object with an `environments` array. `"status": "accepted"`
 import asyncio
 from pathlib import Path
 
-from flotilla import Flotilla, OpenOptions
+from flotilla import Flotilla, OpenOptions, load_prepared
 
 
 async def main():
+    [task] = load_prepared("prepared.jsonl")
     async with Flotilla(deployment="deployment.toml") as fleet:
         options = OpenOptions(startup_timeout=900, lifetime=600)
-        async with fleet.environment("hello-web", options) as env:
+        async with fleet.environment(task.environment(), options) as env:
             page = await env.agent.exec(["curl", "-fsS", "http://web/"], timeout=30)
             print(page.stdout.decode().strip())
 
@@ -102,16 +113,15 @@ python run_hello.py
 
 What happens:
 
-1. **Preparation.** Flotilla builds `main` from the Dockerfile and pushes it to `[build].target`. `nginx:1.27-alpine` is used as is when its registry is listed in `[build].pullable_registries`, and is otherwise copied to `[build].target` first; `[build].image_replacements` can point it at an internal mirror instead. Flotilla then publishes `site/` to shared storage once; published task files are content-addressed and kept for reuse. Docker's build cache makes later runs faster; Flotilla keeps no image cache of its own.
-2. **Startup.** It creates one sandbox per service, applies the network policy, writes `/etc/hosts` entries so `web` resolves from `main`, starts `web`, waits for its healthcheck, then starts `main`.
-3. **Your code runs.** `env.agent` is the `main` service; `env.service("web")` selects the sidecar.
-4. **Cleanup.** Leaving `fleet.environment(...)` deletes both sandboxes and waits until the platform confirms deletion. Leaving `Flotilla(...)` deletes the client's anchor sandbox and records the result in `fleet.cleanup_report`.
+1. **Startup.** Flotilla creates one sandbox per service, applies the network policy, writes `/etc/hosts` entries so `web` resolves from `main`, starts `web`, waits for its healthcheck, then starts `main`.
+2. **Your code runs.** `env.agent` is the `main` service; `env.service("web")` selects the sidecar.
+3. **Cleanup.** Leaving `fleet.environment(...)` deletes both sandboxes and waits until the platform confirms deletion. Leaving `Flotilla(...)` deletes the client's anchor sandbox and records the result in `fleet.cleanup_report`.
 
-`startup_timeout` bounds steps 1 and 2. `lifetime` starts when the environment is ready; after it passes, the environment is released even if your code is still using it.
+`startup_timeout` bounds step 1. `lifetime` starts when the environment is ready; after it passes, the environment is released even if your code is still using it.
 
-The first run usually spends most of its time on building and pushing images. Run the script a second time to see the startup time without the build.
+Opening builds nothing and uploads no task files, so every run takes only the sandbox startup time.
 
-## 4. Commands, files, and processes
+## 5. Commands, files, and processes
 
 ```python
 # argv, no shell
@@ -133,7 +143,7 @@ await worker.stop()                    # returns once termination is confirmed
 
 `exec` returns `ExecResult(exit_code, stdout, stderr, timed_out)` with bytes output. A nonzero exit code is a normal result, not an exception.
 
-## 5. Options
+## 6. Options
 
 ```python
 OpenOptions(
@@ -143,18 +153,17 @@ OpenOptions(
     resources={"main": {"cpu": "2", "memory": "4Gi"}},
     exec_env={"main": {"API_BASE": "http://proxy"}}, # added to every command in main
     runtime_params={"DB_PASSWORD": "example"},       # values for variables .env leaves undefined
-    force_build=True,                                # build from the Dockerfile even if an image is set
 )
 ```
 
 Deployment-wide defaults for resources, timeouts, and limits live in `deployment.toml`; see the [configuration reference](Configuration.md).
 
-## 6. Long-lived handles
+## 7. Long-lived handles
 
 If an environment must outlive a `with` block, open it and release it yourself:
 
 ```python
-env = await fleet.open_task("hello-web", OpenOptions(startup_timeout=900, lifetime=600))
+env = await fleet.open(task.environment(), OpenOptions(startup_timeout=900, lifetime=600))
 try:
     ...
 finally:

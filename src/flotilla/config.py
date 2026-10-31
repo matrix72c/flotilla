@@ -87,7 +87,7 @@ class OpenSandbox(BackendSettings):
 
 
 class Build(_Model):
-    """Dataset builder config `[build]`, used by the automatic preparation build subprocess."""
+    """Dataset builder config `[build]`, used by `flotilla prepare`."""
 
     pullable_registries: tuple[str, ...] = ()
     mirror_images: bool = False
@@ -190,6 +190,7 @@ class Limits(_Model):
 
 
 class Runtime(_Model):
+    startup_timeout_s: PositiveFloat = 1800.0  # default open budget: start, admission and startup
     check_timeout_s: PositiveFloat = 60.0
     run_timeout_s: PositiveFloat = 21600.0
     exec_default_timeout_s: PositiveFloat = 300.0
@@ -274,19 +275,6 @@ class ResourceDefaults(_Model):
         }
 
 
-class Preparation(_Model):
-    """Automatic preparation for each open; reuse is owned by Docker/BuildKit."""
-
-    timeout_s: PositiveFloat = 3600
-    concurrency: PositiveInt = 4
-    docker_command: tuple[str, ...] = ("docker",)
-
-    @field_validator("docker_command")
-    @classmethod
-    def _command(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        return _argv(value)
-
-
 class Prepare(_Model):
     """Offline `flotilla prepare`: image builds/derivations and task-file publication."""
 
@@ -311,7 +299,6 @@ class FlotillaConfig(_Model):
     backends: dict[str, dict[str, Any]] = {}  # third-party backend tables, validated by the selected backend
     storage: Storage
     build: Build = Build()
-    preparation: Preparation = Preparation()
     prepare: Prepare = Prepare()
     share: Share
     network: Network = Network()
@@ -327,6 +314,16 @@ class FlotillaConfig(_Model):
 
     #: Config file directory (set by `load`) for resolving relative paths; not part of the TOML.
     base_dir: Path | None = Field(default=None, exclude=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _removed(cls, data: Any) -> Any:
+        if isinstance(data, Mapping) and "preparation" in data:
+            raise ValueError(
+                "[preparation] was removed: open no longer builds images. Move docker_command/concurrency to "
+                "[prepare] (used by `flotilla prepare`) and timeout_s to runtime.startup_timeout_s"
+            )
+        return data
 
     @model_validator(mode="after")
     def _local(self) -> FlotillaConfig:

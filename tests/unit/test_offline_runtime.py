@@ -1,4 +1,4 @@
-"""Offline policy survives preparation, caller overrides, and service wiring."""
+"""Offline policy survives preparation, caller overrides, and service wiring at open."""
 
 import json
 from pathlib import Path
@@ -8,6 +8,7 @@ import pytest
 from flotilla import Flotilla, OpenOptions
 from flotilla.config import FlotillaConfig
 from flotilla.platform.base import FlotillaError
+from flotilla.testing.build import prepared_environment
 from flotilla.testing.platform import FakePlatform, SharedTree
 from flotilla.testing.runtime import deployment as deployment
 
@@ -42,7 +43,7 @@ async def test_no_network_keeps_peers_and_none_keeps_no_peers(
     )
     async with (
         Flotilla(deployment=cfg) as fleet,
-        fleet.environment(source, OpenOptions(disable_internet=mode == "option")) as env,
+        fleet.environment(prepared_environment(source, cfg), OpenOptions(disable_internet=mode == "option")) as env,
     ):
         services = {s.name: s.instance_id for s in (await env.info()).services}
         assert all(platform.spec_of(iid).external.mode == "none" for iid in services.values())
@@ -73,5 +74,5 @@ async def test_unknown_implicit_egress_rejects_each_offline_entrypoint(
     (source / "environment/docker-compose.yaml").write_text(compose)
     async with Flotilla(deployment=cfg) as fleet:
         with pytest.raises((ValueError, FlotillaError), match="cluster DNS"):
-            await fleet.open_task(source, OpenOptions(disable_internet=mode == "option"))
+            await fleet.open(prepared_environment(source, cfg), OpenOptions(disable_internet=mode == "option"))
         assert all(platform.spec_of(i.iid).labels.get("flotilla/role") == "anchor" for i in platform.instances())

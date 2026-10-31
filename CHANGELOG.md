@@ -6,6 +6,7 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Added
 
+- `flotilla prepare`: builds images and publishes task files once per task, offline, and writes a jsonl with one row per task (`load_prepared`, `PreparedTask`, `PreparedEnvironment`). Rows carry filter attributes and the digest-pinned main and separate verifier environments; filtering a dataset is filtering lines. Interrupted runs resume, `--force` rebuilds, and each dataset's images go to `<build.target>/<dataset>`. Task files are published flat under `tasks/<dataset>/<task>/<role>`.
 - Pluggable sandbox backends. A package registers a `flotilla.backends.Backend` subclass in the `flotilla.backends` entry-point group; a deployment selects it with `backend = "<name>"` and configures it in `[backends.<name>]`. The built-in OpenSandbox backend keeps its `[opensandbox]` table, and existing configurations and capability-report fingerprints are unchanged. See [Writing a backend](docs/Writing_a_Backend.md).
 - Opt-in internal lifecycle support for Compose read-only root filesystems and native tmpfs, with independent behavioral probes, effective-configuration verification, private framework scratch mounts, and strict upstream-compatible request defaults.
 - Compose `shm_size` on the internal filesystem dialect, sent per instance as the `sandbox-system.io/shm-size` extension, sharing the tmpfs memory budget, gated by the new `probe_shm_size` measurement, and verified per instance against the size the platform echoes before startup. Upstream OpenSandbox has no equivalent setting and rejects such tasks.
@@ -18,6 +19,9 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Changed
 
+- **Breaking:** opening no longer prepares anything. `fleet.open(prepared)` / `fleet.environment(prepared)` take a `PreparedEnvironment` from a prepared row and run no Docker, builds, or uploads; `open_task`, `open_environment`, `inspect`, `inspect_environment`, `EnvironmentDefinition`, `EnvironmentInspection`, `OpenOptions.force_build`, `PreparationResidual` and `CleanupReport.preparation_residuals` are removed. Use `fleet.reservation(prepared)` for admission budgets and `flotilla inspect` for Docker-free checks.
+- **Breaking:** `[preparation]` is removed and rejected with a migration message: `docker_command` and `concurrency` move to `[prepare]`, and `timeout_s` becomes `runtime.startup_timeout_s` (default 1800 s), the default open budget.
+- **Breaking:** the Harbor adapter takes `--ek prepared=<jsonl>` and opens the row's environment for the environment directory Harbor gives it; `force_build` is rejected.
 - `flotilla probe`, `gc`, and `share` construct their platform through the same factory as the runtime, so `opensandbox.privileged_extensions` now also applies to privileged instances these commands create.
 - tmpfs now requires native support; the previous empty-directory approximation is removed without fallback. Private preparation manifests use schema 5 and must be regenerated.
 

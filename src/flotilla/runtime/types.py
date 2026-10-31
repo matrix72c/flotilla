@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any
 
 from flotilla.core.reaper import CleanupRecord
 from flotilla.prepared import PreparedEnvironment
@@ -68,13 +66,6 @@ class EnvironmentInfo:
 
 
 @dataclass(frozen=True)
-class PreparationResidual:
-    kind: str
-    identifier: str
-    reason: str
-
-
-@dataclass(frozen=True)
 class CleanupReport:
     launch_id: str
     cleaned: int
@@ -82,33 +73,16 @@ class CleanupReport:
     launch_directories: tuple[str, ...] = ()
     anchor_instances: tuple[str, ...] = ()
     uncertain: bool = False
-    preparation_residuals: tuple[PreparationResidual, ...] = ()
 
     @property
     def clean(self) -> bool:
-        return not (
-            self.remaining
-            or self.launch_directories
-            or self.anchor_instances
-            or self.uncertain
-            or self.preparation_residuals
-        )
+        return not (self.remaining or self.launch_directories or self.anchor_instances or self.uncertain)
 
 
 class CleanupError(RuntimeError):
     def __init__(self, report: CleanupReport) -> None:
         self.report = report
         super().__init__(f"launch {report.launch_id}: cleanup incomplete; inspect .report")
-
-
-@dataclass(frozen=True)
-class EnvironmentDefinition:
-    """An effective Harbor environment, selected by its host framework."""
-
-    task_root: Path
-    directory: Path
-    name: str
-    config: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -120,7 +94,6 @@ class OpenOptions:
     exec_env: dict[str, dict[str, str]] = field(default_factory=dict, repr=False)
     resources: dict[str, dict[str, str]] = field(default_factory=dict)
     disable_internet: bool = False
-    force_build: bool = False
 
     def __post_init__(self) -> None:
         for value in (self.startup_timeout, self.lifetime):
@@ -128,18 +101,6 @@ class OpenOptions:
                 raise ValueError("timeouts must be finite and positive")
         if self.request_id == "":
             raise ValueError("request_id must be nonempty")
-
-
-@dataclass(frozen=True)
-class EnvironmentInspection:
-    definition: EnvironmentDefinition
-    status: str
-    findings: tuple[dict[str, str], ...]
-    resources: dict[str, dict[str, str]]
-
-    @property
-    def reservation(self) -> ResourceReservation:
-        return ResourceReservation(self.resources, copies=ENVIRONMENT_RESERVATION_COPIES)
 
 
 # One active generation plus one reserved generation for retries/deferred deletion.

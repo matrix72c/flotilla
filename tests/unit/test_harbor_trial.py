@@ -12,12 +12,11 @@ import toml  # type: ignore[import-untyped]
 from harbor.models.trial.config import TrialConfig
 from harbor.trial.trial import Trial
 
-from flotilla.build.driver import build_task
 from flotilla.config import FlotillaConfig
 from flotilla.core import labels
 from flotilla.integrations.harbor_source import task_environments
 from flotilla.platform.base import ErrorCategory, FlotillaError, InstanceSpec
-from flotilla.testing.build import _ctx
+from flotilla.testing.build import prepared_task, write_prepared
 from flotilla.testing.harbor_local import attach_local_files
 from flotilla.testing.platform import FakePlatform, SharedTree
 from flotilla.testing.runtime import deployment as deployment
@@ -66,13 +65,10 @@ async def test_native_harbor_trial(
         )
     (source / "task.toml").write_text(task_config)
     (source / "tests/test.sh").write_text('#!/bin/sh\nprintf "1\\n" > "$FIXTURE_REWARD_PATH"\n')
-    output = tmp_path / "build"
     definitions = task_environments(source)
     assert len(definitions) == (1 if mode == "shared" else 2)
-    for definition in definitions:
-        outcome = build_task(definition, output, _ctx())
-        assert outcome.status == "built", outcome.reason
-        assert definition.environment_config is not None
+    assert all(definition.environment_config is not None for definition in definitions)
+    prepared = write_prepared(tmp_path / "prepared.jsonl", [prepared_task(source, environments=task_environments)])
 
     # Seed the separate verifier's prebuilt /tests, which Harbor intentionally
     # does not upload. Main/shared receives tests through real tar transfers.
@@ -119,7 +115,7 @@ async def test_native_harbor_trial(
             "agent": {"name": "nop"},
             "environment": {
                 "import_path": "flotilla.integrations.harbor:FlotillaEnvironment",
-                "kwargs": {"deployment": str(deployment_file)},
+                "kwargs": {"deployment": str(deployment_file), "prepared": str(prepared)},
             },
         }
     )

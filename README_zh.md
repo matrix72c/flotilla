@@ -50,15 +50,24 @@ services:
       retries: 15
 ```
 
+先准备一次：解析或构建镜像、发布任务文件，每个任务写出一行：
+
+```sh
+flotilla prepare task --deployment deployment.toml --out prepared.jsonl
+```
+
+然后打开这一行：
+
 ```python
 import asyncio
 
-from flotilla import Flotilla, OpenOptions
+from flotilla import Flotilla, OpenOptions, load_prepared
 
 
 async def main():
+    [task] = load_prepared("prepared.jsonl")
     async with Flotilla(deployment="deployment.toml") as fleet:
-        async with fleet.environment("task", OpenOptions(startup_timeout=600, lifetime=300)) as env:
+        async with fleet.environment(task.environment(), OpenOptions(startup_timeout=600, lifetime=300)) as env:
             pong = await env.service("cache").exec(["redis-cli", "ping"], timeout=30)
             print("cache:", pong.stdout.decode().strip())
             result = await env.agent.shell("printf 'PING\\r\\n' | nc -w 2 cache 6379", timeout=30)
@@ -70,7 +79,7 @@ async def main():
 asyncio.run(main())
 ```
 
-Flotilla 会解析或构建镜像，等 `cache` 通过健康检查后再启动 `main`，让 `main` 能按服务名访问 `cache`，并在退出时确认两个沙盒及其共享目录都已删除。Harbor 任务也通过 [Harbor 适配器](docs/Harbor_Quick_Start.md)以同样方式运行。
+打开一行只会创建沙盒：镜像已由 `flotilla prepare` 按 digest 钉死，任务文件也已发布。Flotilla 会等 `cache` 通过健康检查后再启动 `main`，让 `main` 能按服务名访问 `cache`，并在退出时确认两个沙盒及其共享目录都已删除。Harbor 任务也通过 [Harbor 适配器](docs/Harbor_Quick_Start.md)以同样方式运行。
 
 ## 特性
 

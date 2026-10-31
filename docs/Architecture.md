@@ -11,7 +11,8 @@
 | Launch | One running Flotilla client process; every resource it creates carries its launch ID |
 | Anchor | A small, renewable sandbox per launch that mounts the shared-storage root and performs file operations on it |
 | Share release | An immutable directory of helper binaries (BusyBox) mounted into every sandbox at `/.flotilla` |
-| Task publication | An immutable, content-addressed copy of a task's files on shared storage |
+| Prepared row | One line of the jsonl `flotilla prepare` writes: a task's digest-pinned environments and published files |
+| Task publication | A task environment's files on shared storage, at `tasks/<dataset>/<task>/<role>` |
 | Capability report | `capabilities.json`, written by `flotilla probe`: what the deployment supports, each item `probed` or `declared` |
 | Declaration | `declared.json`: operator assertions for properties the probe cannot measure |
 | Security gap / waiver | A security capability the deployment lacks; startup refuses unless it is listed in `security.accept_insecure` |
@@ -22,12 +23,11 @@
 
 ```mermaid
 flowchart LR
-    API[Public client] --> Prep[Preparation owner]
-    Prep --> Build[Compose and build subprocess]
-    Build --> IPC[Validated manifest]
-    Prep --> Publish[Immutable file publication]
+    Prepare[flotilla prepare] --> Build[Compose and build]
+    Build --> Rows[Prepared rows jsonl]
+    Prepare --> Publish[Task file publication]
+    Rows --> API[Public client]
     API --> Manager[Runtime manager]
-    IPC --> Manager
     Manager --> Core[Lifecycle core]
     Core --> Platform[Platform protocol]
     Platform --> Backend[OpenSandbox current / legacy]
@@ -35,9 +35,9 @@ flowchart LR
     Harbor[Harbor adapter] --> API
 ```
 
-`compose` validates source semantics into a project. `build` resolves images and exports files without platform access. Preparation owns the subprocess, temporary directory, Docker-container journal, and publication staging. The IPC manifest is validated at the subprocess boundary; the runtime prepares one private parsed result and digest from it. Project, manifest, and runtime plan serve distinct boundaries.
+`compose` validates source semantics into a project. `build` resolves images and exports files without platform access. `prepare` runs offline: it builds every task once, publishes task files with staging and an atomic rename, journals Docker export containers, and appends one validated row per task. The runtime opens rows only; it never builds, scans, or uploads task files. Project, manifest, and runtime plan serve distinct boundaries.
 
-`runtime` owns admission, environment handles, monitoring, and cleanup. Each client has one maintenance loop in a separate thread. Diagnostic callbacks use a bounded dispatcher thread; local file scans and reads use owned thread work that must settle before their directory is removed. Preparation capacity is retained if cleanup cannot be confirmed.
+`runtime` owns admission, environment handles, monitoring, and cleanup. Each client has one maintenance loop in a separate thread. Diagnostic callbacks use a bounded dispatcher thread; local file reads use owned thread work that must settle before their directory is removed.
 
 `backends` selects the platform: the built-in OpenSandbox backend or a plugin from the `flotilla.backends` entry-point group, and every caller (runtime, probe, GC, share) constructs it through `FlotillaConfig.build_platform`. See [Writing a backend](Writing_a_Backend.md).
 

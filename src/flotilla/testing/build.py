@@ -6,14 +6,20 @@ skips and error attribution.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 from flotilla.build.builder import BuildRequest
-from flotilla.build.driver import BuildContext
+from flotilla.build.driver import BuildContext, build_task
 from flotilla.build.images import BuildSettings
+from flotilla.compose.task import HarborTask
+from flotilla.config import FlotillaConfig
+from flotilla.manifest import Manifest
 from flotilla.platform.base import Capabilities
+from flotilla.prepare.inspect import main_only
+from flotilla.prepared import ROLES, PreparedEnvironment, PreparedTask, dump_row
 
 DIGEST = "sha256:" + "ab" * 32
 DIGEST2 = "sha256:" + "cd" * 32
@@ -139,3 +145,38 @@ def _ctx(**kw: Any) -> BuildContext:
 
 # Public factory for downstream neutral environment contracts.
 build_context = _ctx
+
+
+def prepared_task(
+    path: Path,
+    cfg: FlotillaConfig | None = None,
+    *,
+    environments: Callable[[Path], Sequence[HarborTask]] = main_only,
+    **ctx: Any,
+) -> PreparedTask:
+    """Prepare a task directory into a row with the fakes above, as `flotilla prepare` would.
+
+    For fixtures without task files; ones with files go through `flotilla.prepare.prepare` to be published.
+    """
+    caps = cfg.platform_capabilities() if cfg is not None else _caps()
+    prepared: dict[str, PreparedEnvironment] = {}
+    with TemporaryDirectory(prefix="flotilla-prepared-") as out:
+        for role, env in zip(ROLES, environments(path), strict=False):
+            outcome = build_task(env, Path(out) / role, _ctx(caps=caps, **ctx))
+            if outcome.manifest_path is None:
+                raise ValueError(f"environment preparation {outcome.status}: {outcome.reason}")
+            if outcome.needs_publish:
+                raise ValueError("fixture has task files; prepare it with flotilla.prepare.prepare")
+            prepared[role] = PreparedEnvironment(Manifest.load_json(outcome.manifest_path.read_bytes()))
+    resolved = path.resolve()
+    return PreparedTask(f"{resolved.parent.name}/{resolved.name}", str(resolved), prepared)
+
+
+def prepared_environment(path: Path, cfg: FlotillaConfig | None = None, **ctx: Any) -> PreparedEnvironment:
+    """The main environment of `prepared_task(path, cfg)`."""
+    return prepared_task(path, cfg, **ctx).environment()
+
+
+def write_prepared(out: Path, rows: Sequence[PreparedTask]) -> Path:
+    out.write_text("".join(dump_row(row) + "\n" for row in rows))
+    return out

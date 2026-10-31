@@ -148,7 +148,6 @@ forbidden_modules = [
   "flotilla.integrations",
   "flotilla.cli",
   "flotilla.runtime",
-  "flotilla.preparation",
   "flotilla.prepare",
   "flotilla.prepared",
   "flotilla.testing",
@@ -187,7 +186,6 @@ source_modules = [
   "flotilla.manifest",
   "flotilla.capabilities",
   "flotilla.config",
-  "flotilla.preparation",
   "flotilla.prepare",
   "flotilla.prepared",
 ]
@@ -203,6 +201,15 @@ name = "runtime does not import adapters"
 type = "forbidden"
 source_modules = ["flotilla.runtime"]
 forbidden_modules = ["flotilla.integrations", "flotilla.cli", "flotilla.probe", "flotilla.testing"]
+
+# Open consumes prepared rows: the runtime never builds, scans or prepares. (config reaches build settings
+# indirectly, so only direct imports are forbidden.)
+[[tool.importlinter.contracts]]
+name = "runtime does not build or prepare"
+type = "forbidden"
+source_modules = ["flotilla.runtime"]
+forbidden_modules = ["flotilla.build", "flotilla.prepare", "flotilla.scan"]
+allow_indirect_imports = true
 
 [[tool.mypy.overrides]]
 module = ["harbor.*"]

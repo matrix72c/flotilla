@@ -37,9 +37,8 @@ The digest placeholder must be replaced before use. Review every required item a
 ## Preparation and budgets
 
 ```toml
-[preparation]
+[prepare]
 concurrency = 4
-timeout_s = 3600
 # docker_command = ["sudo", "-n", "docker"]
 
 [build]
@@ -47,7 +46,7 @@ pullable_registries = ["registry.example.com"]
 target = "registry.example.com/team/tasks"
 ```
 
-`preparation.concurrency` bounds local preparation per client before temporary directories or subprocesses are created. Unconfirmed cleanup retains capacity. Separately set `limits.trial_concurrency`, `instance_budget`, create/exec rates, and timeouts according to measured platform quotas. Startup reserves replacement capacity; the anchor also consumes an instance.
+`flotilla prepare` reads `[prepare]` and `[build]`: `prepare.concurrency` bounds how many tasks it builds and publishes at once, on the machine that has Docker and registry access. Opening prepared rows reads neither and needs no Docker. Separately set `limits.trial_concurrency`, `instance_budget`, create/exec rates, and timeouts according to measured platform quotas. Startup reserves replacement capacity; the anchor also consumes an instance.
 
 ## Maintain
 
