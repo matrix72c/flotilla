@@ -205,6 +205,10 @@ class Timeouts(_Model):
     create: PositiveFloat = 600.0
     # One create request. A response lost in transit is recovered by listing labels, which only starts after this.
     create_request: PositiveFloat = 60.0
+    # One sandbox staying pending; it is deleted and created again once. Some platforms never start a few
+    # sandboxes of a burst, and waiting would hold their quota for the whole `create` budget. The default is
+    # off when it is not below `create`.
+    pending: PositiveFloat = 300.0
     address: PositiveFloat = 30.0
     wire: PositiveFloat = 60.0
     hosts: PositiveFloat = 30.0
@@ -218,7 +222,12 @@ class Timeouts(_Model):
             raise ValueError(
                 "timeouts.create_request must be below timeouts.create, or lost responses are never recovered"
             )
+        if "pending" in self.model_fields_set and self.pending >= self.create:
+            raise ValueError("timeouts.pending must be below timeouts.create, or a stuck sandbox is never replaced")
         return self
+
+    def pending_limit(self) -> float | None:
+        return self.pending if self.pending < self.create else None
 
 
 class Process(_Model):
@@ -509,6 +518,7 @@ class FlotillaConfig(_Model):
             external=self.network.policy(),
             ttl_s=self.reaper.trial_ttl,
             create_timeout_s=t.create,
+            pending_timeout_s=t.pending_limit(),
             address_timeout_s=t.address,
             wire_timeout_s=t.wire,
             hosts_timeout_s=t.hosts,

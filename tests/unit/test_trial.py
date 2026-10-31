@@ -407,6 +407,45 @@ async def test_unit_terminal_before_running_is_recreated_once(
 
 
 @pytest.mark.asyncio
+async def test_unit_stuck_pending_is_replaced_once(
+    platform: FakePlatform, clock: ManualClock, anchor: Anchor, reaper: Reaper, shell: Shell
+) -> None:
+    # The platform never starts the first db sandbox. It is replaced after the pending limit, long before the
+    # create stage would expire.
+    _seed_hosts(platform)
+    stuck: list[str] = []
+
+    def stall_first_db(iid: str, spec: InstanceSpec) -> None:
+        if spec.labels.get(labels.UNIT) == "db" and not stuck:
+            platform.set_status(iid, InstanceStatus.PENDING)
+            stuck.append(iid)
+
+    platform.on_create = stall_first_db
+    settings = replace(SETTINGS, pending_timeout_s=60.0)
+    began = clock.monotonic()
+    ready = await clock.run(_new_trial(platform, clock, anchor, reaper, _three(), settings).start())
+    assert ready.recreated == {"db"} and ready.handles["db"].iid != stuck[0]
+    assert 60.0 <= ready.timings["create"] < settings.create_timeout_s
+    assert clock.monotonic() - began < settings.create_timeout_s
+
+
+@pytest.mark.asyncio
+async def test_replacement_also_pending_fails_before_the_create_deadline(
+    platform: FakePlatform, clock: ManualClock, anchor: Anchor, reaper: Reaper, shell: Shell
+) -> None:
+    platform.create_status = InstanceStatus.PENDING  # never RUNNING
+    settings = replace(SETTINGS, pending_timeout_s=60.0)
+    began = clock.monotonic()
+    with pytest.raises(FlotillaError, match="still pending") as exc:
+        await clock.run(_new_trial(platform, clock, anchor, reaper, _three(), settings).start())
+    assert exc.value.stage == "create" and exc.value.retryable
+    assert clock.monotonic() - began < settings.create_timeout_s
+    reaper.release("t1")
+    await clock.run(reaper.close())
+    assert not [s for s in platform.instances() if s.labels.get(labels.ROLE) == labels.ROLE_UNIT]
+
+
+@pytest.mark.asyncio
 async def test_non_retryable_create_error_is_not_recreated(
     platform: FakePlatform, clock: ManualClock, anchor: Anchor, reaper: Reaper, shell: Shell
 ) -> None:

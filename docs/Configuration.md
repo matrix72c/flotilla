@@ -126,6 +126,7 @@ Per-stage startup deadlines. The whole startup is also bounded by `OpenOptions.s
 | `prepare` | `600` | Preparing trial directories on shared storage |
 | `create` | `600` | Creating all sandboxes |
 | `create_request` | `60` | One create request. When no response arrives in time (for example, the gateway drops it under load), the sandbox is looked up by its labels and adopted. Must be below `create` |
+| `pending` | `300` | One sandbox staying pending. It is deleted and created again once; if the replacement also stays pending, the open fails. Must be below `create` when set; the default is off when `create` is not above it |
 | `address` | `30` | Resolving sandbox addresses |
 | `wire` | `60` | Applying peer network links |
 | `hosts` | `30` | Writing `/etc/hosts` entries |
