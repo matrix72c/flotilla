@@ -87,7 +87,7 @@ The optional `probe_readonly_rootfs`, `probe_native_tmpfs`, and `probe_shm_size`
 | `renew_interval` | `30` | Anchor renewal interval |
 | `grace` | `90` | After this long without a successful renewal, the launch stops admitting work. Must be at least `2 * renew_interval` and less than `anchor_ttl` |
 | `gc_window` | `180` | Minimum age before GC may collect another launch. Must exceed `grace + list_visibility_s` |
-| `trial_ttl` | `1800` | Platform TTL of each service sandbox; renewed while the environment is alive |
+| `trial_ttl` | `1800` | Platform TTL of each service sandbox; renewed while the environment is alive. Sandboxes are not renewed during startup, so each is created with at least the open's startup budget plus `renew_before_s` |
 | `renew_before_s` | `600` | Renew a service sandbox when this much TTL remains (capped at `trial_ttl / 2`) |
 | `renew_margin_s` | `120` | Safety margin for renewal (capped at half of `renew_before_s`) |
 

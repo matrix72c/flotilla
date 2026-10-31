@@ -524,3 +524,25 @@ async def test_client_start_downloads_only_the_release_manifest(
     async with Flotilla(deployment=cfg) as fleet:
         await fleet.start()
     assert len(downloads) == 1 and downloads[0].endswith("/RELEASE.json")
+
+
+@pytest.mark.asyncio
+async def test_instance_ttl_outlives_the_startup_budget(
+    deployment: tuple[FlotillaConfig, FakePlatform, SharedTree],
+) -> None:
+    """Instances are renewed only once ready, so their creation TTL must cover the whole startup budget."""
+    from flotilla import OpenOptions
+
+    cfg, platform, _ = deployment
+    renew_before = cfg.reaper.renew_before_s
+    async with Flotilla(deployment=cfg) as fleet:
+        long = await fleet.open(task(), OpenOptions(request_id="long", startup_timeout=4 * cfg.reaper.trial_ttl))
+        short = await fleet.open(task(), OpenOptions(request_id="short", startup_timeout=1))
+        for env, expected in (
+            (long, 4 * cfg.reaper.trial_ttl + renew_before),
+            (short, cfg.reaper.trial_ttl),
+        ):
+            info = await env.info()
+            assert all(platform.spec_of(s.instance_id).timeout_seconds == expected for s in info.services)
+            await env.release()
+        assert (await fleet.drain(2)).clean
