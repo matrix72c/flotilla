@@ -51,7 +51,7 @@ Top-level networks support `internal: true`. `driver` must be `bridge`, `ipam` m
 | `image` | Supported |
 | `build` | `context`, `dockerfile`, and `args` only; paths must stay inside the task directory. `target`, `ssh`, `cache_from`, `secrets`, `platforms`, and others are rejected |
 | `command`, `entrypoint` | Supported (string form is split like a shell word list, without a shell). Docker semantics: `entrypoint` drops the image `CMD` |
-| `environment` | Supported. A key without a value (inherit from host) is rejected: there is no host environment |
+| `environment` | Supported, including names Docker accepts that are not shell identifiers (`discovery.type`). A key without a value (inherit from host) is rejected: there is no host environment |
 | `env_file` | A path or list of paths inside `environment/`, strict `KEY=VALUE` lines. The long form (`path`/`required`) and escaped values are rejected. `environment` entries win |
 | `working_dir` | Supported |
 | `user` | Supported; resolved to numeric uid/gid from the image |

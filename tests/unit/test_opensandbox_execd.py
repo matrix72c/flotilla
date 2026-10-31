@@ -10,6 +10,7 @@ docs/backends/opensandbox.md.
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import subprocess
 import sys
@@ -179,15 +180,24 @@ def test_execd_settings_rejects_bad_values(bad: dict[str, str]) -> None:
         ExecdSettings(**bad)  # type: ignore[arg-type]
 
 
-@pytest.mark.parametrize("key", ["1A", "A-B", "A B", "A=B", "", "A$B", 'A"'])
-def test_check_env_keys_rejects_unquotable(key: str) -> None:
+@pytest.mark.parametrize("key", ["A=B", "", "A\0B", "-u", "FLOTILLA_ENV_0"])
+def test_check_env_keys_rejects_names_docker_or_env_cannot_take(key: str) -> None:
     with pytest.raises(FlotillaError) as exc:
         check_env_keys({key: "v"})
     assert exc.value.category is ErrorCategory.INVALID
 
 
-def test_check_env_keys_accepts_identifiers() -> None:
-    check_env_keys({"PATH": "/bin", "_x1": "", "LC_ALL": "C"})
+def test_check_env_keys_accepts_docker_style_names() -> None:
+    check_env_keys({"PATH": "/bin", "_x1": "", "LC_ALL": "C", "discovery.type": "single-node", "APT::Get::X": "1"})
+    check_env_keys({"1A": "", "A-B": "", "A B": "", "A$B": "", 'A"': ""})
+
+
+def test_names_sh_cannot_reference_travel_under_aliases() -> None:
+    body = command_body(
+        _proc(("true",), env={"K": "1", "discovery.type": "single-node"}), background=False, settings=CURRENT
+    )
+    assert body["envs"] == {"K": "1", "FLOTILLA_ENV_0": "single-node"}
+    assert "single-node" not in json.dumps(body["argv"])  # values only in envs
 
 
 # ───────────────────────────── Pure functions: multipart encoding ─────────────────────────────
@@ -255,7 +265,7 @@ async def test_exec_bad_env_key_sends_nothing(clock: ManualClock) -> None:
         return httpx.Response(200, content=_sse('{"type":"execution_complete"}'))
 
     with pytest.raises(FlotillaError) as exc:
-        await clock.run(_execd(handler, clock).exec(_proc(("true",), env={"BAD-KEY": "v"})))
+        await clock.run(_execd(handler, clock).exec(_proc(("true",), env={"BAD=KEY": "v"})))
     assert calls == 0 and exc.value.category is ErrorCategory.INVALID
 
 
@@ -435,27 +445,44 @@ def test_legacy_command_reproduces_argv_and_env_in_a_real_shell(shell: str, tmp_
     verify against a real shell that one round of word splitting yields the original argv, and that the
     process environment is exactly `proc.env`.
 
-    The wrapper is a script forwarding sh / env to the system tools instead of busybox.
+    The wrapper is a script forwarding sh / env / awk / id to the system tools instead of busybox.
     """
     if not Path(shell).exists():
         pytest.skip(f"no {shell}")
     bb = tmp_path / "bb"
     bb.write_text(
-        '#!/bin/sh\napp=$1; shift\ncase $app in sh) exec /bin/sh "$@";; env) exec /usr/bin/env "$@";; esac\nexit 99\n'
+        '#!/bin/sh\napp=$1; shift\ncase $app in sh) exec /bin/sh "$@";; env) exec /usr/bin/env "$@";;\n'
+        '  awk) exec /usr/bin/awk "$@";; id) exec /usr/bin/id "$@";; esac\nexit 99\n'
     )
     bb.chmod(0o755)
     settings = ExecdSettings(protocol="legacy", wrapper=str(bb))
-    env = {"K": "s3cr'et $(id) `id` value", "PATH": "/usr/bin:/bin", "HOME": "/explicit"}
+    for env in (
+        {"K": "s3cr'et $(id) `id` value", "PATH": "/usr/bin:/bin", "HOME": "/explicit"},
+        {"K": "s3cr'et", "discovery.type": "single-node $(id)", "APT::Get::X": "true", "a b'c": "v", "PATH": "/bin"},
+    ):
 
-    def run(argv: tuple[str, ...]) -> list[str]:
-        body = command_body(_proc(argv, env=env), background=False, settings=settings)
-        assert "canary" not in body["command"] and "s3cr" not in body["command"]  # values only in envs
-        noisy = {"PATH": "/usr/bin:/bin", "IFS": "x", "NOISE": "1", **body["envs"]}
-        out = subprocess.run([shell, "-c", body["command"]], env=noisy, capture_output=True, check=True).stdout
-        return out.decode().split("\0")[:-1]
+        def run(argv: tuple[str, ...], env: dict[str, str] = env) -> list[str]:
+            body = command_body(_proc(argv, env=env), background=False, settings=settings)
+            assert "canary" not in body["command"] and "s3cr" not in body["command"]  # values only in envs
+            noisy = {"PATH": "/usr/bin:/bin", "IFS": "x", "NOISE": "1", **body["envs"]}
+            out = subprocess.run([shell, "-c", body["command"]], env=noisy, capture_output=True, check=True).stdout
+            return out.decode().split("\0")[:-1]
 
-    assert run(("/usr/bin/printf", "%s\\0", *HOSTILE_ARGS)) == list(HOSTILE_ARGS)
-    assert sorted(run(("/usr/bin/env", "-0"))) == sorted(f"{k}={v}" for k, v in env.items())
+        assert run(("/usr/bin/printf", "%s\\0", *HOSTILE_ARGS)) == list(HOSTILE_ARGS)
+        expected = [f"{k}={v}" for k, v in env.items()]
+        if "HOME" not in env:
+            expected.append(f"HOME={_passwd_home()}")
+        assert sorted(run(("/usr/bin/env", "-0"))) == sorted(expected)
+
+
+def _passwd_home() -> str:
+    """HOME the wrapper resolves for the current uid when the request sets none."""
+    import pwd
+
+    try:
+        return pwd.getpwuid(os.getuid()).pw_dir or "/"
+    except KeyError:
+        return "/"
 
 
 def test_legacy_and_current_bodies_differ_only_in_command_field() -> None:
