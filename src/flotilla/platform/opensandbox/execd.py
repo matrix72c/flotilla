@@ -30,6 +30,9 @@ from flotilla.platform.opensandbox.http import Http
 
 BUSYBOX = "/.flotilla/bin/busybox"  # static busybox on the share
 _ENV_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")  # variable names referenceable as "$K" in sh
+#: Other names (Docker allows `discovery.type`) travel in `envs` under this prefix plus an index; the wrapper
+#: restores the original name for `env -i`, which clears the alias.
+_ENV_ALIAS = "FLOTILLA_ENV_"
 _CHOWN_TIMEOUT_S = 30.0  # chown after legacy upload
 #: The wrapper path is written verbatim into `sh -c` scripts: only characters needing no quoting, so spaces, `$`,
 #: or quotes in the path are never interpreted by the shell.
@@ -151,36 +154,49 @@ def _error_exit_code(event: Mapping[str, Any]) -> int | None:
 
 
 def check_env_keys(env: Mapping[str, str]) -> None:
-    """Names must be referenceable as `"$K"` in sh (`[A-Za-z_][A-Za-z0-9_]*`): the wrapper only writes names."""
-    bad = sorted(key for key in env if not _ENV_KEY.fullmatch(key))
+    """Accept the names Docker accepts: non-empty, without `=` or NUL. A leading `-` would be read as an `env`
+    option, and the alias prefix is reserved."""
+    bad = sorted(key for key in env if not key or "=" in key or "\0" in key or key.startswith(("-", _ENV_ALIAS)))
     if bad:
         raise FlotillaError(
-            f"invalid environment variable names (must match [A-Za-z_][A-Za-z0-9_]*): {bad!r}",
+            f"invalid environment variable names (empty, containing '=' or NUL, or starting with '-' or {_ENV_ALIAS}): "
+            f"{bad!r}",
             stage="run",
             category=ErrorCategory.INVALID,
             retryable=False,
         )
 
 
+def env_aliases(env_keys: Sequence[str]) -> dict[str, str]:
+    """Request `envs` name for each key: itself if sh can reference it, else `FLOTILLA_ENV_<n>` (sorted order)."""
+    others = sorted(key for key in env_keys if not _ENV_KEY.fullmatch(key))
+    return {key: key for key in env_keys if _ENV_KEY.fullmatch(key)} | {
+        key: f"{_ENV_ALIAS}{n}" for n, key in enumerate(others)
+    }
+
+
 def wrap_argv(argv: Sequence[str], env_keys: Sequence[str], *, wrapper: str) -> list[str]:
     """Wrap with `env -i` to clear the inherited env, bring back only `env_keys` by name, then exec the argv.
 
     Values reach sh's env via the request `envs`; sh expands `K="$K"` for `env -i`; `$0` is `flotilla`, `"$@"` the
-    original argv. The script holds only validated names (`check_env_keys`), never values. Keys are sorted
-    (deterministic). `wrapper` is the busybox path.
+    original argv. A name sh cannot reference is quoted and reads its value from its alias (`env_aliases`). The
+    script holds only names, never values. Keys are sorted (deterministic). `wrapper` is the busybox path.
     """
-    assigns = "".join(f'{key}="${key}" ' for key in sorted(env_keys))
+    aliases = sorted(env_aliases(env_keys).items())
+    assigns = "".join(f'{shlex.quote(key)}="${alias}" ' for key, alias in aliases)
     command = f'exec {wrapper} env -i {assigns}"$@"'
     if "HOME" not in env_keys:
         # Resolve inside the cleared environment, after execd applies uid/gid.
         # Never reuse the daemon's HOME or load a login shell. Read passwd on
         # each execution so user changes within a running sandbox take effect.
+        # The intermediate shell still reads values by alias; only the final `env -i` restores the names.
+        carried = "".join(f'{alias}="${alias}" ' for _, alias in aliases)
         defaults = (
             'HOME="$("$0" awk -F: -v uid="$("$0" id -u)" '
             "'$3 == uid {print $6; exit}' /etc/passwd 2>/dev/null)\"; "
             f'exec "$0" env -i HOME="${{HOME:-/}}" {assigns}"$@"'
         )
-        command = f'exec {wrapper} env -i {assigns}{wrapper} sh -c {shlex.quote(defaults)} {wrapper} "$@"'
+        command = f'exec {wrapper} env -i {carried}{wrapper} sh -c {shlex.quote(defaults)} {wrapper} "$@"'
     return [wrapper, "sh", "-c", command, "flotilla", *argv]
 
 
@@ -456,7 +472,8 @@ def command_body(proc: ProcessSpec, *, background: bool, settings: ExecdSettings
     else:
         body["argv"] = argv
     if proc.env:
-        body["envs"] = dict(proc.env)
+        aliases = env_aliases(list(proc.env))
+        body["envs"] = {aliases[key]: value for key, value in proc.env.items()}
     if proc.timeout_s is not None:
         body["timeout"] = math.ceil(proc.timeout_s * 1000)
     return body
