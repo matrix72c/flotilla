@@ -49,6 +49,12 @@ def _build_parser() -> argparse.ArgumentParser:
     g.add_argument(
         "--launch", help="collect only this launch, skipping the two-observation wait (operator confirms it has exited)"
     )
+    g.add_argument(
+        "--staging-age",
+        type=float,
+        default=24 * 3600,
+        help="remove tasks/.staging, tasks/.trash and share/staging entries older than this many seconds",
+    )
     p = sub.add_parser("probe", help="run contract tests against a deployment and write a capability report")
     p.add_argument("--deployment", required=True, type=Path, help="deployment configuration (TOML)")
     p.add_argument(
@@ -222,17 +228,28 @@ async def _gc(args: argparse.Namespace) -> int:
     cfg = FlotillaConfig.load(args.deployment)
     clock = SystemClock()
     platform = cfg.build_platform(clock=clock, caps=cfg.platform_capabilities())
-    anchor = Anchor(platform, clock, f"gc-{uuid.uuid4().hex[:12]}", cfg.anchor_settings())
+    temporary = Anchor(platform, clock, f"gc-{uuid.uuid4().hex[:12]}", cfg.anchor_settings())
+    anchor: Anchor | None = temporary
     try:
-        await anchor.start()
-        # `Gc.run_once` first lists `launches/`; if it is missing, `ls` exits non-zero and the round is abandoned.
-        await anchor.mkdir(LAUNCHES, stage="prepare")
+        try:
+            await temporary.start()
+            # `Gc.run_once` first lists `launches/`; if it is missing, `ls` exits non-zero and the round is abandoned.
+            await temporary.mkdir(LAUNCHES, stage="prepare")
+        except FlotillaError as exc:
+            # Without an anchor nothing on shared storage can be touched, but sandboxes can still be deleted by label.
+            print(f"anchor unavailable, collecting sandboxes only (directories are left): {exc}", file=sys.stderr)
+            await temporary.close()
+            anchor = None
         gc = Gc(platform, clock, anchor, Deleter(platform, clock), window_s=cfg.reaper.gc_window)
         if args.launch:
             try:
                 done = await gc.collect(args.launch)
             except FlotillaError as exc:
                 print(f"refusing to collect {args.launch}: {exc}", file=sys.stderr)
+                return 1
+            if anchor is None:
+                state = "sandboxes removed" if done else "sandboxes not fully removed"
+                print(f"{args.launch}: {state}; directory left")
                 return 1
             print(f"{args.launch}: {'fully removed' if done else 'not fully removed, retry next round'}")
             return 0 if done else 1
@@ -244,17 +261,26 @@ async def _gc(args: argparse.Namespace) -> int:
         print("second observation")
         second = await gc.run_once()
         _print_gc(second)
+        if anchor is None:
+            return 1  # directories were not collected
+        staging = await gc.collect_staging(args.staging_age)
+        print(f"  staging removed {list(staging.removed)}")
+        if staging.unrecognized:
+            print(f"  staging entries without a timestamp, not removed: {list(staging.unrecognized)}")
         return 1 if second.pending else 0
     finally:
-        await anchor.close()
+        if anchor is not None:
+            await anchor.close()
         await platform.aclose()
 
 
 def _print_gc(report: GcReport) -> None:
     print(
-        f"  alive {sorted(report.alive)}; candidates {sorted(report.candidates)}; "
+        f"  [{report.mode}] alive {sorted(report.alive)}; candidates {sorted(report.candidates)}; "
         f"removed {sorted(report.removed)}; pending {sorted(report.pending)}"
     )
+    if report.directories_skipped:
+        print(f"  sandboxes removed, directories left: {sorted(report.directories_skipped)}")
 
 
 async def _share(args: argparse.Namespace) -> int:

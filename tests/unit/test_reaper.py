@@ -487,7 +487,20 @@ async def test_dirs_kept_when_instances_not_confirmed(
     reaper.release("t1")
     await _drain(clock, reaper, "t1")
     assert tree.events == []  # instances not fully deleted, directory untouched
+    record = reaper.completed["t1"]
+    assert record.reason == "delete_unconfirmed" and record.error  # the last deletion error explains it
+    assert len(record.error) <= 300
     assert not await clock.run(reaper.close())  # leftovers, not a clean exit
+
+
+@pytest.mark.asyncio
+async def test_clean_record_has_no_reason(platform: FakePlatform, clock: ManualClock, reaper: Reaper) -> None:
+    reaper.track("t1")
+    await clock.run(reaper.create("t1", "web", _spec("t1", "web")))
+    reaper.release("t1")
+    await _drain(clock, reaper, "t1")
+    record = reaper.completed["t1"]
+    assert record.clean and record.reason is None and record.error is None
 
 
 @pytest.mark.asyncio

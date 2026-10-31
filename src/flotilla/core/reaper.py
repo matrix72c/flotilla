@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
+from typing import Literal
 
 from flotilla.core import labels
 from flotilla.core.anchor import Anchor
@@ -52,6 +53,7 @@ class _Trial:
     dirs: list[str] = field(default_factory=list)  # volume keys of shared volume directories
     reconciled: bool = False
     done: asyncio.Event = field(default_factory=asyncio.Event)
+    error: str | None = None  # last directory-removal or reaping error
 
     def labels(self, launch_id: str) -> dict[str, str]:
         return {labels.LAUNCH: launch_id, labels.TRIAL: self.trial_id}
@@ -164,12 +166,28 @@ class Reaper:
 
     def _record(self, trial: _Trial, *, finished: bool) -> CleanupRecord:
         pending = (trial.known - trial.cleanup.gone()) | trial.cleanup.pending()
+        unknown = trial.list_until is not None and not trial.reconciled
+        if not finished:
+            reason: CleanupReason | None = "in_progress"
+        elif trial.inflight:
+            reason = "create_in_flight"
+        elif pending:
+            reason = "delete_unconfirmed"
+        elif unknown:
+            reason = "create_outcome_unknown"
+        elif trial.dirs:
+            reason = "anchor_deactivated" if self._anchor.deactivated.is_set() else "directory_remove_failed"
+        else:
+            reason = None
+        error = trial.cleanup.last_error() if reason == "delete_unconfirmed" else trial.error
         return CleanupRecord(
             trial.trial_id,
             tuple(sorted(pending)),
             tuple(trial.dirs),
-            bool(trial.inflight) or (trial.list_until is not None and not trial.reconciled),
+            bool(trial.inflight) or unknown,
             finished,
+            reason,
+            error if reason is not None else None,
         )
 
     async def close(self) -> bool:
@@ -330,7 +348,8 @@ class Reaper:
         except asyncio.CancelledError:
             trial.cleanup.cancel()
             raise
-        except Exception:
+        except Exception as exc:
+            trial.error = _brief(exc)
             log.exception("error reaping trial %s", trial.trial_id)
         finally:
             record = self._record(trial, finished=True)
@@ -349,23 +368,44 @@ class Reaper:
                 await self._anchor.remove(key, stage="run")
                 trial.dirs.remove(key)
             except FlotillaError as exc:
+                trial.error = _brief(exc)
                 log.warning("failed to remove trial %s directory %s, leaving it to gc: %s", trial.trial_id, key, exc)
                 return
 
 
+CleanupReason = Literal[
+    "in_progress",
+    "create_in_flight",
+    "create_outcome_unknown",
+    "delete_unconfirmed",
+    "directory_remove_failed",
+    "anchor_deactivated",
+]
+
+
 @dataclass(frozen=True)
 class CleanupRecord:
-    """A conservative deletion snapshot. Unknown creations and directories count as leftovers."""
+    """A conservative deletion snapshot. Unknown creations and directories count as leftovers.
+
+    `reason` names the first thing still unconfirmed (None when clean); `error` is the last related error, if any.
+    """
 
     environment_id: str
     instances: tuple[str, ...] = ()
     directories: tuple[str, ...] = ()
     uncertain: bool = False
     finished: bool = False
+    reason: CleanupReason | None = None
+    error: str | None = None
 
     @property
     def clean(self) -> bool:
         return self.finished and not (self.instances or self.directories or self.uncertain)
+
+
+def _brief(exc: BaseException, limit: int = 300) -> str:
+    text = f"{type(exc).__name__}: {exc}"
+    return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
 def _retrieve(task: asyncio.Task[object]) -> None:

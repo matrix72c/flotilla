@@ -139,7 +139,7 @@ An adapter that opens an environment owns it and must release it. An adapter tha
 
 ## After a crash
 
-A process that dies without closing its client leaves its sandboxes and directories behind until their TTL expires. Run `flotilla gc --deployment deployment.toml` from any machine with the deployment config to collect them. GC waits for two observations `gc_window` seconds apart before collecting a launch, so it never collects a live client. Use `--launch ID` only after confirming that client has exited.
+A process that dies without closing its client leaves its sandboxes and directories behind until their TTL expires. Run `flotilla gc --deployment deployment.toml` from any machine with the deployment config to collect them. GC finds launches both from `launches/` on shared storage and from sandbox labels, so a client that died before creating its directory is still found. It waits for two observations `gc_window` seconds apart before collecting a launch, so it never collects a live client. Use `--launch ID` only after confirming that client has exited. If GC cannot start its own anchor (for example, the anchor image cannot be pulled), it still deletes sandboxes by label, leaves directories in place, and exits 1.
 
 ## Testing your integration
 

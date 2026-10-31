@@ -8,6 +8,7 @@ import json
 import os
 import posixpath
 import stat
+import time
 import uuid
 from collections.abc import Mapping, Sequence, Set
 from dataclasses import dataclass
@@ -151,7 +152,8 @@ async def publish_release(
         raise ReleaseError(
             f"{target} is already published with a different {RELEASE_JSON} (releases are immutable); use a new name"
         )
-    staging = f"{STAGING}/{release}.{uuid.uuid4().hex[:12]}"
+    # Timestamped so `flotilla gc --staging-age` can remove abandoned attempts.
+    staging = f"{STAGING}/{release}.{int(time.time())}.{uuid.uuid4().hex[:12]}"
     await anchor.mkdir(staging, stage="prepare")
     try:
         uploaded = await _upload_tree(anchor, root, staging, entries, json.loads(blob)["files"])
