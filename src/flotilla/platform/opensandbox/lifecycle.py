@@ -12,6 +12,7 @@ from flotilla.platform.opensandbox.filesystem import parse_effective
 from flotilla.platform.opensandbox.http import Http
 
 PAGE_SIZE = 200  # spec maximum pageSize
+MESSAGE_LIMIT = 500  # platform diagnostics are kept to one bounded line in error messages
 MAX_PAGES = 10_000  # fail if paging does not converge instead of looping forever
 
 _STATUS = {
@@ -35,15 +36,24 @@ def parse_state(item: Mapping[str, Any]) -> InstanceState:
     reason = reason if reason in {"Started", "OOMKilled", "Completed", "Error", "DeadlineExceeded"} else None
     native = native if native in _STATUS else "Unknown"
     expires = item.get("expiresAt")
+    metadata = item.get("metadata") or {}
     return InstanceState(
         iid=str(item["id"]),
         status=_STATUS.get(native, InstanceStatus.UNKNOWN),
         expires_at=_parse_time(expires) if expires else None,
-        labels={str(k): str(v) for k, v in (item.get("metadata") or {}).items()},
+        labels={str(k): str(v) for k, v in metadata.items()},
         reason=f"{native}: {reason}" if reason else (native or None),
-        message=None,
+        message=_message(metadata.get("failureReason") or item.get("pendingReason")),
         filesystem=parse_effective(item),
     )
+
+
+def _message(value: object) -> str | None:
+    """Platform diagnostic (`metadata.failureReason`, else `pendingReason`) as one bounded line, or `None`."""
+    if not isinstance(value, str):
+        return None
+    text = " ".join(value.split())
+    return (text if len(text) <= MESSAGE_LIMIT else text[: MESSAGE_LIMIT - 3] + "...") or None
 
 
 def metadata_filter(labels: Mapping[str, str]) -> str:
