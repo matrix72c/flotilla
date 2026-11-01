@@ -8,6 +8,8 @@ from collections.abc import AsyncIterator
 import httpx
 import pytest
 
+from flotilla import Flotilla
+from flotilla.config import FlotillaConfig
 from flotilla.core.plan import ExecContext, Healthcheck, Unit
 from flotilla.core.process import wait_healthy
 from flotilla.platform.base import (
@@ -22,9 +24,13 @@ from flotilla.platform.base import (
     ProcessStatus,
     Resources,
 )
+from flotilla.platform.clock import SystemClock
 from flotilla.platform.opensandbox.execd import Execd, ExecdSettings
 from flotilla.platform.opensandbox.http import Http
-from flotilla.testing.platform import FakePlatform, ManualClock
+from flotilla.testing.environments import FixtureRequest, open_fixture
+from flotilla.testing.platform import FakePlatform, ManualClock, SharedTree
+from flotilla.testing.runtime import deployment as deployment
+from flotilla.testing.runtime import task
 
 PREFIX = "/sandboxes/sb-1/proxy/44772"
 PROC = ProcessSpec(argv=("secret-command",), uid=0, gid=0, cwd="/", env={"SECRET": "secret-env"}, timeout_s=10)
@@ -59,6 +65,46 @@ async def test_busy_is_not_replayed_or_wrapped(
     assert "status=409 request_id=req-1 command_id= outcome=CommandBusy" in caplog.text
     assert "duration_s=" in caplog.text and PREFIX in caplog.text
     assert "secret-" not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("background", [False, True])
+async def test_public_busy_preserves_environment(
+    deployment: tuple[FlotillaConfig, FakePlatform, SharedTree],
+    monkeypatch: pytest.MonkeyPatch,
+    background: bool,
+) -> None:
+    cfg, platform, _ = deployment
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(409, json={"code": "CONFLICT"})
+
+    async with (
+        httpx.AsyncClient(base_url="http://execd.test", transport=httpx.MockTransport(handler)) as client,
+        Flotilla(deployment=cfg) as fleet,
+    ):
+        env = await open_fixture(fleet, FixtureRequest(task(), "busy"))
+        execd = Execd(Http(client, SystemClock(), prefix=PREFIX), ExecdSettings())
+
+        async def execute(
+            handle: InstanceHandle, proc: ProcessSpec, *, attempt: ExecAttempt | None = None
+        ) -> ExecResult:
+            return await execd.exec(proc, attempt=attempt)
+
+        async def start(handle: InstanceHandle, proc: ProcessSpec, *, attempt: ExecAttempt | None = None) -> str:
+            return await execd.start_process(proc, attempt=attempt)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(platform, "exec", execute)
+            patch.setattr(platform, "start_process", start)
+            call = env.agent.start_process if background else env.agent.exec
+            with pytest.raises(CommandBusy):
+                await call(["true"])
+        assert len(requests) == 1
+        await env.check()
+        assert (await env.agent.exec(["true"])).exit_code == 0
 
 
 @pytest.mark.asyncio

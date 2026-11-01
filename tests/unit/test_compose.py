@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 from flotilla.compose.interpolate import InterpolationError, interpolate
-from flotilla.compose.model import Dependency, Healthcheck, NetworkAttachment, VolumeMount
+from flotilla.compose.model import Dependency, Healthcheck, NetworkAttachment, RuntimeExpression, VolumeMount
 from flotilla.compose.normalize import KEEPALIVE, harbor_overlay, normalize
 from flotilla.compose.units import parse_duration
 from flotilla.platform.base import TmpfsMount
@@ -51,12 +51,10 @@ def test_interpolate_rejects_unsupported(text: str) -> None:
         interpolate(text, {})
 
 
-def test_deferred_nested_reference_is_kept_whole_and_resolves_later() -> None:
-    expr = "${P:+${P},}web,localhost"
-    deferred = interpolate(expr, {}, defer=True)
-    assert deferred.value == expr and deferred.unresolved == {"P": ""}
-    assert interpolate(expr, {"P": "proxy"}).value == "proxy,web,localhost"
-    assert interpolate(expr, {}).value == "web,localhost"
+def test_references_include_unused_alternatives_but_not_escaped_literals() -> None:
+    result = interpolate("${A:+${B}}/$${LITERAL}", {})
+    assert result.value == "/${LITERAL}" and result.unresolved == {"A": ""}
+    assert result.references == {"A", "B"}
 
 
 def test_interpolate_recurses_but_not_into_keys() -> None:
@@ -278,9 +276,7 @@ def test_unsized_tmpfs_keeps_docker_semantics_until_planning() -> None:
 def test_runtime_params_recorded_from_environment() -> None:
     p = _norm({"proxy": {"image": "p", "environment": {"UPSTREAM": "${EXAMPLE_API_UPSTREAM:-http://127.0.0.1:9}"}}})
     assert not p.rejected
-    assert p.runtime_params == {
-        "proxy": {"UPSTREAM": ("${EXAMPLE_API_UPSTREAM:-http://127.0.0.1:9}", "http://127.0.0.1:9")}
-    }
+    assert p.runtime_params == {"proxy": {"UPSTREAM": RuntimeExpression("${EXAMPLE_API_UPSTREAM:-http://127.0.0.1:9}")}}
     assert p.services["proxy"].environment == {"UPSTREAM": "http://127.0.0.1:9"}  # default now, overridden at runtime
 
 

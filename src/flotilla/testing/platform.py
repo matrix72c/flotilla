@@ -631,7 +631,7 @@ class SharedTree:
             with tarfile.open(fileobj=io.BytesIO(data)) as archive:
                 for member in archive:
                     assert not PurePosixPath(member.name).is_absolute() and ".." not in PurePosixPath(member.name).parts
-                    target = f"{dest}/{member.name}"
+                    target = str(PurePosixPath(dest) / member.name)
                     if member.isdir():
                         self.dirs.add(target)
                     elif member.isfile():

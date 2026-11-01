@@ -21,6 +21,7 @@ from flotilla.compose.model import (
     NetworkDef,
     Project,
     RestartPolicy,
+    RuntimeExpression,
     Service,
     VolumeMount,
 )
@@ -138,7 +139,7 @@ def normalize(compose: Mapping[str, Any], variables: Mapping[str, str]) -> Proje
     volumes = _top_volumes({} if compose.get("volumes") is None else compose["volumes"], c)
 
     services: dict[str, Service] = {}
-    runtime_params: dict[str, dict[str, tuple[str, str | None]]] = {}
+    runtime_params: dict[str, dict[str, RuntimeExpression]] = {}
     for name, raw in raw_services.items():
         raw = {} if raw is None else raw
         path = f"services.{name}"
@@ -523,6 +524,7 @@ def _volumes(value: object, path: str, named: set[str], c: _Collector) -> tuple[
         if kind == "bind" and (source.startswith("/") or ".." in source.split("/")):
             c.reject(p, f"bind source is outside the task directory: {source}")
             continue
+        _boolean(bind_opts.get("create_host_path", True), f"{p}.bind.create_host_path", c)
         out.append(
             VolumeMount(
                 kind=kind,
@@ -530,7 +532,6 @@ def _volumes(value: object, path: str, named: set[str], c: _Collector) -> tuple[
                 target=target,
                 read_only=_boolean(v.get("read_only", False), f"{p}.read_only", c),
                 nocopy=nocopy,
-                create_host_path=_boolean(bind_opts.get("create_host_path", True), f"{p}.bind.create_host_path", c),
             )
         )
     return tuple(out)
@@ -760,13 +761,15 @@ def _check_references(services: Mapping[str, Service], networks: Mapping[str, Ne
                 c.reject(f"services.{s.name}.depends_on.{dep}", "depends on a nonexistent service")
 
 
-def _runtime_params(env_raw: Mapping[str, str], variables: Mapping[str, str]) -> dict[str, tuple[str, str | None]]:
-    """Freeze build-time values, retaining every deferred reference and dollar escape."""
-    out: dict[str, tuple[str, str | None]] = {}
+def _runtime_params(env_raw: Mapping[str, str], variables: Mapping[str, str]) -> dict[str, RuntimeExpression]:
+    """Keep fixed values separate from syntax so literal dollars and braces are never reinterpreted."""
+    out: dict[str, RuntimeExpression] = {}
     for key, expr in env_raw.items():
-        deferred = interpolate(expr, variables, defer=True)
-        if deferred.unresolved:
-            out[key] = (str(deferred.value), next(iter(deferred.unresolved.values())))
+        result = interpolate(expr, variables)
+        if result.unresolved:
+            out[key] = RuntimeExpression(
+                expr, {name: variables[name] for name in sorted(result.references) if name in variables}
+            )
     return out
 
 

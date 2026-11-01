@@ -38,6 +38,8 @@ Commands are non-idempotent and are never automatically replayed. Execution trac
 
 `timed_out=True` means a client deadline expired and remote stopping was confirmed. A normal signal exit is an ordinary execution result. Missing IDs, missing status records, or unconfirmed termination produce `ExecOutcomeUnknown`; the environment is invalidated and released. Do not retry unknown execution automatically. A timeout waiting for admission before sending has no remote execution effect.
 
+`CommandBusy` means the backend explicitly rejected the command before accepting it. Foreground and background calls raise this error without releasing the environment or automatically replaying the command. A busy healthcheck waits for its next interval; an unknown healthcheck outcome fails startup and triggers cleanup.
+
 ```python
 from flotilla import CleanupError, ExecOutcomeUnknown
 

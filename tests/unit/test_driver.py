@@ -1,4 +1,4 @@
-"""Task file export and the `flotilla build` driver.
+"""Task file export and the offline build driver used by `flotilla prepare`.
 
 Driver tests use a fake registry / builder / image exporter with no network or docker: they verify ordering,
 dispositions, skips and error attribution.
@@ -6,6 +6,7 @@ dispositions, skips and error attribution.
 
 from __future__ import annotations
 
+import io
 import json
 import tarfile
 from dataclasses import replace
@@ -14,12 +15,15 @@ from pathlib import Path
 import pytest
 
 from flotilla.build.builder import BuildRequest
+from flotilla.build.docker import extract_archive
 from flotilla.build.driver import BuildOutcome, build_task
 from flotilla.build.files import ExportError, export_task_files
 from flotilla.build.images import BuildSettings
 from flotilla.compose.task import load_task
 from flotilla.manifest import Manifest
+from flotilla.runtime.planning import to_plan
 from flotilla.testing.build import DIGEST, DIGEST2, FakeBuilder, FakeExport, FakeRegistry, _ctx, _task
+from flotilla.testing.config import config
 
 # ───────────────────────────── Exporting task files ─────────────────────────────
 
@@ -88,10 +92,10 @@ def test_export_writes_seed_tar_for_shared_volume(tmp_path: Path) -> None:
     key = exported.seeds["data"]
     with tarfile.open(files / key) as tar:
         assert tar.getnames() == ["seed.txt"]
-    assert not (files / "_seed-staging").exists()  # staging directory cleaned up
+    assert not any(files.glob(".seed-*"))  # staging directory cleaned up
 
 
-def test_export_no_seed_when_image_path_is_empty(tmp_path: Path) -> None:
+def test_export_no_seed_when_image_path_is_absent(tmp_path: Path) -> None:
     task = load_task(
         _task(
             tmp_path,
@@ -109,7 +113,7 @@ def test_export_no_seed_when_image_path_is_empty(tmp_path: Path) -> None:
     exported = export_task_files(
         task.project, task.env_dir, tmp_path / "files", images={"main": "x", "app": "y"}, image_export=FakeExport({})
     )
-    assert exported.seeds == {}  # an empty volume is empty, as in Docker
+    assert exported.seeds == {}  # no image content or metadata to restore
 
 
 @pytest.mark.parametrize("read_only", [False, True])
@@ -304,14 +308,14 @@ def test_manifest_declares_seed_only_when_exported(tmp_path: Path) -> None:
     """The seeds declared in the manifest must match what was actually exported.
 
     Hit on a real deployment: the manifest unconditionally declared `seeds/<v>.tar`, but no tar is produced when the
-    image has no content under the mount point, so the trial's prepare stage failed unpacking a nonexistent file.
+    image path is absent, so the trial's prepare stage failed unpacking a nonexistent file.
     """
     path = _shared_volume_task(tmp_path, "noseed")
     out = build_task(load_task(path), tmp_path / "out", _ctx(image_export=FakeExport({})))
     assert out.status == "built"
     manifest = json.loads(out.manifest_path.read_text())  # type: ignore[union-attr]
     (volume,) = manifest["trial_volumes"]
-    assert volume["key"] == "data" and volume["seed"] is None  # no content -> no seed declared
+    assert volume["key"] == "data" and volume["seed"] is None  # no export -> no seed declared
 
 
 def test_manifest_declares_seed_when_image_has_content(tmp_path: Path) -> None:
@@ -321,6 +325,78 @@ def test_manifest_declares_seed_when_image_has_content(tmp_path: Path) -> None:
     manifest = json.loads(out.manifest_path.read_text())  # type: ignore[union-attr]
     (volume,) = manifest["trial_volumes"]
     assert volume["seed"] == "seeds/data.tar"
+
+
+@pytest.mark.parametrize("populated", [False, True])
+def test_volume_seed_preserves_image_root_metadata(tmp_path: Path, populated: bool) -> None:
+    data = io.BytesIO()
+    with tarfile.open(fileobj=data, mode="w") as archive:
+        root = tarfile.TarInfo(".")
+        root.type = tarfile.DIRTYPE
+        root.uid, root.gid, root.mode = 1234, 2345, 0o2770
+        archive.addfile(root)
+        if populated:
+            child = tarfile.TarInfo("seed.txt")
+            child.uid, child.gid, child.mode, child.size = 1234, 2345, 0o640, 4
+            archive.addfile(child, io.BytesIO(b"seed"))
+
+    class Export:
+        def extract(
+            self, image: str, path: str, dest: Path, *, identities: dict[str, tuple[int, int, int]] | None = None
+        ) -> bool:
+            assert identities is not None
+            return extract_archive(io.BytesIO(data.getvalue()), dest, identities)
+
+    source = _shared_volume_task(tmp_path, "metadata")
+    built = build_task(load_task(source), tmp_path / "out", _ctx(image_export=Export()))
+    assert built.manifest_path is not None, built.reason
+    manifest = Manifest.load_json(built.manifest_path.read_bytes())
+    seed = manifest.trial_volumes[0].seed
+    assert seed is not None and built.needs_publish
+    with tarfile.open(built.manifest_path.parent / "files" / seed) as archive:
+        root = archive.getmember(".")
+        assert (root.uid, root.gid, root.mode) == (1234, 2345, 0o2770)
+        if populated:
+            child = archive.getmember("seed.txt")
+            assert (child.uid, child.gid, child.mode) == (1234, 2345, 0o640)
+
+
+@pytest.mark.parametrize(
+    ("operator", "runtime_a", "expected"),
+    [
+        (":-", None, None),
+        (":-", "", None),
+        (":-", "provided", "provided"),
+        ("-", None, None),
+        ("-", "", ""),
+        ("-", "provided", "provided"),
+        (":+", None, ""),
+        (":+", "", ""),
+        (":+", "provided", None),
+        ("+", None, ""),
+        ("+", "", None),
+        ("+", "provided", None),
+    ],
+)
+@pytest.mark.parametrize("fixed", ["from-dotenv", "build$value", '{"x":"${literal}"}'])
+def test_nested_runtime_expression_freezes_dotenv_values(
+    tmp_path: Path, operator: str, runtime_a: str | None, expected: str | None, fixed: str
+) -> None:
+    path = _task(
+        tmp_path,
+        "nested",
+        compose=f"services:\n  main:\n    image: r.io/a:1\n    environment:\n      VALUE: '${{A{operator}${{B}}}}'\n",
+        **{".env": f"B={fixed}\nUNUSED=not-for-this-expression\n"},
+    )
+    built = build_task(load_task(path), tmp_path / "out", _ctx())
+    assert built.manifest_path is not None, built.reason
+    manifest = Manifest.load_json(built.manifest_path.read_bytes())
+    supplied = {"B": "runtime-must-not-override-dotenv"}
+    if runtime_a is not None:
+        supplied["A"] = runtime_a
+    assert manifest.runtime_params[0].variables == {"B": fixed}
+    plan = to_plan(manifest, runtime_params=supplied, resources=config().resources.for_manifest(manifest))
+    assert plan.units["main"].context.env["VALUE"] == (fixed if expected is None else expected)
 
 
 def _manifest(outcome: BuildOutcome) -> Manifest:

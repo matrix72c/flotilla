@@ -51,9 +51,23 @@ def test_env_is_strict() -> None:
     with pytest.raises(ValueError):
         PreparedTask.from_row(_row(env={"main": unknown}))
     old = _env()
-    old["schema"] = SCHEMA_VERSION - 1
+    old["schema"] = 5
     with pytest.raises(ValueError, match="schema"):
         PreparedTask.from_row(_row(env={"main": old}))
+
+
+def test_load_schema_six_row_without_rewriting_source(tmp_path: Path) -> None:
+    old = _env()
+    old["schema"] = 6
+    old["runtime_params"] = [{"service": "main", "var": "VALUE", "expr": "${TOKEN}", "param": "TOKEN", "default": None}]
+    path = tmp_path / "rows.jsonl"
+    original = json.dumps(_row(env={"main": old})) + "\n"
+    path.write_text(original)
+    [task] = load_prepared(path)
+    manifest = task.environment().manifest()
+    assert manifest.schema_ == SCHEMA_VERSION
+    assert manifest.runtime_params[0].expr == "${TOKEN}"
+    assert path.read_text() == original
 
 
 def test_load_prepared_last_row_wins_and_reports_line(tmp_path: Path) -> None:

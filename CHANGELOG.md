@@ -20,6 +20,7 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Changed
 
+- Runtime expressions are stored once per service environment variable, with referenced build-time values kept separately as literals. New manifests use schema 7; schema 6 rows are converted on read. Redundant Compose-user mappings, the unused bind `create_host_path` model field, single-phase network-policy scaffolding, and obsolete fake-registry history methods are removed.
 - `flotilla gc` finds launches from sandbox labels as well as `launches/`, and when its anchor cannot start it deletes sandboxes by label only (`GcReport.mode = "platform"`, `directories_skipped`) and exits 1. With an anchor it also removes `tasks/.staging`, `tasks/.trash` and `share/staging` entries older than `--staging-age` (default 24 h). Share release staging names now carry a timestamp.
 - `CleanupRecord` gains `reason` and `error`, naming what is still unconfirmed and the last related error.
 - **Breaking:** an open's budgets are split by phase. Waiting for a `trial_concurrency` / `instance_budget` slot is bounded by `OpenOptions.admission_timeout` (default `limits.admission_timeout`, 3600 s) and raises the new `AdmissionTimeout` (a `TimeoutError`) with the current counts. `startup_timeout` now starts at admission, so queueing no longer consumes it. Client start (anchor and share check) is bounded by the new `timeouts.client_start` (300 s) instead of `timeouts.prepare`.
@@ -32,6 +33,11 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Fixed
 
+- Healthchecks propagate non-retryable execution errors, including unknown outcomes, instead of running another check and potentially declaring the environment healthy. Public foreground/background calls preserve environments after an explicit `CommandBusy` rejection.
+- Services with both `service_healthy` and `service_completed_successfully` dependents now drive both conditions independently.
+- Shared named-volume seeds retain root-directory ownership and permissions, including for empty image directories. Nested runtime defaults and alternatives retain referenced `.env` values. Reprepare affected tasks to regenerate their files and expressions.
+- Forced preparation invalidates selected old rows before replacing task files, so an interrupted rebuild resumes rather than skipping inconsistent output. Preparation recovers incomplete final JSONL appends while still rejecting corrupt complete rows.
+- Each prepared task uses a separate temporary directory, avoiding collisions between nested and hyphenated task IDs. Cancellation waits for in-flight builder/file work before removing that directory.
 - A sandbox no longer expires while its environment is still starting. Sandboxes are renewed only once the environment is ready, but they were created with `reaper.trial_ttl` (1800 s by default), so an open whose startup ran past that TTL (for example `startup_timeout` above 1800 s, or long health checks) had its sandboxes reclaimed by the platform mid-start and failed with "instance vanished during start". Each sandbox is now created with at least the open's startup budget plus `reaper.renew_before_s`.
 - Environment variable names that are not shell identifiers but that Docker accepts (for example `discovery.type` or `APT::Get::AllowUnauthenticated`) are no longer rejected. The OpenSandbox exec wrapper passes them to execd under internal `FLOTILLA_ENV_<n>` aliases and restores the original names when it clears the environment. Values still travel only in the request `envs`. Names that are empty, contain `=` or NUL, start with `-`, or start with `FLOTILLA_ENV_` are still rejected.
 - A sandbox the platform never starts no longer holds its trial and quota for the whole `timeouts.create` budget. After `timeouts.pending` (new, default 300 s) it is deleted and created again once, through the existing recreate path; a second stall fails the open.

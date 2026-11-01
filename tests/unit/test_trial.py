@@ -321,6 +321,10 @@ async def test_prepare_creates_trial_dirs_before_units(
 
     data = io.BytesIO()
     with tarfile.open(fileobj=data, mode="w") as archive:
+        root = tarfile.TarInfo(".")
+        root.type = tarfile.DIRTYPE
+        root.uid, root.gid, root.mode = 1234, 2345, 0o2770
+        archive.addfile(root)
         entry = tarfile.TarInfo("fixture.txt")
         entry.size = 4
         archive.addfile(entry, io.BytesIO(b"seed"))
@@ -350,6 +354,8 @@ async def test_prepare_creates_trial_dirs_before_units(
     assert "launches/L1/t1/binds/0/conf.d" in tree.dirs  # subdirectory copied along, not as binds/0/0
     assert "unpack tasks/bk/seeds/static.tar launches/L1/t1/static" in tree.events
     assert tree.content("launches/L1/t1/static/fixture.txt") == b"seed"
+    assert tree.owners["launches/L1/t1/static"] == "1234:2345"
+    assert tree.modes["launches/L1/t1/static"] == "2770"
     assert "cp tasks/bk/binds/0 launches/L1/t1/binds/0" in tree.events
     assert tree.owners["launches/L1/t1/data"] == "999:999"
     assert platform.calls["create"] - creates_before == 3

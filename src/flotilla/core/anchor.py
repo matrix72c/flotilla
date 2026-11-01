@@ -205,7 +205,7 @@ class Anchor:
             await self.chmod(key, mode, stage=stage)
 
     async def download(self, key: str, *, stage: Stage) -> bytes:
-        """Read back `key` from shared storage (to verify FILES.json)."""
+        """Read back `key` from shared storage."""
         self.ensure_alive(stage)
         assert self._handle is not None
         try:

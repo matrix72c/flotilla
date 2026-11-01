@@ -109,7 +109,7 @@ HTTP 400 and 501 are non-retryable configuration/capability failures. No filesys
 
 The previous build-time empty-directory approximation of tmpfs has been removed. Existing tasks declaring tmpfs now require native support; remove the declaration only if the task intentionally no longer requires tmpfs semantics. Ordinary upstream tasks require no new configuration.
 
-Private preparation manifests now use schema 5 and preserve both requirements. Schema 4 manifests are rejected; prepare tasks again instead of editing their schema number.
+Prepared manifests preserve both requirements. Current writes use schema 7, and schema 6 rows are converted when read. Older schemas are rejected; prepare tasks again instead of editing their schema number.
 
 After probing, run the opt-in public API contract to cover image preparation, service logs, directory transfers, actual mount behavior and confirmed cleanup:
 

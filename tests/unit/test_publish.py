@@ -1,4 +1,4 @@
-"""Task publishing `flotilla publish`: FILES.json, upload, atomic rename, idempotency and conflicts."""
+"""Task file publication during prepare: metadata, staging, replacement and failure cleanup."""
 
 from __future__ import annotations
 

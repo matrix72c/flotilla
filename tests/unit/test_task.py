@@ -64,7 +64,7 @@ def test_compose_with_dotenv(tmp_path: Path) -> None:
     assert set(task.project.services) == {"main", "db"}
     assert task.project.services["db"].image == "postgres:16"
     # Variables the task does not provide become runtime parameters; the build machine environment is not read.
-    assert task.project.runtime_params["db"]["PASSWORD"][0] == "${DB_PASSWORD}"
+    assert task.project.runtime_params["db"]["PASSWORD"].expr == "${DB_PASSWORD}"
 
 
 def test_harbor_compose_variables_like_webvuln(tmp_path: Path) -> None:
@@ -83,8 +83,7 @@ services:
     assert not task.findings and not task.project.findings
     build = task.project.services["webapp"].build
     assert build is not None and build.context == "."  # Harbor's value wins over .env, as in Harbor
-    expr, default = task.project.runtime_params["main"]["NO_PROXY"]
-    assert expr == "${NO_PROXY:+${NO_PROXY},}webapp,localhost" and default == ""
+    assert task.project.runtime_params["main"]["NO_PROXY"].expr == "${NO_PROXY:+${NO_PROXY},}webapp,localhost"
 
 
 def test_unreadable_task(tmp_path: Path) -> None:

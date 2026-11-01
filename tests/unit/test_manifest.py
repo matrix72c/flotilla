@@ -150,8 +150,6 @@ def test_context_merges_image_env_and_user() -> None:
     unit = _manifest(p, {"app": meta}).units["app"]
     assert unit.context.env == {"A": "compose", "B": "2", "PATH": "/usr/bin"}  # environment overrides image ENV
     assert (unit.context.uid, unit.context.gid, unit.context.cwd) == (33, 33, "/app")
-    unit = _manifest(p, {"app": meta}, users={"app": (50000, 50000)}).units["app"]
-    assert (unit.context.uid, unit.context.gid) == (50000, 50000)  # Compose user overrides image USER
 
 
 def test_image_healthcheck_used_unless_overridden_or_disabled() -> None:
@@ -199,9 +197,26 @@ def test_manifest_networks_names_and_external_units() -> None:
     assert m.networks["inner"].names == {"agent": ["main"], "main": ["main"], "target": ["target"]}
     assert m.networks["api"].names["model-api-proxy"] == ["proxy"]
     assert m.external_units == ["proxy"]  # only proxy is on a non-internal network
-    assert [(p.service, p.var, p.param, p.default) for p in m.runtime_params] == [
-        ("proxy", "UPSTREAM", "EXAMPLE_API_UPSTREAM", "http://127.0.0.1:9")
+    assert [(p.service, p.var, p.expr) for p in m.runtime_params] == [
+        ("proxy", "UPSTREAM", "${EXAMPLE_API_UPSTREAM:-http://127.0.0.1:9}")
     ]
+
+
+def test_schema_six_runtime_parameters_upgrade_without_repreparation() -> None:
+    expression = "${HOST}:${PORT:-80}"
+    data = _manifest(_project({"main": {"image": "m"}})).model_dump(by_alias=True)
+    data["schema"] = 6
+    data["runtime_params"] = [
+        {"service": "main", "var": "URL", "expr": expression, "param": "HOST", "default": None},
+        {"service": "main", "var": "URL", "expr": expression, "param": "PORT", "default": "80"},
+    ]
+    manifest = Manifest.load(data)
+    assert manifest.schema_ == SCHEMA_VERSION
+    assert [p.model_dump() for p in manifest.runtime_params] == [
+        {"service": "main", "var": "URL", "expr": expression, "variables": {}}
+    ]
+    assert to_plan(manifest, runtime_params={"HOST": "db"}).units["main"].context.env["URL"] == "db:80"
+    assert Manifest.load_json(manifest.dump_json()) == manifest
 
 
 def test_manifest_json_roundtrip_and_strictness() -> None:

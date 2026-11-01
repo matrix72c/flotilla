@@ -120,7 +120,7 @@ def _build(
     files_dir = target_dir / FILES_DIR
     exported = export_task_files(project, task.env_dir, files_dir, images=images, image_export=ctx.image_export)
 
-    meta, users = _metadata(project, images, ctx)
+    meta = _metadata(project, images, ctx)
     # Capture task identity before changing the container's default user. The
     # exec daemon needs root to initialize networking/files and switch identities;
     # service commands and healthchecks still use the original manifest context.
@@ -131,7 +131,6 @@ def _build(
         images=images,
         meta=meta,
         resources=resources,
-        users=users,
         seeds=exported.seeds,
     )
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -239,12 +238,9 @@ def _derive(task: HarborTask, service: str, base: str, *, user: str) -> str:
     return derive_dockerfile(base, copy=copy, clear=clear, directories=directories, user=user)
 
 
-def _metadata(
-    project: Project, images: Mapping[str, str], ctx: BuildContext
-) -> tuple[dict[str, ImageMeta], dict[str, tuple[int, int]]]:
+def _metadata(project: Project, images: Mapping[str, str], ctx: BuildContext) -> dict[str, ImageMeta]:
     """Per-service image metadata and Compose `user` resolution."""
     meta: dict[str, ImageMeta] = {}
-    users: dict[str, tuple[int, int]] = {}
     for name, svc in project.services.items():
         config = dict(ctx.registry.image_config(images[name]))
         # An explicit Compose identity makes the image USER irrelevant.
@@ -255,8 +251,5 @@ def _metadata(
         if ctx.image_accounts is not None and not (user.isdigit() and group.isdigit()):
             accounts = ctx.image_accounts(images[name])
             lookup, group_lookup = accounts.user, accounts.group
-        fields = parse_config(config, lookup=lookup, group_lookup=group_lookup)
-        meta[name] = fields
-        if svc.user:
-            users[name] = (fields.uid, fields.gid)
-    return meta, users
+        meta[name] = parse_config(config, lookup=lookup, group_lookup=group_lookup)
+    return meta

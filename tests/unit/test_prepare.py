@@ -2,20 +2,23 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from flotilla.build.driver import BuildContext, BuildOutcome, build_task
 from flotilla.compose.task import HarborTask, load_task
 from flotilla.config import FlotillaConfig
 from flotilla.core.anchor import Anchor, AnchorSettings
-from flotilla.prepare import PrepareReport, prepare
+from flotilla.prepare import PrepareReport, prepare, runner
 from flotilla.prepare.runner import failures_path
-from flotilla.prepared import load_prepared
-from flotilla.testing.build import FakeBuilder, _ctx, _task
+from flotilla.prepared import PreparedEnvironment, load_prepared
+from flotilla.testing.build import FakeBuilder, FakeRegistry, _ctx, _task
 from flotilla.testing.config import config
 from flotilla.testing.platform import FakePlatform, ManualClock, SharedTree
 
@@ -90,7 +93,7 @@ async def test_prepare_writes_rows_failures_and_task_files(
     assert anchors.started == 1
     failure = json.loads(failures_path(out).read_text())
     assert failure["id"] == "ds/broken" and failure["stage"] == "scan" and "devices" in failure["reason"]
-    assert not any((out.parent / "ds.jsonl.work").glob("ds-*"))  # per-task scratch removed
+    assert not any((out.parent / "ds.jsonl.work").glob("task-*"))  # per-task scratch removed
 
 
 @pytest.mark.asyncio
@@ -170,3 +173,153 @@ def test_failures_path_and_dataset_rev(tmp_path: Path) -> None:
 
     assert failures_path(tmp_path / "x.jsonl") == tmp_path / "x.failures.jsonl"
     assert _dataset_rev(tmp_path) is None  # not a repository root
+
+
+@pytest.mark.asyncio
+async def test_force_interruption_invalidates_old_row_before_publication(
+    cfg: FlotillaConfig, anchors: Anchors, tree: SharedTree, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "ds"
+    path = _task(root, "t", compose=WITH_FILES, **{"shared__f.txt": "old"})
+    out = tmp_path / "ds.jsonl"
+    await _run(cfg, [root], out, anchors, environments=_with_verifier)
+    (path / "environment" / "shared" / "f.txt").write_text("new")
+    registry = FakeRegistry(digests={"r.io/a:1": "sha256:" + "12" * 32})
+    original = runner._Session._environment
+    published = asyncio.Event()
+
+    async def pause_after_main(
+        self: runner._Session, source: runner._Source, role: str, env: HarborTask, scratch: Path
+    ) -> PreparedEnvironment:
+        result = await original(self, source, role, env, scratch)
+        if role == "main":
+            published.set()
+            await asyncio.Future[None]()
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(runner._Session, "_environment", pause_after_main)
+        work = asyncio.create_task(
+            prepare(
+                cfg,
+                [root],
+                out,
+                anchor=anchors.factory(),
+                context=lambda j: _ctx(registry=registry),
+                environments=_with_verifier,
+                force=True,
+            )
+        )
+        try:
+            await asyncio.wait_for(published.wait(), 5)
+            assert load_prepared(out) == []
+        finally:
+            work.cancel()
+            await asyncio.gather(work, return_exceptions=True)
+    report = await prepare(
+        cfg,
+        [root],
+        out,
+        anchor=anchors.factory(),
+        context=lambda j: _ctx(registry=registry),
+        environments=_with_verifier,
+    )
+    assert report.prepared == ("ds/t",) and report.skipped == ()
+    row = load_prepared(out)[0]
+    for role in ("main", "verifier"):
+        assert row.environment(role).manifest().units["main"].image.endswith("12" * 32)
+        files = [key for key in tree.files if key.startswith(f"tasks/ds/t/{role}/binds/")]
+        assert files and all(anchors.platform.tree_contents[key] == b"new" for key in files)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_nested_task_ids_have_independent_files(
+    cfg: FlotillaConfig, anchors: Anchors, tree: SharedTree, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "ds"
+    for name in ("a/b", "a-b"):
+        _task(root, name, compose=WITH_FILES, **{"shared__f.txt": name})
+    built = threading.Barrier(2, timeout=5)
+
+    def build(env: HarborTask, scratch: Path, ctx: BuildContext, *, identity: str | None = None) -> BuildOutcome:
+        result = build_task(env, scratch, ctx, identity=identity)
+        built.wait()
+        return result
+
+    monkeypatch.setattr(runner, "build_task", build)
+    report = await _run(cfg, [root], tmp_path / "ds.jsonl", anchors, concurrency=2)
+    assert report.prepared == ("ds/a-b", "ds/a/b") and not report.failed
+    for name in ("a/b", "a-b"):
+        files = [key for key in tree.files if key.startswith(f"tasks/ds/{name}/main/binds/")]
+        assert files and all(anchors.platform.tree_contents[key] == name.encode() for key in files)
+
+
+@pytest.mark.asyncio
+async def test_cancel_waits_for_builder_before_removing_scratch(
+    cfg: FlotillaConfig, dataset: Path, anchors: Anchors, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entered = asyncio.Event()
+    finish = threading.Event()
+    loop = asyncio.get_running_loop()
+    directories: list[Path] = []
+
+    def build(env: HarborTask, scratch: Path, ctx: BuildContext, *, identity: str | None = None) -> BuildOutcome:
+        result = build_task(env, scratch, ctx, identity=identity)
+        directories.append(scratch)
+        loop.call_soon_threadsafe(entered.set)
+        assert finish.wait(5)
+        assert scratch.exists()
+        return result
+
+    monkeypatch.setattr(runner, "build_task", build)
+    work = asyncio.create_task(_run(cfg, [dataset / "plain"], tmp_path / "ds.jsonl", anchors, concurrency=2))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        work.cancel()
+        await asyncio.sleep(0.02)
+        assert not work.done()
+        assert directories[0].exists()
+    finally:
+        finish.set()
+        with pytest.raises(asyncio.CancelledError):
+            await work
+    assert not directories[0].parent.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tail", [b'{"id": "unfinished', b'{"id": "\xe4\xb8'])
+@pytest.mark.parametrize("force", [False, True])
+async def test_resume_recovers_only_unterminated_final_json(
+    cfg: FlotillaConfig, dataset: Path, anchors: Anchors, tmp_path: Path, tail: bytes, force: bool
+) -> None:
+    out = tmp_path / "ds.jsonl"
+    await _run(cfg, [dataset / "plain"], out, anchors)
+    original = out.read_bytes()
+    out.write_bytes(original + tail)
+    report = await _run(cfg, [dataset / "plain"], out, anchors, force=force)
+    assert (report.prepared if force else report.skipped) == ("ds/plain",)
+    assert out.read_bytes() == original
+
+
+@pytest.mark.asyncio
+async def test_resume_preserves_complete_json_without_newline(
+    cfg: FlotillaConfig, dataset: Path, anchors: Anchors, tmp_path: Path
+) -> None:
+    out = tmp_path / "ds.jsonl"
+    await _run(cfg, [dataset / "plain"], out, anchors)
+    original = out.read_bytes()
+    out.write_bytes(original.rstrip(b"\n"))
+    report = await _run(cfg, [dataset / "plain", dataset / "files"], out, anchors)
+    assert report.skipped == ("ds/plain",) and report.prepared == ("ds/files",)
+    assert len(load_prepared(out)) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", [b'{"id":\n', b"{}", b'{"id":\n{}\n'])
+async def test_resume_rejects_complete_corrupt_rows(
+    cfg: FlotillaConfig, dataset: Path, anchors: Anchors, tmp_path: Path, bad: bytes
+) -> None:
+    out = tmp_path / "ds.jsonl"
+    out.write_bytes(bad)
+    with pytest.raises(ValueError, match="invalid prepared row"):
+        await _run(cfg, [dataset / "plain"], out, anchors)

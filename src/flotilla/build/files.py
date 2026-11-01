@@ -30,7 +30,7 @@ class ImageExport(Protocol):
     ) -> bool:
         """Extract the content under `path` in `image` into `dest` (an existing empty directory).
 
-        Returns whether the path has content: False if absent or an empty directory, so the caller emits no seed.
+        Returns whether the path has content. An empty directory may still supply its root identity in `identities`.
         """
         ...
 
@@ -139,6 +139,8 @@ def _export_seeds(
                 return info
 
             with tarfile.open(tar_path, "w") as tar:
+                if "." in owners:
+                    tar.add(staged, arcname=".", recursive=False, filter=numeric_owner)
                 for child in sorted(staged.iterdir()):
                     tar.add(child, arcname=child.name, filter=numeric_owner)
         out[volume.name] = key
@@ -175,7 +177,8 @@ def _populate(
     volume: str,
     identities: dict[str, tuple[int, int, int]],
 ) -> bool:
-    """Use the first populated copy-enabled reference, propagating export failures."""
+    """Use the first populated copy-enabled reference, or retain an empty image directory's root metadata."""
+    empty_root = None
     for unit, mount, _, nocopy in references:
         if nocopy:
             continue
@@ -187,8 +190,14 @@ def _populate(
         identities.clear()
         if image_export.extract(images[unit], mount, dest, identities=identities):
             return True
+        if empty_root is None:
+            empty_root = identities.get(".")
         _reset(dest)
-    return False
+    identities.clear()
+    if empty_root is None:
+        return False
+    identities["."] = empty_root
+    return True
 
 
 def _reset(path: Path) -> None:

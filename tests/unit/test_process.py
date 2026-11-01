@@ -13,6 +13,7 @@ from flotilla.core import process
 from flotilla.core.plan import Dependency, ExecContext, Healthcheck, TrialPlan, Unit
 from flotilla.platform.base import (
     ErrorCategory,
+    ExecOutcomeUnknown,
     ExecResult,
     ExternalPolicy,
     FlotillaError,
@@ -383,6 +384,47 @@ async def test_one_shot_with_healthcheck_only_waits_for_exit(platform: FakePlatf
     started = await clock.run(task)
     assert started.exit_codes == {"init": 0}
     assert script.checks("init") == 0
+
+
+@pytest.mark.asyncio
+async def test_mixed_health_and_completion_dependencies(platform: FakePlatform, clock: ManualClock) -> None:
+    plan = _plan(
+        {"init": _unit(healthcheck=_hc()), "early": _unit(), "late": _unit()},
+        {
+            "early": {"init": Dependency("service_healthy")},
+            "late": {"init": Dependency("service_completed_successfully")},
+        },
+    )
+    script = Script(platform)
+    handles = await _handles(platform, script, plan)
+    work = asyncio.create_task(process.start_all(platform, clock, plan, handles))
+    try:
+        await clock.advance(10)
+        assert _started(platform, handles, "early")
+        assert not _started(platform, handles, "late")
+        _finish(platform, handles, "init", 0)
+        started = await clock.run(work)
+        assert started.exit_codes == {"init": 0}
+        assert _started(platform, handles, "late")
+    finally:
+        work.cancel()
+        await asyncio.gather(work, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_unknown_healthcheck_outcome_fails_without_replay(platform: FakePlatform, clock: ManualClock) -> None:
+    plan = _plan({"web": _unit(healthcheck=_hc())})
+    script = Script(platform)
+    handles = await _handles(platform, script, plan)
+    work = asyncio.create_task(process.start_all(platform, clock, plan, handles))
+    await clock.advance(1)
+    platform.inject_fault("exec", ExecOutcomeUnknown("healthcheck stop unconfirmed", command_id="check-1"))
+    calls = platform.calls["exec"]
+    with pytest.raises(FlotillaError, match="stop unconfirmed") as error:
+        await clock.run(work)
+    assert not error.value.retryable
+    await clock.advance(30)
+    assert platform.calls["exec"] == calls + 1
 
 
 @pytest.mark.asyncio
