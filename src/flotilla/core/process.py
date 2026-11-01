@@ -101,7 +101,7 @@ async def wait_healthy(
 
     - The first check runs one interval after start; `start_interval` within `start_period`, `interval` after;
     - exit code 0 is healthy; timeout or non-zero is a failure; failures within `start_period` don't count to `retries`;
-    - transient exec channel errors are not check results; that round is skipped;
+    - retryable exec channel errors are not check results; that round is skipped;
     - after each check with a result, the process is checked: if it exited, fail immediately. In Docker the container
       exits with its main process, so failures don't wait out retries and success doesn't count (checks like
       `test -f /ready` can still pass after the process exits, while the placeholder entrypoint keeps the sandbox up).
@@ -166,7 +166,7 @@ async def _probe(
     try:
         return await platform.exec(handle, service_spec(unit, hc.test, timeout_s=hc.timeout_s))
     except FlotillaError as exc:
-        if exc.category in (ErrorCategory.TRANSIENT, ErrorCategory.RATE_LIMITED):
+        if exc.retryable and exc.category in (ErrorCategory.TRANSIENT, ErrorCategory.RATE_LIMITED):
             log.warning("%s: healthcheck exec channel error, skipping this round: %s", service, exc)
             return None
         raise _infra(service, exc) from exc
@@ -282,6 +282,7 @@ class _Runner:
         }
         awaited = {(dep, d.condition) for deps in plan.depends_on.values() for dep, d in deps.items()}
         self._wait_exit = {u for u, c in awaited if c == "service_completed_successfully"}
+        self._wait_health = {u for u, c in awaited if c == "service_healthy"}
         self._pids: dict[str, str] = {}
         self._exit_codes: dict[str, int] = {}
 
@@ -302,8 +303,11 @@ class _Runner:
         self._pids[name] = pid
         self._gates[(name, "service_started")].open()
         if name in self._wait_exit:
-            # For service_completed_successfully deps Compose only waits for exit, not health (so does up --wait).
-            await self._completion(name, pid)
+            if name in self._wait_health:
+                await run_all((self._health(name, unit, pid, started_at), self._completion(name, pid)))
+            else:
+                # A one-shot service only needs health when a dependent explicitly requires it.
+                await self._completion(name, pid)
         elif unit.healthcheck is not None:
             await self._health(name, unit, pid, started_at)
 

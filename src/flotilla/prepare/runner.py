@@ -24,6 +24,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, TextIO
 
+from flotilla._io import owned_io
 from flotilla._version import __version__
 from flotilla.build.driver import BuildContext, build_task
 from flotilla.compose.task import HarborTask, TaskError, find_tasks
@@ -40,7 +41,6 @@ from flotilla.share.publish import TASKS, PublishError, mark_published, publish_
 Environments = Callable[[Path], Sequence[HarborTask]]
 ContextFactory = Callable[[Path], BuildContext]  # journal directory -> build context
 AnchorFactory = Callable[[], Awaitable[Anchor]]  # returns a started anchor; prepare closes it
-_UNSAFE = re.compile(r"[^A-Za-z0-9_.-]+")
 _REPO_UNSAFE = re.compile(r"[^a-z0-9]+")
 
 
@@ -92,6 +92,8 @@ async def prepare(
     `anchor` starts the shared-storage anchor; it is called only once a task has files to publish.
     """
     sources = _discover(roots)
+    if out.exists():
+        _recover_tail(out)
     existing = {row.id for row in load_prepared(out)} if out.exists() else set()
     todo = [s for s in sources if force or s.id not in existing]
     skipped = tuple(s.id for s in sources if s not in todo)
@@ -110,6 +112,10 @@ async def prepare(
     failures.parent.mkdir(parents=True, exist_ok=True)
     workers = concurrency or cfg.prepare.concurrency
     session = _Session(cfg, ctx, anchor, environments, work, revs)
+    if force and out.exists():
+        # Published files are replaced in place. Invalidate old rows before any replacement so interruption
+        # cannot make a later run skip a task whose files no longer match its row.
+        _compact(out, drop={source.id for source in todo})
     previous_tempdir = tempfile.tempdir
     # Docker exports stage archives under the default temp dir; keep them on the work volume, not the root disk.
     tempfile.tempdir = str(scratch)
@@ -172,7 +178,7 @@ class _Session:
         self.pool: ThreadPoolExecutor | None = None
 
     async def _thread(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-        return await asyncio.get_running_loop().run_in_executor(self.pool, lambda: fn(*args, **kwargs))
+        return await owned_io(fn, *args, executor=self.pool, **kwargs)
 
     async def anchor(self) -> Anchor:
         async with self._lock:
@@ -191,7 +197,7 @@ class _Session:
             raise _Failed("resolve", f"{type(exc).__name__}: {exc}") from exc
         if len(envs) > len(ROLES):
             raise _Failed("resolve", "multiple verifier environments are not supported")
-        scratch = self.work / _UNSAFE.sub("-", source.id)
+        scratch = Path(tempfile.mkdtemp(prefix="task-", dir=self.work))
         try:
             environments = {
                 role: await self._environment(source, role, env, scratch / role)
@@ -286,6 +292,25 @@ def _append(handle: TextIO, line: str) -> None:
     handle.write(line + "\n")
     handle.flush()
     os.fsync(handle.fileno())
+
+
+def _recover_tail(out: Path) -> None:
+    """Recover an interrupted final append; complete rows and newline-terminated corruption stay strict."""
+    with out.open("r+b") as handle:
+        offset = 0
+        for line in handle:
+            if not line.endswith(b"\n"):
+                try:
+                    json.loads(line)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    handle.truncate(offset)
+                else:
+                    handle.seek(0, os.SEEK_END)
+                    handle.write(b"\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+                return
+            offset += len(line)
 
 
 def _compact(out: Path, *, drop: set[str]) -> None:

@@ -1,4 +1,4 @@
-"""Task file export and the `flotilla build` driver.
+"""Task file export and the offline build driver used by `flotilla prepare`.
 
 Fake registry / builder / image exporter for driver tests; no network or docker. They verify ordering, dispositions,
 skips and error attribution.
@@ -30,19 +30,16 @@ class FakeRegistry:
     def __init__(
         self,
         *,
-        history: Sequence[Mapping[str, Any]] = (),
         missing: Sequence[str] = (),
         digests: Mapping[str, str] | None = None,
         user: str = "0:0",
     ) -> None:
-        self._history = list(history)
         self._missing = set(missing)
         self.configs = 0
         self.digests = dict(digests or {})
         self.user = user
         self.resolved: list[tuple[str, str]] = []
         self.copied: list[tuple[str, str]] = []
-        self.histories: list[str] = []
 
     def digest(self, name: str, reference: str) -> str:
         from flotilla.build.images import ImageError
@@ -56,14 +53,6 @@ class FakeRegistry:
     def image_config(self, pinned: str) -> Mapping[str, Any]:
         self.configs += 1
         return {"Cmd": ["/bin/bash"], "WorkingDir": "/app", "User": self.user}
-
-    def image_history(self, pinned: str) -> Sequence[Mapping[str, Any]]:
-        from flotilla.build.images import ImageError
-
-        if any(m in pinned for m in self._missing):
-            raise ImageError(f"not found: {pinned}")
-        self.histories.append(pinned)
-        return self._history
 
     def copy(self, source: str, target: str) -> None:
         self.copied.append((source, target))

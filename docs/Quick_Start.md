@@ -78,6 +78,8 @@ flotilla prepare hello-web --deployment deployment.toml --out prepared.jsonl
 
 Pass a dataset directory instead of one task to prepare every task in it. Tasks that already have a row are skipped, so an interrupted run resumes where it stopped. After you change a task, rerun with `--force`. Failures go to `prepared.failures.jsonl`.
 
+Before a forced rebuild publishes files, prepare removes the selected tasks' old rows. If interrupted, rerun the same command without `--force` to finish the pending tasks. Prepare also recovers an incomplete final JSONL append; malformed complete rows remain errors. The standalone `load_prepared` reader remains strict.
+
 ## 4. Run it
 
 `run_hello.py`:

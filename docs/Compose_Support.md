@@ -73,6 +73,8 @@ Top-level networks support `internal: true`. `driver` must be `bridge`, `ipam` m
 | `cap_add`, `devices`, `sysctls`, `extra_hosts`, `domainname`, `links`, `profiles`, `secrets`, `configs`, `extends`, `volumes_from`, `scale` | Rejected: not implemented |
 | Any other key, including `deploy` keys other than resource limits and `x-*` | Rejected |
 
+A service can have dependents requiring health and others requiring successful completion. Both conditions are tracked independently. A service required only for successful completion does not need to pass its healthcheck.
+
 ## Volumes and bind mounts
 
 Short syntax `source:target[:ro|rw]` is a bind mount when the source starts with `.`, `/`, or `~`, and a named volume otherwise. Long syntax supports `type` (`volume`, `bind`, `tmpfs`), `source`, `target`, `read_only`, `volume.nocopy`, and `bind.create_host_path`. Anonymous volumes are rejected, the target must be absolute (and not `/` or under `/.flotilla`), and bind sources must be relative paths inside `environment/`.
@@ -86,6 +88,8 @@ Flotilla decides how to provide each volume from how it is used:
 | Several references, at least one writable | A per-environment shared directory, seeded from the image or the bind source. Requires the deployment's `shared_volume` capability |
 
 A missing bind source is rejected: the platform would mount an empty directory over the target, so a task whose files were never committed would run with empty tools and grade as unsolvable. `/tmp` must stay writable (framework file transfers and the platform exec daemon write there), so a read-only mount on it is rejected. Mounting a single file that is not copied into an image requires the `volume_file` capability.
+
+Shared named-volume seeds preserve the image directory's numeric owner and mode, including the root directory when it has no children. An absent image path produces no seed.
 
 For read-only root filesystems, even single-service writable volumes/binds use real environment-owned mounts. Framework scratch space is mounted explicitly at `/.flotilla-runtime`; this path and `/.flotilla` are reserved. See [read-only rootfs and tmpfs](Readonly_Rootfs_and_Tmpfs.md) for deployment selection, supported syntax, limits, defaults and migration from directory emulation.
 
@@ -107,3 +111,5 @@ Only values under `services` are interpolated, and variables come only from `env
 | `$VAR`, `${VAR:?err}`, `${VAR?err}` | Rejected |
 
 A variable referenced in a service's `environment` (or `env_file`) that `.env` does not define becomes a **runtime parameter**. Its value is supplied when the environment is opened, from `OpenOptions.runtime_params` or the deployment's `runtime_params` table (the request wins), or from the Compose default. Opening fails if a parameter has neither a value nor a default. An undefined variable without a default elsewhere in a service rejects the task.
+
+Values supplied by `.env` stay fixed, including inside nested defaults and alternatives. For example, `${A:-${B}}` with `B` defined in `.env` only needs runtime configuration for `A`; a runtime `B` does not override the task's value. Referenced fixed values are stored separately from expression syntax, preserving literal dollars and braces.

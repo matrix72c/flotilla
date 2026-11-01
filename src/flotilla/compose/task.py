@@ -111,7 +111,7 @@ def load_environment(
     variables = {**_dotenv(confined(env_dir, ".env")), **HARBOR_VARIABLES}
     _env_files(overlay, env_dir)
     project = normalize(overlay, variables)
-    if _network_mode(environment, baseline=True) == "no-network":
+    if _network_mode(environment) == "no-network":
         # Preserve peer topology while removing external access from every service. This survives
         # compilation/publication and cannot be undone by a caller's deployment egress policy.
         project = replace(
@@ -144,23 +144,21 @@ def load_environment(
 
 
 def _network_policies(config: Mapping[str, Any]) -> Iterator[Finding]:
-    phases = [("environment", _table(config, "environment"), True)]
-    for where, table, baseline in phases:
-        mode = _network_mode(table, baseline=baseline)
-        if mode is not None and mode not in (PUBLIC, "no-network"):
-            yield Finding(
-                f"task.toml:{where}.network_mode",
-                "reject",
-                f"environment network mode {mode!r} is unsupported by core task loading",
-            )
+    mode = _network_mode(_table(config, "environment"))
+    if mode is not None and mode not in (PUBLIC, "no-network"):
+        yield Finding(
+            "task.toml:environment.network_mode",
+            "reject",
+            f"environment network mode {mode!r} is unsupported by core task loading",
+        )
 
 
-def _network_mode(table: Mapping[str, Any], *, baseline: bool) -> str | None:
+def _network_mode(table: Mapping[str, Any]) -> str | None:
     """network_mode set explicitly or via `allow_internet`; None when unset (the baseline is public)."""
     mode = table.get("network_mode")
     if isinstance(mode, str):
         return mode
-    if baseline and "allowed_hosts" not in table and isinstance(table.get("allow_internet"), bool):
+    if "allowed_hosts" not in table and isinstance(table.get("allow_internet"), bool):
         return PUBLIC if table["allow_internet"] else "no-network"
     return None
 

@@ -75,8 +75,8 @@ def scan(
                 {
                     name
                     for params in project.runtime_params.values()
-                    for expr, _ in params.values()
-                    for name in interpolate(expr, {}).unresolved
+                    for expression in params.values()
+                    for name in interpolate(expression.expr, expression.variables).unresolved
                 }
             )
         ),

@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
 from flotilla.platform.base import TmpfsMount
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 Condition = Literal["service_started", "service_healthy", "service_completed_successfully"]
 RestartPolicy = Literal["no", "always", "unless-stopped", "on-failure"]
@@ -81,11 +81,17 @@ class TrialVolume(_Model):
 
 
 class RuntimeParam(_Model):
-    """An `environment` entry referencing a variable the task lacks: the provider substitutes `param` into `expr`."""
+    """An environment entry evaluated once at runtime, retaining referenced build-time values as literals."""
 
     service: str
     var: str
     expr: str
+    variables: dict[str, str] = {}
+
+
+class _RuntimeParamV6(RuntimeParam):
+    """Schema 6 repeated each expression once per unresolved variable."""
+
     param: str
     default: str | None
 
@@ -115,6 +121,17 @@ class Manifest(_Model):
     findings: list[Finding] = []
 
     model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _upgrade_v6(cls, data: object) -> object:
+        if not isinstance(data, dict) or data.get("schema", data.get("schema_")) != 6:
+            return data
+        parameters = TypeAdapter(list[_RuntimeParamV6]).validate_python(data.get("runtime_params", []))
+        expressions = {(p.service, p.var): RuntimeParam(service=p.service, var=p.var, expr=p.expr) for p in parameters}
+        upgraded = {**data, "schema": SCHEMA_VERSION, "runtime_params": list(expressions.values())}
+        upgraded.pop("schema_", None)
+        return upgraded
 
     def dump_json(self) -> str:
         return self.model_dump_json(by_alias=True, indent=2)

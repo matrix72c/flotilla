@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from flotilla.compose.interpolate import interpolate
 from flotilla.compose.layout import Layout, classify
 from flotilla.compose.model import MAIN, ImageMeta, Project, Service
 from flotilla.manifest import (
@@ -29,10 +28,9 @@ def build_manifest(
     images: Mapping[str, str],
     meta: Mapping[str, ImageMeta],
     resources: Mapping[str, Resources],
-    users: Mapping[str, tuple[int, int]] | None = None,
     seeds: Mapping[str, str] | None = None,
 ) -> Manifest:
-    """Write the task manifest. `users`: numeric identities from Compose `user` (service -> (uid, gid)), per image.
+    """Write the task manifest. `meta` includes the resolved image or Compose user identity.
 
     `seeds`: volumes whose initial content was actually exported (name -> tar relative to task files), passed by
     the builder after exporting task files; omitted means no volume has initial content.
@@ -43,8 +41,7 @@ def build_manifest(
         raise ValueError("project has rejected findings; cannot write a manifest")
     layout = classify(project.services)
     units = {
-        name: _unit(svc, images[name], meta[name], resources[name], (users or {}).get(name), layout)
-        for name, svc in project.services.items()
+        name: _unit(svc, images[name], meta[name], resources[name], layout) for name, svc in project.services.items()
     }
     return Manifest(
         task=task,
@@ -59,10 +56,9 @@ def build_manifest(
         trial_volumes=_trial_volumes(layout, seeds or {}),
         task_files=None,  # written by publish
         runtime_params=[
-            RuntimeParam(service=svc, var=var, expr=expr, param=param, default=default)
+            RuntimeParam(service=svc, var=var, expr=expression.expr, variables=dict(expression.variables))
             for svc, params in sorted(project.runtime_params.items())
-            for var, (expr, _) in sorted(params.items())
-            for param, default in interpolate(expr, {}).unresolved.items()
+            for var, expression in sorted(params.items())
         ],
         external_units=sorted(
             n for n, s in project.services.items() if any(not project.networks[net].internal for net in s.networks)
@@ -89,16 +85,14 @@ def _unit(
     image: str,
     meta: ImageMeta,
     resources: Resources,
-    user: tuple[int, int] | None,
     layout: Layout,
 ) -> Unit:
-    uid, gid = user if user is not None else (meta.uid, meta.gid)
     env = {**meta.env, **svc.environment}  # svc.environment includes env_file; it overrides image ENV.
     hc = None if svc.healthcheck_disabled else (svc.healthcheck or meta.healthcheck)
     return Unit(
         image=image,
         resources=resources,
-        context=Context(env=env, uid=uid, gid=gid, cwd=svc.working_dir or meta.workdir or "/"),
+        context=Context(env=env, uid=meta.uid, gid=meta.gid, cwd=svc.working_dir or meta.workdir or "/"),
         command=list(c) if (c := synthesize_command(svc, meta)) is not None else None,
         healthcheck=None
         if hc is None
@@ -143,8 +137,7 @@ def _networks(project: Project) -> dict[str, Network]:
 def _trial_volumes(layout: Layout, seeds: Mapping[str, str]) -> list[TrialVolume]:
     """Directories this trial must prepare. `seeds` holds volumes that **actually exported** a seed (name -> tar).
 
-    No seed is produced when the image has nothing under the mount point (matching Docker's empty volume), and the
-    manifest must not declare one, or prepare would unpack a nonexistent tar.
+    An absent image path produces no seed; an empty directory's seed can still carry its root metadata.
     """
     out: list[TrialVolume] = []
     for v in layout.volumes:

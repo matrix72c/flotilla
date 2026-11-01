@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 from flotilla._io import owned_io
 from flotilla.platform.base import (
     RUNTIME_MOUNT,
+    CommandBusy,
     ErrorCategory,
     ExecAttempt,
     ExecOutcomeUnknown,
@@ -131,7 +132,7 @@ class Service:
                         ) from None
                     return ExecResult(-1, b"", b"", timed_out=True)
                 except FlotillaError as exc:
-                    if attempt.sent or isinstance(exc, ExecOutcomeUnknown):
+                    if not isinstance(exc, CommandBusy) and (attempt.sent or isinstance(exc, ExecOutcomeUnknown)):
                         await manager.release(self._env.id)
                     raise
 
@@ -197,8 +198,8 @@ class Service:
                 except asyncio.CancelledError:
                     await manager.cancel_execution(self._env.id, handle, attempt)
                     raise
-                except Exception:
-                    if attempt.sent:
+                except Exception as exc:
+                    if attempt.sent and not isinstance(exc, CommandBusy):
                         await manager.cancel_execution(self._env.id, handle, attempt)
                     raise
 

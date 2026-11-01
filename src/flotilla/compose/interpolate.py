@@ -21,32 +21,34 @@ class Interpolated:
 
     value: object
     unresolved: dict[str, str | None] = field(default_factory=dict)
+    references: set[str] = field(default_factory=set)
 
 
-def interpolate(value: object, variables: Mapping[str, str], *, defer: bool = False) -> Interpolated:
+def interpolate(value: object, variables: Mapping[str, str]) -> Interpolated:
     """Interpolate an arbitrarily nested YAML value: strings are substituted, dicts and lists recursed, others kept.
     Dict keys are not interpolated.
 
     Unprovided variables use their default if given, otherwise the empty string; both are recorded in `unresolved`.
     """
     unresolved: dict[str, str | None] = {}
-    return Interpolated(_walk(value, variables, unresolved, path="$", defer=defer), unresolved)
+    references: set[str] = set()
+    return Interpolated(_walk(value, variables, unresolved, references, path="$"), unresolved, references)
 
 
 def _walk(
-    value: object, variables: Mapping[str, str], unresolved: dict[str, str | None], path: str, *, defer: bool
+    value: object, variables: Mapping[str, str], unresolved: dict[str, str | None], references: set[str], path: str
 ) -> object:
     if isinstance(value, str):
-        return _string(value, variables, unresolved, path, defer=defer)
+        return _string(value, variables, unresolved, references, path)
     if isinstance(value, dict):
-        return {k: _walk(v, variables, unresolved, f"{path}.{k}", defer=defer) for k, v in value.items()}
+        return {k: _walk(v, variables, unresolved, references, f"{path}.{k}") for k, v in value.items()}
     if isinstance(value, list):
-        return [_walk(v, variables, unresolved, f"{path}[{i}]", defer=defer) for i, v in enumerate(value)]
+        return [_walk(v, variables, unresolved, references, f"{path}[{i}]") for i, v in enumerate(value)]
     return value
 
 
 def _string(
-    text: str, variables: Mapping[str, str], unresolved: dict[str, str | None], path: str, *, defer: bool
+    text: str, variables: Mapping[str, str], unresolved: dict[str, str | None], references: set[str], path: str
 ) -> str:
     """Substitute `$$`, `${VAR}`, `${VAR:-default}`, `${VAR-default}`, `${VAR:+alt}` and `${VAR+alt}`.
 
@@ -57,10 +59,10 @@ def _string(
     i = 0
     while i < len(text):
         if text.startswith("$$", i):
-            out.append("$$" if defer else "$")
+            out.append("$")
             i += 2
         elif text.startswith("${", i):
-            value, i = _reference(text, i, variables, unresolved, path, defer=defer)
+            value, i = _reference(text, i, variables, unresolved, references, path)
             out.append(value)
         elif text[i] == "$" and _NAME.match(text, i + 1):
             raise InterpolationError(f"{path}: bare $VAR is not supported, use ${{VAR}}: {text!r}")
@@ -75,9 +77,8 @@ def _reference(
     start: int,
     variables: Mapping[str, str],
     unresolved: dict[str, str | None],
+    references: set[str],
     path: str,
-    *,
-    defer: bool,
 ) -> tuple[str, int]:
     """Substitute the `${...}` starting at `start`; returns the value and the index after its closing brace."""
     close = _closing(text, start + 2, path)
@@ -87,6 +88,7 @@ def _reference(
     if name is None or (op is None and name.end() != len(body)):
         raise InterpolationError(f"{path}: unsupported interpolation syntax ${{{body}}}")
     var = name.group()
+    references.add(var)
     arg = body[name.end() + len(op) :] if op else ""
 
     value: str | None  # None: the argument's value
@@ -98,21 +100,18 @@ def _reference(
         elif op == ":-" and current == "":
             used, value = True, None
         else:
-            used, value = False, current.replace("$", "$$") if defer else current
+            used, value = False, current
     else:
         # Unprovided: `-` forms fall back to their default, `+` forms and bare references to the empty string.
         used = op in (":-", "-")
         value = None if used else ""
-    # An unused argument is still checked for syntax, but its references are not recorded.
-    argument = _string(arg, variables, unresolved if used else {}, path, defer=defer)
+    # An unused argument is still checked for syntax; its missing variables do not become required.
+    argument = _string(arg, variables, unresolved if used else {}, references, path)
     result = argument if value is None else value
-    if var not in variables:
-        # Only a bare reference makes the variable required; if any reference lacks a default, later defaults
-        # cannot lift that.
-        if var not in unresolved or op is None:
-            unresolved[var] = result if op is not None else None
-        if defer:
-            result = text[start : close + 1]
+    # Only a bare reference makes the variable required; if any reference lacks a default, later defaults
+    # cannot lift that.
+    if var not in variables and (var not in unresolved or op is None):
+        unresolved[var] = result if op is not None else None
     return result, close + 1
 
 

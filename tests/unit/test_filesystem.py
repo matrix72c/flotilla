@@ -13,7 +13,7 @@ from flotilla.compose.layout import classify
 from flotilla.compose.normalize import normalize
 from flotilla.compose.task import load_task
 from flotilla.config import FlotillaConfig
-from flotilla.manifest import Manifest
+from flotilla.manifest import SCHEMA_VERSION, Manifest
 from flotilla.platform.base import Capabilities, Resources, TmpfsMount
 from flotilla.platform.filesystem import memory_bytes
 from flotilla.platform.opensandbox.filesystem import INTERNAL_LIMITS, parse_effective
@@ -66,7 +66,7 @@ def test_compose_filesystem_fields_roundtrip_to_runtime(tmp_path: Path) -> None:
     assert "rm -rf /tmp" not in dockerfile and "rm -rf /cache" not in dockerfile
     assert not any(f.kind == "equivalent" and "tmpfs" in f.path for f in manifest.findings)
     with pytest.raises(ValueError, match="schema"):
-        Manifest.load_json(manifest.dump_json().replace('"schema": 6', '"schema": 5'))
+        Manifest.load_json(manifest.dump_json().replace(f'"schema": {SCHEMA_VERSION}', '"schema": 5'))
 
 
 @pytest.mark.parametrize(

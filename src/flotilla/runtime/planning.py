@@ -97,8 +97,8 @@ def _apply_runtime_params(
     """Substitute configured values into the original expressions; fall back to defaults, error if there is none."""
     for p in manifest.runtime_params:
         if p.service not in env_by_unit:
-            raise PlanError(f"runtime parameter {p.param} targets unknown service {p.service}")
-        result = interpolate(p.expr, values)
+            raise PlanError(f"runtime environment entry {p.var} targets unknown service {p.service}")
+        result = interpolate(p.expr, {**values, **p.variables})
         missing = [name for name, default in result.unresolved.items() if default is None]
         if missing:
             raise PlanError(

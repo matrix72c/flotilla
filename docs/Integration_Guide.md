@@ -54,6 +54,8 @@ Each line is one task: `id` (`<dataset>/<task path>`), `task_dir`, filter attrib
 
 Other top-level keys are kept as they are, so your framework may add its own fields to the lines. `env` belongs to Flotilla: regenerate it with `flotilla prepare --force` when a task or Flotilla's preparation rules change, and only while no job is using the rows.
 
+New environments use manifest schema 7: one runtime expression per service environment variable, with referenced `.env` values stored as literals. Schema 6 rows are converted when read and remain usable. Regenerate tasks affected by the nested-interpolation or volume-root metadata fixes; reading an older row cannot recover information omitted during its original preparation.
+
 ```python
 from flotilla import load_prepared
 
