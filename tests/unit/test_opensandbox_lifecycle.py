@@ -13,9 +13,10 @@ from datetime import UTC, datetime
 import httpx
 import pytest
 
+from flotilla.core.waiting import describe
 from flotilla.platform.base import ErrorCategory, FlotillaError, InstanceStatus
 from flotilla.platform.opensandbox.http import Http, RetryPolicy
-from flotilla.platform.opensandbox.lifecycle import Lifecycle, metadata_filter, parse_state
+from flotilla.platform.opensandbox.lifecycle import MESSAGE_LIMIT, Lifecycle, metadata_filter, parse_state
 from flotilla.testing.platform import ManualClock
 
 Handler = Callable[[httpx.Request], httpx.Response]
@@ -223,3 +224,26 @@ async def test_put_policy_replaces_whole_policy(clock: ManualClock) -> None:
     assert captured["method"] == "PUT"
     assert captured["path"] == "/v1/sandboxes/sb-7/networkpolicy"
     assert captured["body"] == policy
+
+
+def test_failure_reason_becomes_message() -> None:
+    reason = "pod p startup failed: phase=Pending:\n  container sandbox terminated reason=StartError exitCode=128"
+    item = {"id": "x", "status": {"state": "Failed"}, "metadata": {"flotilla/unit": "u", "failureReason": reason}}
+    state = parse_state(item)
+    assert (
+        state.message
+        == "pod p startup failed: phase=Pending: container sandbox terminated reason=StartError exitCode=128"
+    )
+    assert describe(state) == f"terminal / Failed / {state.message}"
+
+
+def test_pending_reason_is_used_without_failure_reason() -> None:
+    state = parse_state({"id": "x", "status": {"state": "Pending"}, "pendingReason": "Insufficient cpu"})
+    assert state.message == "Insufficient cpu"
+
+
+def test_message_is_bounded_and_absent_by_default() -> None:
+    long = parse_state({"id": "x", "status": {"state": "Failed"}, "metadata": {"failureReason": "e" * 2000}})
+    assert long.message is not None and len(long.message) == MESSAGE_LIMIT and long.message.endswith("...")
+    assert parse_state({"id": "x", "status": {"state": "Failed"}, "metadata": {"failureReason": 7}}).message is None
+    assert parse_state({"id": "x", "status": {"state": "Running"}}).message is None
