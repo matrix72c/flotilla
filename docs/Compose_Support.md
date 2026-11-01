@@ -85,7 +85,7 @@ Flotilla decides how to provide each volume from how it is used:
 | One writable reference | Copied into that service's image at build time |
 | Several references, at least one writable | A per-environment shared directory, seeded from the image or the bind source. Requires the deployment's `shared_volume` capability |
 
-A missing bind source becomes an empty directory, as in Docker (warning), unless `create_host_path: false`. Mounting a single file that is not copied into an image requires the `volume_file` capability.
+A missing bind source is rejected: the platform would mount an empty directory over the target, so a task whose files were never committed would run with empty tools and grade as unsolvable. `/tmp` must stay writable (framework file transfers and the platform exec daemon write there), so a read-only mount on it is rejected. Mounting a single file that is not copied into an image requires the `volume_file` capability.
 
 For read-only root filesystems, even single-service writable volumes/binds use real environment-owned mounts. Framework scratch space is mounted explicitly at `/.flotilla-runtime`; this path and `/.flotilla` are reserved. See [read-only rootfs and tmpfs](Readonly_Rootfs_and_Tmpfs.md) for deployment selection, supported syntax, limits, defaults and migration from directory emulation.
 

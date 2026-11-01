@@ -83,6 +83,18 @@ def test_share_mount_conflict(caps: Capabilities) -> None:
     assert scan("t", _project(svc), caps).status == "rejected"
 
 
+@pytest.mark.parametrize("kind", ["volume", "bind"])
+def test_read_only_tmp_is_rejected(caps: Capabilities, kind: str) -> None:
+    source = "data" if kind == "volume" else "./data"
+    mount = {"type": kind, "source": source, "target": "/tmp"}
+    top: dict[str, Any] = {"volumes": {"data": {}}} if kind == "volume" else {}
+    assert scan("t", _project({"a": {"image": "a", "volumes": [mount]}}, **top), caps).status == "accepted"
+    result = scan("t", _project({"a": {"image": "a", "volumes": [{**mount, "read_only": True}]}}, **top), caps)
+    assert "/tmp must stay writable; mount it read-write" in _rejects(result)
+    nested = {"type": kind, "source": source, "target": "/tmp/pwn", "read_only": True}
+    assert scan("t", _project({"a": {"image": "a", "volumes": [nested]}}, **top), caps).status == "accepted"
+
+
 def test_bind_sources(caps: Capabilities, tmp_path: Path) -> None:
     (tmp_path / "conf.yml").write_text("x")
     (tmp_path / "dir").mkdir()
@@ -100,14 +112,16 @@ def test_bind_sources(caps: Capabilities, tmp_path: Path) -> None:
             ],
         }
     }
+    # A missing source is rejected even with create_host_path: the platform mounts an empty
+    # directory over the target, so the task runs with empty files and grades as unsolvable.
     r = scan("t", _project(services), caps, env_dir=str(tmp_path))
-    assert r.status == "accepted"
-    assert any("missing.jar" in f.reason and f.kind == "warn" for f in r.findings)  # same as Docker: empty directory
-    # Deployment lacks file mounts: a read-only single-file bind is rejected.
-    assert scan("t", _project(services), replace(caps, volume_file=False), env_dir=str(tmp_path)).status == "rejected"
-    # create_host_path: false and the source does not exist: rejected.
-    strict = {"a": {"image": "a", "volumes": [bind("missing.jar", bind={"create_host_path": False})]}}
-    assert scan("t", _project(strict), caps, env_dir=str(tmp_path)).status == "rejected"
+    assert r.status == "rejected"
+    assert any("missing.jar" in x and "empty directory" in x for x in _rejects(r))
+    plain = {"a": {"image": "a", "volumes": [bind("missing.jar")]}}
+    assert scan("t", _project(plain), caps, env_dir=str(tmp_path)).status == "rejected"
+    # Deployment lacks file mounts: a read-only single-file bind that does exist is still rejected.
+    nofile = {"a": {"image": "a", "volumes": [bind("conf.yml")]}}
+    assert scan("t", _project(nofile), replace(caps, volume_file=False), env_dir=str(tmp_path)).status == "rejected"
 
 
 def test_compose_rejections_carry_through(caps: Capabilities) -> None:

@@ -100,7 +100,7 @@ def _export_binds(
                     stat.S_IMODE(info.st_mode),
                 )
         if not source.exists():
-            # As in Docker, a missing source mounts as an empty dir (scan rejects create_host_path=false).
+            # Unreachable for scanned tasks (scan rejects missing sources); kept for direct callers.
             dest.mkdir(parents=True, exist_ok=True)
         elif source.is_dir():
             shutil.copytree(source, dest, symlinks=True, dirs_exist_ok=True)

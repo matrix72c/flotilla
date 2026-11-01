@@ -144,13 +144,14 @@ def _bind_sources(project: Project, env_dir: str, caps: Capabilities) -> Iterabl
             path = f"services.{unit}.volumes[{target}]"
             full = os.path.join(env_dir, source)
             if not os.path.exists(full):
-                mount = next(m for m in project.services[unit].volumes if m.target == target)
-                if mount.create_host_path:
-                    yield Finding(
-                        path, "warn", f"bind source {source} does not exist: mounted as an empty dir, as in Docker"
-                    )
-                else:
-                    yield Finding(path, "reject", f"bind source {source} does not exist and create_host_path is false")
+                # Docker would create an empty directory, but the platform mounts it over the image path the same
+                # way: a task whose files were never committed starts with empty tools (or fails outright when the
+                # image has a file there) and grades as unsolvable. Refuse so the dataset is fixed instead.
+                yield Finding(
+                    path,
+                    "reject",
+                    f"bind source {source} does not exist: it would mount as an empty directory",
+                )
             elif os.path.isfile(full) and g.mode != "image" and not caps.volume_file:
                 yield Finding(
                     path, "reject", f"bind source {source} is a single file; this deployment lacks file mounts"
@@ -167,6 +168,9 @@ def _share_conflicts(project: Project) -> Iterable[Finding]:
                     yield Finding(
                         f"services.{name}", "reject", f"{p} conflicts with the reserved mount point {reserved}"
                     )
+        if any(m.target == "/tmp" and m.read_only for m in svc.volumes):
+            # Framework file transfers and the platform exec daemon's command logs are written under /tmp.
+            yield Finding(f"services.{name}.volumes[/tmp]", "reject", "/tmp must stay writable; mount it read-write")
         if svc.working_dir and any(
             svc.working_dir == p or svc.working_dir.startswith(p + "/") for p in RESERVED_MOUNTS
         ):
