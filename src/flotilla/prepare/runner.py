@@ -216,7 +216,7 @@ class _Session:
 
     async def _environment(self, source: _Source, role: str, env: HarborTask, scratch: Path) -> PreparedEnvironment:
         ctx = self.ctx
-        if ctx.settings.target:
+        if ctx.settings.target and not ctx.settings.flat_repository:
             ctx = replace(ctx, settings=replace(ctx.settings, target=f"{ctx.settings.target}/{source.repository}"))
         identity = f"{source.id.partition('/')[2].replace('/', '--')}--{role}"
         outcome = await self._thread(build_task, env, scratch, ctx, identity=identity)

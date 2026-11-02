@@ -107,6 +107,7 @@ class Build(_Model):
     pullable_registries: tuple[str, ...] = ()
     mirror_images: bool = False
     target: str = ""
+    flat_repository: bool = False  # push into target directly, not target/<dataset-repository>
     image_replacements: dict[str, str] = {}
     cache_images: bool = False
 
@@ -115,6 +116,7 @@ class Build(_Model):
             pullable_registries=self.pullable_registries,
             mirror_images=self.mirror_images,
             target=self.target,
+            flat_repository=self.flat_repository,
             image_replacements=self.image_replacements,
             cache_images=self.cache_images,
         )

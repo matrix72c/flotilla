@@ -147,6 +147,12 @@ class OpenSandboxPlatform:
         self._addresses: dict[str, str] = {}  # iid -> internal address (fixed while alive)
 
     async def create(self, spec: InstanceSpec) -> InstanceHandle:
+        # The fallback runtime (kata) rejects tmpfsMounts ("不支持 sysbox/kata 运行时组合"); the VM
+        # provides its own /tmp. Drop tmpfs mounts instead of failing the create — they were best-effort
+        # (compose `tmpfs:`) and no task depends on tmpfs semantics. Normalized here so the requested
+        # and verified filesystem views agree.
+        if spec.fallback_runtime and spec.tmpfs_mounts:
+            spec = replace(spec, tmpfs_mounts=())
         try:
             self.caps.require_filesystem(
                 spec.readonly_rootfs,
