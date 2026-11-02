@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import shlex
-from collections.abc import Mapping
+from collections.abc import Mapping, Callable
 from dataclasses import dataclass
 
 from flotilla.core.plan import Condition, Healthcheck, TrialPlan, Unit
@@ -234,9 +234,17 @@ async def start_all(
     handles: Mapping[str, InstanceHandle],
     *,
     poll_interval_s: float = 2.0,
+    recreate: "Callable[[str], Awaitable[InstanceHandle | None]] | None" = None,
+    fallback_after_s: float = 0.0,
 ) -> Started:
-    """Start all services gated by depends_on and wait until ready (see module docs). Any failure cancels the rest."""
-    runner = _Runner(platform, clock, plan, handles, poll_interval_s)
+    """Start all services gated by depends_on and wait until ready (see module docs). Any failure cancels the rest.
+
+    `recreate`: optional callback (unit -> new handle) that recreates a unit's sandbox under the
+    health-fallback runtime; when given, a service whose healthcheck fails is retried once on the
+    new sandbox before the failure is final. Used for the kata runtime fallback (JVM hangs).
+    """
+    runner = _Runner(platform, clock, plan, handles, poll_interval_s, recreate=recreate,
+                     fallback_after_s=fallback_after_s)
     return await runner.run()
 
 
@@ -268,12 +276,17 @@ class _Runner:
         plan: TrialPlan,
         handles: Mapping[str, InstanceHandle],
         poll_interval_s: float,
+        recreate: "Callable[[str], Awaitable[InstanceHandle | None]] | None" = None,
+        fallback_after_s: float = 0.0,
     ) -> None:
         self._platform = platform
         self._clock = clock
         self._plan = plan
         self._handles = handles
         self._poll = poll_interval_s
+        self._recreate = recreate
+        self._fallback_after_s = fallback_after_s
+        self._fell_back: set[str] = set()
         # Three gates per service: started, healthy, exited with 0.
         self._gates: dict[tuple[str, Condition], _Gate] = {
             (u, c): _Gate()
@@ -326,9 +339,37 @@ class _Runner:
 
     async def _health(self, name: str, unit: Unit, pid: str, started_at: float) -> None:
         gate = self._gates[(name, "service_healthy")]
+        first = name not in self._fell_back
+        wait = wait_healthy(self._platform, self._clock, self._handles[name], name, unit, pid, started_at=started_at)
         try:
-            await wait_healthy(self._platform, self._clock, self._handles[name], name, unit, pid, started_at=started_at)
-        except FlotillaError as exc:
+            if first and self._recreate is not None and self._fallback_after_s > 0:
+                async with asyncio.timeout(self._fallback_after_s):
+                    await wait
+            else:
+                await wait
+        except (FlotillaError, TimeoutError) as exc:
+            if self._recreate is not None and name not in self._fell_back:
+                log.warning(
+                    "%s: healthcheck failed (%s); recreating under the fallback runtime and retrying once",
+                    name, exc,
+                )
+                self._fell_back.add(name)
+                try:
+                    new_handle = await self._recreate(name)
+                except FlotillaError as recreat_exc:
+                    log.warning("%s: fallback recreation failed: %s", name, recreat_exc)
+                    new_handle = None
+                if new_handle is not None:
+                    self._handles[name] = new_handle
+                    pid = await launch(self._platform, new_handle, name, unit)
+                    self._pids[name] = pid
+                    await wait_healthy(
+                        self._platform, self._clock, new_handle, name, unit, pid,
+                        started_at=self._clock.monotonic(),
+                    )
+                    log.info("%s: healthy under the fallback runtime", name)
+                    gate.open()
+                    return
             gate.fail(exc)
             raise
         gate.open()

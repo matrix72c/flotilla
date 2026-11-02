@@ -80,6 +80,8 @@ class Trial:
         plan: TrialPlan,
         trial_id: str,
         settings: TrialSettings,
+        health_fallback: bool = False,
+        health_fallback_after_s: float = 0.0,
     ) -> None:
         plan.validate()
         if settings.ttl_s <= 0:
@@ -96,6 +98,9 @@ class Trial:
         self._handles: dict[str, InstanceHandle] = {}
         self._timings: dict[str, float] = {}
         self._recreated: set[str] = set()
+        self._health_recreated: set[str] = set()
+        self._health_fallback = health_fallback
+        self._health_fallback_after_s = health_fallback_after_s
         # Units that must be linked share one placement group; recreated units reuse it.
         self._grouped = network.link_members(plan) if network.topology(plan) is not None else frozenset()
         self._group = str(uuid.uuid4()) if self._grouped else None
@@ -122,7 +127,10 @@ class Trial:
             "start",
             start_timeout,
             lambda: process.start_all(
-                self._platform, self._clock, self._plan, self._handles, poll_interval_s=s.process_poll_s
+                self._platform, self._clock, self._plan, self._handles,
+                poll_interval_s=s.process_poll_s,
+                recreate=self._recreate_unhealthy if self._health_fallback else None,
+                fallback_after_s=self._health_fallback_after_s if self._health_fallback else 0.0,
             ),
         )
         return Ready(
@@ -229,6 +237,7 @@ class Trial:
             readonly_rootfs=u.readonly_rootfs,
             tmpfs_mounts=u.tmpfs_mounts,
             shm_size_bytes=u.shm_size_bytes,
+            fallback_runtime=(u.runtime == "kata"),
             group=self._group if unit in self._grouped else None,
         )
 
@@ -250,6 +259,36 @@ class Trial:
             }
         )
         return out
+
+    async def _recreate_unhealthy(self, unit: str) -> InstanceHandle | None:
+        """Recreate one unit's sandbox under the health-fallback runtime (kata) after a healthcheck
+        failure. Rewires the network and rewrites /etc/hosts with the new address so peers follow.
+        Returns the new handle, or None if the unit was already recreated for health reasons."""
+        if unit in self._health_recreated:
+            return None
+        self._health_recreated.add(unit)
+        old = self._handles.pop(unit, None)
+        if old is not None:
+            self._reaper.discard(self._trial_id, old.iid)
+            try:
+                await self._platform.delete(old.iid)
+            except FlotillaError:
+                pass  # best effort: the reaper reconciles strays
+        spec = replace(self._specs[unit], fallback_runtime=True)
+        self._specs[unit] = spec
+        self._recreated.add(unit)
+        handle = await self._reaper.create(self._trial_id, unit, spec)
+        self._handles[unit] = handle
+        await wait_running(
+            self._platform, self._clock, handle.iid, stage="create", pending_limit_s=self._settings.pending_timeout_s
+        )
+        addresses = await self._addresses()
+        topo = network.topology(self._plan)
+        if topo is not None:
+            members = {u: self._handles[u] for u in network.link_members(self._plan)}
+            await self._platform.link(members, topo)
+        await self._write_hosts(addresses)
+        return handle
 
     async def _addresses(self) -> dict[str, str]:
         names = sorted(self._plan.units)

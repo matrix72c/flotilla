@@ -77,6 +77,14 @@ class OpenSandbox(BackendSettings):
 
     extensions: dict[str, Any] = Field(default_factory=dict)
     privileged_extensions: dict[str, Any] = Field(default_factory=dict)
+    #: Merged into extensions when a unit is recreated after a healthcheck failure
+    #: (runtime fallback, e.g. {"runtimeClassName": "kata"} for JVM-in-container hangs).
+    health_fallback_extensions: dict[str, Any] = Field(default_factory=dict)
+    #: First-attempt healthcheck cutoff (seconds) before the runtime fallback fires.
+    #: 0 disables the cutoff (the healthcheck's own retries must exhaust first).
+    #: Needed when healthchecks have very long retry budgets (e.g. 5s x 180) that
+    #: would otherwise exceed the start stage timeout and bypass the fallback.
+    health_fallback_after_s: float = 0.0
     network: OpenSandboxNetwork = OpenSandboxNetwork()
     execd: OpenSandboxExecd = OpenSandboxExecd()
     filesystem_protocol: FilesystemProtocol = "upstream"
@@ -644,6 +652,7 @@ class OpenSandboxBackend(Backend[OpenSandbox]):
             create_fields=settings.create_fields,
             group_extension=settings.group_extension,
             privileged_extensions=settings.privileged_extensions,
+            fallback_extensions=settings.health_fallback_extensions,
             create_timeout_s=cfg.timeouts.create_request,
             max_connections=settings.max_connections,
         )

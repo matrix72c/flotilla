@@ -247,7 +247,18 @@ class Manager:
                 settings = replace(settings, ttl_s=max(settings.ttl_s, startup_ttl))
                 if request.disable_internet:
                     settings = replace(settings, external=ExternalPolicy(mode="none"))
-                trial = Trial(self.platform, self.clock, self.anchor, self.reaper, plan, eid, settings)
+                opensandbox = self.cfg.opensandbox  # None only for third-party backends
+                trial = Trial(
+                    self.platform,
+                    self.clock,
+                    self.anchor,
+                    self.reaper,
+                    plan,
+                    eid,
+                    settings,
+                    health_fallback=bool(opensandbox and opensandbox.health_fallback_extensions),
+                    health_fallback_after_s=opensandbox.health_fallback_after_s if opensandbox else 0.0,
+                )
                 try:
                     run.ready = await trial.start()
                 finally:
