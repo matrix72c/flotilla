@@ -166,6 +166,7 @@ class Manager:
             manifest,
             runtime_params=cfg.runtime_params,
             resources=resources,
+            external_mounts=request.external_mounts,
             overlay=AgentOverlay(
                 env=overlay.env,
                 services=None if overlay.services is None else frozenset(overlay.services),
@@ -180,7 +181,8 @@ class Manager:
                     unit.tmpfs_mounts,
                     privileged=unit.privileged,
                     memory=unit.resources.memory,
-                    volume_paths=tuple(m.target for m in unit.mounts),
+                    volume_paths=tuple(m.target for m in unit.mounts)
+                    + tuple(m.mount_path for m in plan.external_mounts.get(name, ())),
                     shm_size_bytes=unit.shm_size_bytes,
                 )
                 if unit.readonly_rootfs and not caps.shared_volume:
@@ -189,6 +191,8 @@ class Manager:
                 raise invalid(f"{name}: {exc}") from exc
         if network.topology(plan) is not None and (not caps.link or len(members) > caps.link_max_members):
             raise invalid("deployment cannot connect this task's services")
+        if any(plan.external_mounts.values()) and not caps.shared_volume:
+            raise invalid("deployment does not support external shared volumes")
         if plan.volumes and not caps.shared_volume:
             raise invalid("deployment does not support shared trial volumes")
         if any(unit.privileged for unit in plan.units.values()) and not caps.privileged_runtime:

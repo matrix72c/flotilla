@@ -6,6 +6,7 @@ import math
 from dataclasses import dataclass, field
 
 from flotilla.core.reaper import CleanupRecord
+from flotilla.platform.base import SharedVolume
 from flotilla.prepared import PreparedEnvironment
 
 # The runtime's name for one prepared environment.
@@ -21,6 +22,8 @@ class RunRequest:
     disable_internet: bool = False
     resources: dict[str, dict[str, str]] = field(default_factory=dict)
     lifetime: float | None = None
+    # Caller-owned, read-only directories relative to the deployment's shared root, by service.
+    external_mounts: dict[str, tuple[SharedVolume, ...]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.request_id:
@@ -95,6 +98,8 @@ class OpenOptions:
     exec_env: dict[str, dict[str, str]] = field(default_factory=dict, repr=False)
     resources: dict[str, dict[str, str]] = field(default_factory=dict)
     disable_internet: bool = False
+    # Caller-owned, read-only directories relative to the deployment's shared root, by service.
+    external_mounts: dict[str, tuple[SharedVolume, ...]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         for value in (self.admission_timeout, self.startup_timeout, self.lifetime):

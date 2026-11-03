@@ -138,6 +138,7 @@ class Flotilla:
             exec_env=options.exec_env,
             disable_internet=options.disable_internet,
             resources=options.resources,
+            external_mounts=options.external_mounts,
             lifetime=lifetime,
         )
         try:
