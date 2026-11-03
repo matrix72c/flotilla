@@ -19,7 +19,7 @@ from flotilla.core.plan import (
 )
 from flotilla.manifest import Manifest
 from flotilla.manifest import Unit as ManifestUnit
-from flotilla.platform.base import Resources, TmpfsMount
+from flotilla.platform.base import Resources, SharedVolume, TmpfsMount
 from flotilla.platform.filesystem import unsized_tmpfs_bytes
 
 _REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
@@ -49,6 +49,7 @@ def to_plan(
     runtime_params: Mapping[str, str],
     overlay: AgentOverlay = NO_OVERLAY,
     resources: Mapping[str, Resources] | None = None,
+    external_mounts: Mapping[str, tuple[SharedVolume, ...]] | None = None,
 ) -> TrialPlan:
     """Turn a manifest into core trial input (see module docs). The result is already `validate()`d."""
     env_by_unit = {name: dict(u.context.env) for name, u in manifest.units.items()}
@@ -83,6 +84,7 @@ def to_plan(
             TrialVolume(key=v.key, owner=v.owner, seed=v.seed, copy_from=v.copy_from) for v in manifest.trial_volumes
         ),
         external_units=frozenset(manifest.external_units),
+        external_mounts={name: tuple(mounts) for name, mounts in (external_mounts or {}).items()},
     )
     try:
         plan.validate()

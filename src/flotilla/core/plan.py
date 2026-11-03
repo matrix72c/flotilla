@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import posixpath
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Literal
 
-from flotilla.platform.base import RESERVED_MOUNTS, Resources, TmpfsMount, overlaps, validate_mounts
+from flotilla.platform.base import RESERVED_MOUNTS, Resources, SharedVolume, TmpfsMount, overlaps, validate_mounts
 
 Condition = Literal["service_started", "service_healthy", "service_completed_successfully"]
 RestartPolicy = Literal["no", "always", "unless-stopped", "on-failure"]
@@ -124,6 +125,8 @@ class TrialPlan:
     depends_on: Mapping[str, Mapping[str, Dependency]] = field(default_factory=dict)
     volumes: tuple[TrialVolume, ...] = ()
     external_units: frozenset[str] = frozenset()  # units granted external access by caller policy
+    # Caller-owned storage: never prepared, seeded, chowned, or deleted by the trial.
+    external_mounts: Mapping[str, tuple[SharedVolume, ...]] = field(default_factory=dict)
 
     def validate(self) -> None:
         """Check cross-field consistency; raise `ValueError` if not (a manifest or translation bug, not platform)."""
@@ -135,6 +138,7 @@ class TrialPlan:
             for host, targets in net.names.items():
                 _require_subset(targets, net.members, f"services named {host} in network {name}")
         _require_subset(self.external_units, units, "external_units")
+        _require_subset(set(self.external_mounts), units, "external_mounts")
         _require_subset(set(self.depends_on), units, "depends_on units")
         for dependent, deps in self.depends_on.items():
             # required: false deps may be absent (e.g. profile not selected) and do not block; required ones must exist.
@@ -160,6 +164,28 @@ class TrialPlan:
         if len(keys) != len(set(keys)):
             raise ValueError("duplicate trial volume key")
         for name, unit in self.units.items():
+            occupied = [m.target for m in unit.mounts] + [m.mount_path for m in unit.tmpfs_mounts]
+            if unit.shm_size_bytes is not None:
+                occupied.append("/dev/shm")
+            for mount in self.external_mounts.get(name, ()):
+                _require_key(mount.key, f"external mount of {name}")
+                if "_runtime" in mount.key.split("/"):
+                    raise ValueError("external mount key _runtime is reserved for framework scratch space")
+                if any(ord(c) < 32 for c in mount.key):
+                    raise ValueError("external mount key contains control characters")
+                path = mount.mount_path
+                if (
+                    not path.startswith("/")
+                    or path.startswith("//")
+                    or posixpath.normpath(path) != path
+                    or any(ord(c) < 32 for c in path)
+                ):
+                    raise ValueError("external mount_path must be a canonical absolute directory")
+                if mount.read_only is not True:
+                    raise ValueError("external mounts must be read-only")
+                if any(overlaps(path, other) for other in (*RESERVED_MOUNTS, *occupied)):
+                    raise ValueError(f"{name}: external mount {path} conflicts with another or reserved mount")
+                occupied.append(path)
             validate_mounts(unit.tmpfs_mounts, (m.target for m in unit.mounts), shm_size_bytes=unit.shm_size_bytes)
             if unit.readonly_rootfs and unit.privileged:
                 raise ValueError(f"{name}: readonly_rootfs cannot be combined with privileged")

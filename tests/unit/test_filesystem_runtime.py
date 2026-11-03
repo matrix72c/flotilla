@@ -9,10 +9,18 @@ from pathlib import Path
 
 import pytest
 
-from flotilla import Flotilla
+from flotilla import Flotilla, OpenOptions
 from flotilla.capabilities import Item
 from flotilla.config import FlotillaConfig
-from flotilla.platform.base import ExecAttempt, ExecResult, FlotillaError, InstanceHandle, ProcessSpec, TmpfsMount
+from flotilla.platform.base import (
+    ExecAttempt,
+    ExecResult,
+    FlotillaError,
+    InstanceHandle,
+    ProcessSpec,
+    SharedVolume,
+    TmpfsMount,
+)
 from flotilla.platform.opensandbox.filesystem import INTERNAL_LIMITS
 from flotilla.runtime.manager import Manager
 from flotilla.runtime.types import RunRequest, Task
@@ -20,6 +28,42 @@ from flotilla.testing.environments import FixtureRequest, environment
 from flotilla.testing.platform import FakePlatform, SharedTree
 from flotilla.testing.runtime import deployment as deployment
 from flotilla.testing.runtime import task
+
+
+@pytest.mark.asyncio
+async def test_external_mount_passthrough_and_cleanup_boundary(
+    deployment: tuple[FlotillaConfig, FakePlatform, SharedTree],
+) -> None:
+    cfg, platform, tree = deployment
+    key = "external/data"
+    tree.dirs.add(key)
+    tree.owners[key] = "123:456"
+    tree.modes[key] = "0750"
+    mount = SharedVolume(key, "/external", True)
+    async with Flotilla(deployment=cfg) as fleet:
+        async with fleet.environment(task(), OpenOptions(external_mounts={"main": (mount,)})) as env:
+            info = await env.info()
+            spec = platform.spec_of(info.services[0].instance_id)
+            assert mount in spec.volumes
+            assert sum(v.key == key for v in spec.volumes) == 1
+        assert (await fleet.drain(2)).clean
+    assert key in tree.dirs
+    assert tree.owners[key] == "123:456"
+    assert tree.modes[key] == "0750"
+    assert not any(key in event for event in tree.events)
+    assert not platform.iids()
+
+
+def test_external_mount_requires_storage_capability(
+    deployment: tuple[FlotillaConfig, FakePlatform, SharedTree],
+) -> None:
+    cfg, platform, _ = deployment
+    platform.caps = replace(platform.caps, shared_volume=False)
+    manager = Manager(cfg, platform=platform)
+    request = RunRequest(task(), "mount", external_mounts={"main": (SharedVolume("external/data", "/data", True),)})
+    with pytest.raises(FlotillaError, match="external shared volumes"):
+        manager.plan(request)
+    assert platform.calls["create"] == 0
 
 
 def test_tmpfs_budget_uses_final_resource_defaults_and_overrides(

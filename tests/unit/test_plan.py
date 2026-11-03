@@ -17,7 +17,7 @@ from flotilla.core.plan import (
     TrialVolume,
     Unit,
 )
-from flotilla.platform.base import ExternalPolicy, Resources
+from flotilla.platform.base import ExternalPolicy, Resources, SharedVolume, TmpfsMount
 
 CTX = ExecContext(env={"PATH": "/usr/bin:/bin"}, uid=0, gid=0, cwd="/")
 RES = Resources(cpu="1", memory="1Gi")
@@ -72,6 +72,72 @@ def _cve() -> TrialPlan:
 
 
 # ───────────────────────────── plan.validate ─────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["", "/", "/data", ".", "..", "a/../b", "a/./b", "a//b", "a/", "_runtime", "launches/x/y/_runtime/z", "a\x00b"],
+)
+def test_external_mount_rejects_invalid_keys(key: str) -> None:
+    plan = replace(_web_app_db(), external_mounts={"app": (SharedVolume(key, "/external", True),)})
+    with pytest.raises(ValueError):
+        plan.validate()
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "",
+        "relative",
+        "/",
+        "//data",
+        "/a/../b",
+        "/a/./b",
+        "/a//b",
+        "/a/",
+        "/a\x00b",
+        "/.flotilla",
+        "/.flotilla/x",
+        "/.flotilla-runtime/x",
+    ],
+)
+def test_external_mount_rejects_invalid_targets(target: str) -> None:
+    plan = replace(_web_app_db(), external_mounts={"app": (SharedVolume("external/data", target, True),)})
+    with pytest.raises(ValueError):
+        plan.validate()
+
+
+@pytest.mark.parametrize("target", ["/data", "/data/child", "/"])
+@pytest.mark.parametrize("kind", ["volume", "tmpfs", "external"])
+def test_external_mount_rejects_overlap(target: str, kind: str) -> None:
+    unit = _unit()
+    mounts = [SharedVolume("external/data", target, True)]
+    if kind == "volume":
+        unit = replace(unit, mounts=(Mount("task", "data", "/data", True),))
+    elif kind == "tmpfs":
+        unit = replace(unit, tmpfs_mounts=(TmpfsMount("/data"),))
+    else:
+        mounts.insert(0, SharedVolume("external/other", "/data", True))
+    plan = TrialPlan("t", "tasks/t", {"app": unit}, external_mounts={"app": tuple(mounts)})
+    with pytest.raises(ValueError, match="conflicts"):
+        plan.validate()
+
+
+def test_external_mounts_are_service_scoped_and_not_trial_volumes() -> None:
+    mount = SharedVolume("external/data", "/external", True)
+    plan = replace(_web_app_db(), external_mounts={"app": (mount,)})
+    plan.validate()
+    assert plan.volumes == ()
+    args = dict(share_release="r", launch_id="l", trial_id="t")
+    assert volumes.unit_volumes(plan, "app", **args)[-1] == mount
+    assert mount not in volumes.unit_volumes(plan, "web", **args)
+    with pytest.raises(ValueError, match="unknown"):
+        replace(plan, external_mounts={"ghost": (mount,)}).validate()
+    with pytest.raises(ValueError, match="read-only"):
+        replace(plan, external_mounts={"app": (replace(mount, read_only=False),)}).validate()
+    # Existing task-internal nesting remains supported alongside disjoint external mounts.
+    unit = _unit(mounts=(Mount("task", "a", "/data", True), Mount("task", "b", "/data/b", True)))
+    replace(plan, task_files="tasks/t", units={**plan.units, "app": unit}).validate()
 
 
 def test_valid_plans_pass() -> None:
