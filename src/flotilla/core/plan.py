@@ -76,6 +76,7 @@ class Unit:
     readonly_rootfs: bool = False
     tmpfs_mounts: tuple[TmpfsMount, ...] = ()
     shm_size_bytes: int | None = None
+    runtime: str | None = None  # declared runtime class ("kata"): created under it directly
 
 
 @dataclass(frozen=True)

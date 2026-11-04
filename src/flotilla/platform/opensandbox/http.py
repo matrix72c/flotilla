@@ -1,7 +1,6 @@
 """Bounded transport retries for idempotent requests and safe error diagnostics."""
 
 from __future__ import annotations
-
 import asyncio
 import json as json_module
 import logging

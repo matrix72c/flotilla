@@ -60,6 +60,7 @@ class Unit(_Model):
     readonly_rootfs: bool = False
     tmpfs_mounts: list[TmpfsMount] = []
     shm_size_bytes: Annotated[int, Field(gt=0)] | None = None
+    runtime: str | None = None  # declared runtime class from the compose `x-runtime` extension
 
 
 class Network(_Model):

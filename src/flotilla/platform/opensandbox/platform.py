@@ -107,6 +107,7 @@ class OpenSandboxPlatform:
         command_gate: Callable[[], Awaitable[None]] | None = None,
         extensions: Mapping[str, Any] | None = None,
         privileged_extensions: Mapping[str, Any] | None = None,
+        fallback_extensions: Mapping[str, Any] | None = None,
         create_fields: Mapping[str, Any] | None = None,
         group_extension: str | None = None,
         create_timeout_s: float | None = None,
@@ -137,6 +138,7 @@ class OpenSandboxPlatform:
         self._create_fields = dict(create_fields or {})
         self._extensions = dict(extensions or {})
         self._privileged_extensions = dict(privileged_extensions or {})
+        self._fallback_extensions = dict(fallback_extensions or {})
         self._group_extension = group_extension
         self._create_timeout_s = create_timeout_s
         self._close = close
@@ -145,6 +147,12 @@ class OpenSandboxPlatform:
         self._addresses: dict[str, str] = {}  # iid -> internal address (fixed while alive)
 
     async def create(self, spec: InstanceSpec) -> InstanceHandle:
+        # The fallback runtime (kata) rejects tmpfsMounts ("不支持 sysbox/kata 运行时组合"); the VM
+        # provides its own /tmp. Drop tmpfs mounts instead of failing the create — they were best-effort
+        # (compose `tmpfs:`) and no task depends on tmpfs semantics. Normalized here so the requested
+        # and verified filesystem views agree.
+        if spec.fallback_runtime and spec.tmpfs_mounts:
+            spec = replace(spec, tmpfs_mounts=())
         try:
             self.caps.require_filesystem(
                 spec.readonly_rootfs,
@@ -308,6 +316,8 @@ class OpenSandboxPlatform:
         extensions = dict(self._extensions)
         if spec.privileged:
             extensions.update(self._privileged_extensions)
+        if spec.fallback_runtime:
+            extensions.update(self._fallback_extensions)
         if spec.group is not None and self._group_extension is not None:
             extensions[self._group_extension] = spec.group
         extensions.update(self._filesystem.extensions(spec))
@@ -383,6 +393,7 @@ def build(
     execd: ExecdSettings | None = None,
     extensions: Mapping[str, Any] | None = None,
     privileged_extensions: Mapping[str, Any] | None = None,
+    fallback_extensions: Mapping[str, Any] | None = None,
     create_fields: Mapping[str, Any] | None = None,
     group_extension: str | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
@@ -434,6 +445,7 @@ def build(
         filesystem=filesystem,
         execd=execd,
         extensions=extensions,
+        fallback_extensions=fallback_extensions,
         privileged_extensions=privileged_extensions,
         create_fields=create_fields,
         group_extension=group_extension,

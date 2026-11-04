@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import time
@@ -66,6 +67,9 @@ class Run:
     terminations: dict[str, asyncio.Task[None]] = field(default_factory=dict)
 
 
+log = logging.getLogger(__name__)
+
+
 class Manager:
     def __init__(self, cfg: FlotillaConfig, *, platform: Platform | None = None, clock: Clock | None = None) -> None:
         self.cfg = cfg
@@ -96,6 +100,37 @@ class Manager:
         self.launch_directory_attempted = False
         self.close_report: CleanupReport | None = None
         self.closing_task: asyncio.Task[CleanupReport] | None = None
+        # Kata runtime learning: persistent manifest + in-memory cache
+        self._kata_manifest_path = cfg.opensandbox.kata_manifest_path if cfg.opensandbox else ""
+        self._kata_tasks: set[str] = self._load_kata_manifest()
+
+    def _load_kata_manifest(self) -> set[str]:
+        if not self._kata_manifest_path:
+            return set()
+        try:
+            with open(self._kata_manifest_path) as f:
+                data = json.load(f)
+            tasks = set(data) if isinstance(data, list) else set()
+            log.info("kata manifest loaded: %d task(s) known to need kata", len(tasks))
+            return tasks
+        except FileNotFoundError:
+            return set()
+        except Exception as exc:
+            log.warning("kata manifest load failed (%s); starting empty", exc)
+            return set()
+
+    def note_kata_needed(self, task_name: str) -> None:
+        """Record that a task's target needed the kata runtime fallback; persist for future runs."""
+        if task_name in self._kata_tasks:
+            return
+        self._kata_tasks.add(task_name)
+        log.info("kata learned: %s -> direct kata on next episode", task_name)
+        if self._kata_manifest_path:
+            try:
+                with open(self._kata_manifest_path, "w") as f:
+                    json.dump(sorted(self._kata_tasks), f, indent=1)
+            except Exception as exc:
+                log.warning("kata manifest save failed: %s", exc)
 
     def emit(
         self,
@@ -251,7 +286,20 @@ class Manager:
                 settings = replace(settings, ttl_s=max(settings.ttl_s, startup_ttl))
                 if request.disable_internet:
                     settings = replace(settings, external=ExternalPolicy(mode="none"))
-                trial = Trial(self.platform, self.clock, self.anchor, self.reaper, plan, eid, settings)
+                opensandbox = self.cfg.opensandbox  # None only for third-party backends
+                trial = Trial(
+                    self.platform,
+                    self.clock,
+                    self.anchor,
+                    self.reaper,
+                    plan,
+                    eid,
+                    settings,
+                    health_fallback=bool(opensandbox and opensandbox.health_fallback_extensions),
+                    health_fallback_after_s=opensandbox.health_fallback_after_s if opensandbox else 0.0,
+                    kata_hinted_tasks=self._kata_tasks,
+                    on_kata_learned=self.note_kata_needed,
+                )
                 try:
                     run.ready = await trial.start()
                 finally:

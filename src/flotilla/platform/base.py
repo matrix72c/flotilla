@@ -224,6 +224,8 @@ class InstanceSpec:
     volumes: tuple[SharedVolume, ...]
     external: ExternalPolicy
     privileged: bool = False
+    #: Retry under the health-fallback runtime (e.g. kata) after a healthcheck failure.
+    fallback_runtime: bool = False
     #: Placement group: the deployment places instances with equal values where they can link to each other.
     #: flotilla only expresses "same group", not where; deployments that don't need it ignore it. A trial gives
     #: units that must link the same value, one per trial.
