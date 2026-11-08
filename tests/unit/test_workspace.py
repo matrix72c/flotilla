@@ -133,8 +133,12 @@ async def test_store_shutdown_rejects_new_work() -> None:
     anchor.copy_source_tree.assert_not_awaited()
 
 
-def metadata_store() -> tuple[WorkspaceStore, Mock, list[dict[str, Any]]]:
+def metadata_store(concurrency: int = 4) -> tuple[WorkspaceStore, Mock, list[dict[str, Any]]]:
     workspaces, anchor = store()
+    cfg = workspaces.config
+    workspaces = WorkspaceStore(
+        anchor, cfg.model_copy(update={"prepare": cfg.prepare.model_copy(update={"concurrency": concurrency})})
+    )
     requests: list[dict[str, Any]] = []
     anchor.path.side_effect = lambda key: "/storage/" + key
     anchor.stat = AsyncMock(return_value=SimpleNamespace(size=1))
@@ -144,8 +148,9 @@ def metadata_store() -> tuple[WorkspaceStore, Mock, list[dict[str, Any]]]:
         requests.append(json.loads(data))
 
     async def download(key: str, **kwargs: Any) -> bytes:
+        request = next(request for request in requests if request["workspace"] == anchor.path(key).rsplit("/", 1)[0])
         return json.dumps(
-            {key: {"instruction": key, "task_config": {"metadata": {"key": key}}} for key in requests[-1]["task_keys"]}
+            {key: {"instruction": key, "task_config": {"metadata": {"key": key}}} for key in request["task_keys"]}
         ).encode()
 
     anchor.upload.side_effect = upload
@@ -277,19 +282,23 @@ async def test_metadata_cleanup_failure_is_explicit_and_launch_owned(primary_fai
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cleanup_failure", [False, True])
-async def test_metadata_cancellation_settles_current_chunk_and_cleanup_only(cleanup_failure: bool) -> None:
-    workspaces, anchor, requests = metadata_store()
+@pytest.mark.parametrize("concurrency", [1, 2, 4])
+async def test_metadata_cancellation_settles_current_window_and_cleanup_only(
+    cleanup_failure: bool, concurrency: int
+) -> None:
+    workspaces, anchor, requests = metadata_store(concurrency)
     started, finish = asyncio.Event(), asyncio.Event()
 
     async def execute(*args: Any, **kwargs: Any) -> SimpleNamespace:
-        started.set()
+        if anchor.execute.await_count == concurrency:
+            started.set()
         await finish.wait()
         return SimpleNamespace(exit_code=0, timed_out=False)
 
     anchor.execute.side_effect = execute
     if cleanup_failure:
         anchor.remove.side_effect = OSError("cleanup failed")
-    task = asyncio.create_task(workspaces.describe_tasks([f"dataset/{i}" for i in range(129)]))
+    task = asyncio.create_task(workspaces.describe_tasks([f"dataset/{i}" for i in range(128 * concurrency + 1)]))
     await started.wait()
     task.cancel()
     await asyncio.sleep(0)
@@ -302,8 +311,79 @@ async def test_metadata_cancellation_settles_current_chunk_and_cleanup_only(clea
         await task
     if cleanup_failure:
         assert "cleanup failed" in str(cancelled.value.__notes__)
-    assert len(requests) == 1
-    anchor.remove.assert_awaited_once()
+    assert len(requests) == concurrency
+    assert anchor.remove.await_count == concurrency
+    assert not workspaces.jobs
+
+
+@pytest.mark.asyncio
+async def test_metadata_schedules_only_a_bounded_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    from flotilla.runtime import workspace
+
+    workspaces, anchor, requests = metadata_store(3)
+    monkeypatch.setattr(workspace, "METADATA_MAX_TASKS", 1)
+    original_batches = workspaces._metadata_batches
+    generated: list[str] = []
+
+    def batches(keys: list[str]) -> Any:
+        for batch in original_batches(keys):
+            generated.append(batch[0])
+            yield batch
+
+    monkeypatch.setattr(workspaces, "_metadata_batches", batches)
+    started, finish = asyncio.Event(), asyncio.Event()
+    active, maximum = 0, 0
+
+    async def execute(*args: Any, **kwargs: Any) -> SimpleNamespace:
+        nonlocal active, maximum
+        active += 1
+        maximum = max(maximum, active)
+        if active == 3:
+            started.set()
+        await finish.wait()
+        active -= 1
+        return SimpleNamespace(exit_code=0, timed_out=False)
+
+    anchor.execute.side_effect = execute
+    keys = [f"dataset/{i}" for i in range(7)]
+    task = asyncio.create_task(workspaces.describe_tasks(keys))
+    await started.wait()
+    assert len(generated) == len(requests) == 3
+    finish.set()
+    assert list(await task) == keys
+    assert maximum == 3 and active == 0
+    assert anchor.remove.await_count == 7
+    assert not workspaces.jobs
+
+
+@pytest.mark.asyncio
+async def test_metadata_failure_settles_peers_without_scheduling_more(monkeypatch: pytest.MonkeyPatch) -> None:
+    from flotilla.runtime import workspace
+
+    workspaces, anchor, requests = metadata_store(2)
+    monkeypatch.setattr(workspace, "METADATA_MAX_TASKS", 1)
+    primary = TimeoutError("upload failed")
+    original_upload = anchor.upload.side_effect
+    started, finish = asyncio.Event(), asyncio.Event()
+
+    async def upload(key: str, data: bytes, **kwargs: Any) -> None:
+        await original_upload(key, data, **kwargs)
+        if json.loads(data)["task_keys"] == ["dataset/0"]:
+            raise primary
+        started.set()
+        await finish.wait()
+
+    anchor.upload.side_effect = upload
+    task = asyncio.create_task(workspaces.describe_tasks([f"dataset/{i}" for i in range(6)]))
+    await started.wait()
+    assert not task.done()
+    assert len(requests) == 2
+    finish.set()
+    with pytest.raises(TimeoutError) as failed:
+        await task
+    assert failed.value is primary
+    assert len(requests) == 2
+    assert anchor.remove.await_count == 2
     assert not workspaces.jobs
 
 

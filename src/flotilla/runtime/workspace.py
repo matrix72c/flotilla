@@ -8,6 +8,7 @@ import posixpath
 import uuid
 from dataclasses import dataclass, field
 from functools import partial
+from itertools import islice
 from typing import TYPE_CHECKING, Any
 
 from flotilla.core.anchor import Anchor
@@ -20,7 +21,7 @@ if TYPE_CHECKING:
 
 
 # Shared with the installed management reader. These bound each remote operation,
-# not the caller's dataset size; large datasets are split into sequential batches.
+# not the caller's dataset size; concurrency is bounded by prepare.concurrency.
 METADATA_MAX_TASKS = 128
 METADATA_REQUEST_BYTES = 1024 * 1024
 METADATA_RESULT_BYTES = 64 * 1024 * 1024
@@ -215,10 +216,23 @@ class WorkspaceStore:
         if isinstance(task_keys, (str, bytes)):
             raise TypeError("task_keys must be a sequence of full task keys, not a string")
         keys = list(dict.fromkeys(source_task_key(key) for key in task_keys))
+
+        async def read_window(batches: list[tuple[str, list[str], bytes]]) -> dict[str, dict[str, Any]]:
+            # Finish all in-flight operations and their cleanup before propagating
+            # a failure. Never cancel a remote command whose outcome is unknown.
+            values = await asyncio.gather(*(self._describe_batch(*batch) for batch in batches), return_exceptions=True)
+            merged: dict[str, dict[str, Any]] = {}
+            for value in values:
+                if isinstance(value, BaseException):
+                    raise value
+                merged.update(value)
+            return merged
+
         result: dict[str, dict[str, Any]] = {}
-        for directory, chunk, request in self._metadata_batches(keys):
-            # Settle only the current chunk on cancellation, never the remaining dataset.
-            result.update(await self._settled(partial(self._describe_batch, directory, chunk, request)))
+        batches = self._metadata_batches(keys)
+        while window := list(islice(batches, self.config.prepare.concurrency)):
+            # Only this bounded window is scheduled/settled on failure or cancellation.
+            result.update(await self._settled(partial(read_window, window)))
         return result
 
     async def _describe_batch(self, directory: str, keys: list[str], request: bytes) -> dict[str, dict[str, Any]]:
