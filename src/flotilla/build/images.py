@@ -7,7 +7,6 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal, Protocol
 
-from flotilla.compose.layout import classify
 from flotilla.compose.model import Project, Service
 
 Disposition = Literal["link", "mirror", "build"]
@@ -93,20 +92,8 @@ class ServiceImage:
 
 
 def image_changes(project: Project) -> frozenset[str]:
-    """Services whose image must change at build time (excluding a missing /bin/sh, checked by the build step):
-
-    - the service whose bind source group is baked into the image target (`mode="image"`, single writer/reference);
-    - services referencing a `nocopy` local volume (image mount point is emptied).
-    """
-    layout = classify(project.services)
-    changed: set[str] = {name for name, svc in project.services.items() if svc.tmpfs or svc.readonly_rootfs}
-    for g in layout.binds:
-        if g.mode == "image":
-            changed.update(unit for unit, _, _, _ in g.references)
-    for v in layout.volumes:
-        if v.mode == "local" and v.nocopy:
-            changed.update(unit for unit, _, _, _ in v.references)
-    return frozenset(changed)
+    """Prepare framework/tmpfs mount points only; binds and volumes are always real mounts."""
+    return frozenset(name for name, svc in project.services.items() if svc.tmpfs or svc.readonly_rootfs)
 
 
 def plan_images(project: Project, settings: BuildSettings) -> list[ServiceImage]:
@@ -120,7 +107,7 @@ def plan_images(project: Project, settings: BuildSettings) -> list[ServiceImage]
 def plan_image(service: str, svc: Service, settings: BuildSettings, *, needs_change: bool) -> ServiceImage:
     """Decide one service's image disposition (pure function, no network).
 
-    `needs_change`: the image must be modified (bind baked in, `nocopy` emptied); such services must build/derive.
+    `needs_change`: prepare framework/tmpfs mount points; such services must build/derive.
     """
     if svc.build is not None:
         return ServiceImage(service, "build", None)

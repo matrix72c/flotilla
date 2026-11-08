@@ -16,7 +16,11 @@ Import public types from `flotilla`. Configuration is loaded locally at construc
 | `await fleet.drain(timeout=None)` | Waits for pending cleanup; does not release active environments |
 | `await fleet.close(timeout=None)` | Releases owned environments and closes the runtime; returns a cleanup report |
 
-A `PreparedEnvironment` comes from a row of the jsonl that `flotilla prepare` writes: `load_prepared(path)` returns `PreparedTask` rows, `row.environment()` is the main environment, and `row.verifier` is the separate verifier environment or `None`. Images are digest-pinned and task files already published, so opening does not need Docker. Harbor verifier selection happens during preparation; the adapter opens the row's environment for its environment directory.
+For production Harbor tasks use `HarborAttempt.create(fleet, task_key)` from `flotilla.integrations.harbor_attempt`, then `await attempt.open("main", options)` and `await attempt.close()` in `finally`. `task_key` is a relative key of an original Harbor task below platform storage, not a local path. Attempt creation allocates a private workspace and runs the trusted platform compiler/build helper; it returns metadata, not task files. `await attempt.stage_tests()` makes hidden tests available only for verification; a separate verifier role can then be opened when defined. Close roles before deleting their workspace (the attempt owner does this).
+
+`PreparedEnvironment` remains a low-level transient compiler/testing boundary for `fleet.open`, not a persistent dataset interchange format. Do not use old `prepared.jsonl` or `load_prepared` as production inputs. `flotilla prepare` is optional platform warmup with diagnostic output. Native Harbor CLI/Trial does not accept `task_key` through this API.
+
+The management image requires Python, Flotilla with its `harbor` extra, pinned Compose and build tooling. Remote build network targets, read-only credential mounts and nonsecret endpoint settings are explicit deployment inputs. No compatible release image or real platform acceptance is provided by the current offline implementation.
 
 `OpenOptions` accepts `request_id`, `admission_timeout`, `startup_timeout`, `lifetime`, `runtime_params`, per-service `exec_env` and `resources`, and `disable_internet`. Resource overrides support CPU and memory.
 

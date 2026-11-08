@@ -8,6 +8,7 @@ import json
 import tarfile
 import threading
 from email import policy
+from email.message import EmailMessage
 from email.parser import BytesParser
 from pathlib import Path
 
@@ -38,7 +39,7 @@ def test_binary_multipart_reselects_colliding_boundary(monkeypatch: pytest.Monke
     monkeypatch.setattr("flotilla.platform.opensandbox.execd.secrets.token_hex", lambda _: next(choices))
     content = bytes(range(256)) + b"\r\n--collision\r\n" + bytes(range(256))
     content_type, body = multipart_upload("/pathcollision", content, 0o6751)
-    message = BytesParser(policy=policy.default).parsebytes(
+    message = BytesParser(EmailMessage, policy=policy.default).parsebytes(
         f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode() + body
     )
     parts = list(message.iter_parts())

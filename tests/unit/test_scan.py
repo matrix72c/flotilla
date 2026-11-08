@@ -22,9 +22,9 @@ def _rejects(result: Any) -> set[str]:
 
 
 def test_accepts_plain_multi_service(caps: Capabilities) -> None:
-    r = scan("t", _project({"db": {"image": "pg", "restart": "always"}}), caps)
+    r = scan("t", _project({"db": {"image": "pg"}}), caps)
     assert r.status == "accepted"
-    assert r.restart_services == ("db",)
+    assert r.restart_services == ()
     assert r.external_units == ("db", "main")
 
 
@@ -68,14 +68,14 @@ def test_too_many_members(caps: Capabilities) -> None:
 def test_udp_needs_link_udp(caps: Capabilities) -> None:
     svc = {"dns": {"image": "d", "ports": [{"target": 53, "protocol": "udp"}]}}
     assert scan("t", _project(svc), caps).status == "rejected"
-    assert scan("t", _project(svc), replace(caps, link_udp=True)).status == "accepted"
+    assert scan("t", _project(svc), replace(caps, link_udp=True)).status == "rejected"
 
 
 def test_privileged_needs_runtime(caps: Capabilities) -> None:
     svc = {"k": {"image": "k", "privileged": True}}
     assert scan("t", _project(svc), caps).status == "rejected"
     r = scan("t", _project(svc), replace(caps, privileged_runtime=True))
-    assert r.status == "accepted" and any(f.kind == "warn" for f in r.findings)
+    assert r.status == "rejected"  # platform privilege is not full Docker privileged semantics
 
 
 def test_share_mount_conflict(caps: Capabilities) -> None:

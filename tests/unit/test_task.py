@@ -10,6 +10,7 @@ import pytest
 
 from flotilla.cli import main
 from flotilla.compose.task import TaskError, find_tasks, load_task
+from flotilla.config import FlotillaConfig
 from flotilla.platform.base import Capabilities
 from flotilla.scan import scan_task
 from flotilla.testing.reports import report
@@ -171,7 +172,6 @@ def test_scan_task_merges_task_and_deployment_findings(tmp_path: Path, caps: Cap
 
 def test_scan_cli_writes_one_line_per_task(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     caps = tmp_path / "caps.json"
-    caps.write_text(report().dump_json())
     tasks = tmp_path / "tasks"
     _task(tasks, "solo")
     _task(tasks, "multi", compose=COMPOSE)
@@ -187,6 +187,8 @@ def test_scan_cli_writes_one_line_per_task(tmp_path: Path, capsys: pytest.Captur
         '[storage]\nhost_path="/mnt/shared"\n[share]\nrelease="test"\n'
         f'release_sha256="{"a" * 64}"\n'
     )
+    cfg = FlotillaConfig.load(deployment)
+    report(evidence_profile=cfg.evidence_profile()).write_json(caps)
     assert main(["inspect", str(tasks), "--deployment", str(deployment), "--out", str(out)]) == 1
     lines = {row["path"].rsplit("/", 1)[1]: row for row in json.loads(out.read_text())["environments"]}
     assert {k: v["status"] for k, v in lines.items()} == {

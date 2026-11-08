@@ -23,11 +23,12 @@ from flotilla.testing.reports import report
 
 @pytest.fixture
 def deployment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[FlotillaConfig, FakePlatform, SharedTree]:
-    caps = report(**{"network.implicit_egress": [], "lifecycle.list_visibility_s": 0.01})
     report_path = tmp_path / "caps.json"
-    report_path.write_text(caps.dump_json())
     data = config_data(
-        network={"external": []}, limits={"create_rate": 10000, "exec_rate": 10000}, timeouts={"close": 1}
+        network={"external": []},
+        limits={"create_rate": 10000, "exec_rate": 10000},
+        timeouts={"close": 1},
+        probe={"list_visibility_s": 0.01},
     )
     data["opensandbox"]["capabilities"] = str(report_path)
     busybox = b"fake-busybox"
@@ -45,6 +46,14 @@ def deployment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Flotill
     ).encode()
     data["share"] = {"release": "test", "release_sha256": hashlib.sha256(blob).hexdigest()}
     cfg = FlotillaConfig.from_mapping(data)
+    caps = report(
+        **{
+            "network.implicit_egress": [],
+            "lifecycle.list_visibility_s": cfg.probe.list_visibility_s,
+            "evidence_profile": cfg.evidence_profile(),
+        }
+    )
+    report_path.write_text(caps.dump_json())
     clock = SystemClock()
     platform = FakePlatform(caps.to_capabilities(), clock=clock)
     platform.initial_files["/etc/hosts"] = b"127.0.0.1 localhost\n"

@@ -107,7 +107,7 @@ def test_image_changes_from_bind_and_nocopy() -> None:
         networks={},
         volumes=frozenset({"cache"}),
     )
-    assert image_changes(project) == frozenset({"writes_bind", "nocopy"})
+    assert image_changes(project) == frozenset()
 
 
 # ───────────────────────────── Resolution and mirror ─────────────────────────────

@@ -102,6 +102,12 @@ def _deployment(project: Project, caps: Capabilities) -> Iterable[Finding]:
                 f"{len(members)} linked members exceed the deployment limit {caps.link_max_members}",
             )
     for name, svc in project.services.items():
+        if svc.volumes and not caps.shared_volume:
+            yield Finding(f"services.{name}.volumes", "reject", "file-backed mounts require attempt-owned storage")
+        if svc.restart != "no":
+            yield Finding(f"services.{name}.restart", "reject", "Docker restart supervision is not implemented")
+        if svc.hostname is not None or svc.container_name is not None:
+            yield Finding(f"services.{name}.hostname", "reject", "actual Docker container identity is not implemented")
         try:
             caps.require_filesystem(
                 svc.readonly_rootfs,
@@ -129,12 +135,12 @@ def _deployment(project: Project, caps: Capabilities) -> Iterable[Finding]:
             )
         if svc.udp_ports and not caps.link_udp:
             yield Finding(f"services.{name}.ports", "reject", "UDP ports declared, but this deployment lacks link_udp")
-        if svc.privileged and not caps.privileged_runtime:
+        if svc.privileged:
             yield Finding(
-                f"services.{name}.privileged", "reject", "requires a privileged runtime, unavailable in this deployment"
+                f"services.{name}.privileged",
+                "reject",
+                "a privileged sandbox is not equivalent to Docker privileged mode",
             )
-        elif svc.privileged:
-            yield Finding(f"services.{name}.privileged", "warn", "placed in a privileged runtime")
 
 
 def _bind_sources(project: Project, env_dir: str, caps: Capabilities) -> Iterable[Finding]:
@@ -152,7 +158,7 @@ def _bind_sources(project: Project, env_dir: str, caps: Capabilities) -> Iterabl
                     "reject",
                     f"bind source {source} does not exist: it would mount as an empty directory",
                 )
-            elif os.path.isfile(full) and g.mode != "image" and not caps.volume_file:
+            elif os.path.isfile(full) and not caps.volume_file:
                 yield Finding(
                     path, "reject", f"bind source {source} is a single file; this deployment lacks file mounts"
                 )

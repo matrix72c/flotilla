@@ -99,13 +99,13 @@ async def test_readonly_directory_transfers_use_scratch_and_preserve_environment
             "opensandbox": cfg.opensandbox_settings().model_copy(update={"filesystem_protocol": "sandbox-system-v1"})
         }
     )
-    measured = Item(ok=True, source="probed", evidence="test double")
+    measured = Item(status="passed", evidence="test double")
     report = cfg.load_report()
     report = report.model_copy(
         update={
             "runtime": report.runtime.model_copy(update={"readonly_rootfs": measured}),
             "storage": report.storage.model_copy(update={"native_tmpfs": measured}),
-            "filesystem_profile": cfg.filesystem_profile(),
+            "evidence_profile": cfg.evidence_profile(),
         }
     )
     cfg.capabilities_path().write_text(report.dump_json())

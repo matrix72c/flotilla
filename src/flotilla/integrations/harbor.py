@@ -1,8 +1,10 @@
-"""Harbor 0.24 environment plugin. Install the harbor extra to import this module.
+"""Harbor 0.24 execution/file view. Install the harbor extra to import it.
 
-Use --env flotilla.integrations.harbor:FlotillaEnvironment with `deployment` and `prepared` kwargs; `prepared` is
-the jsonl written by `flotilla prepare` for the tasks being run. An explicitly injected fleet is shared; otherwise the
-adapter owns a fleet for its trial.
+Platform task-key executions enter through HarborAttempt, which owns the workspace
+and both roles. This class adapts its live handles to native Harbor I/O. Persisted
+prepared JSONL and native Harbor Trial's local-task upload flow are not supported
+remote-task entrypoints. Transient prepared_environment is an internal I/O adapter
+hook, not a dataset format.
 """
 
 from __future__ import annotations
@@ -12,7 +14,6 @@ import copy
 import json
 import logging
 import shutil
-import threading
 from collections.abc import Sequence
 from dataclasses import asdict
 from pathlib import Path
@@ -26,29 +27,10 @@ from harbor.models.trial.paths import EnvironmentPaths, TrialPaths
 
 from flotilla._io import owned_io
 from flotilla.config import FlotillaConfig
-from flotilla.integrations.harbor_source import task_environments
-from flotilla.prepared import ROLES, PreparedEnvironment, PreparedTask, load_prepared
+from flotilla.prepared import PreparedEnvironment
 from flotilla.runtime.client import Flotilla
 from flotilla.runtime.environment import Environment, Service
 from flotilla.runtime.types import CleanupError, OpenOptions
-
-# Rows of each prepared jsonl by resolved task directory, reloaded when the file changes. Trials of one job
-# share the file, so it is parsed once per process rather than once per trial.
-_ROWS: dict[tuple[str, int, int], dict[Path, PreparedTask]] = {}
-_ROWS_LOCK = threading.Lock()
-
-
-def _rows(path: Path) -> dict[Path, PreparedTask]:
-    info = path.stat()
-    key = (str(path.resolve()), info.st_mtime_ns, info.st_size)
-    with _ROWS_LOCK:
-        rows = _ROWS.get(key)
-        if rows is None:
-            rows = {Path(row.task_dir).resolve(): row for row in load_prepared(path)}
-            for stale in [k for k in _ROWS if k[0] == key[0]]:
-                del _ROWS[stale]
-            _ROWS[key] = rows
-        return rows
 
 
 class FlotillaEnvironment(BaseEnvironment):  # type: ignore[misc]
@@ -77,16 +59,19 @@ class FlotillaEnvironment(BaseEnvironment):  # type: ignore[misc]
         enable_environment_dir_upload: bool = True,
         deployment: str,
         prepared: str | None = None,
+        prepared_environment: PreparedEnvironment | None = None,
         fleet: Flotilla | None = None,
         run_timeout: float | None = None,
         runtime_params: dict[str, str] | None = None,
     ) -> None:
+        if prepared is not None:
+            raise ValueError("legacy prepared JSONL is unsupported; use HarborAttempt with a platform task_key")
+        self._transient_prepared = prepared_environment
         self._cfg = fleet.config if fleet is not None else FlotillaConfig.load(deployment)
         self._cfg.check_against(self._cfg.load_report())
         self._owns_environment = True
         self._fleet = fleet or Flotilla(deployment=self._cfg)
         self._owns_fleet = fleet is None
-        self._prepared = Path(prepared) if prepared is not None else None
         self._environment: Environment | None = None
         self._service_error: BaseException | None = None
         self._stopped: set[str] = set()
@@ -137,24 +122,15 @@ class FlotillaEnvironment(BaseEnvironment):  # type: ignore[misc]
         return EnvironmentResourceCapabilities(cpu_limit=True, memory_limit=True)
 
     def _validate_definition(self) -> None:
-        directory = Path(self.environment_dir).resolve()
-        self._directory = directory
-        self._task_root = next((p for p in directory.parents if (p / "task.toml").is_file()), directory.parent)
+        # Borrowed views carry platform metadata, not a local task checkout.
+        self._directory = Path(self.environment_dir)
+        self._task_root = self._directory.parent
 
     def _prepared_environment(self) -> PreparedEnvironment:
-        """The prepared row's environment for this task directory and environment role."""
-        if self._prepared is None:
-            raise ValueError("pass the prepared jsonl written by `flotilla prepare` as the `prepared` kwarg")
-        row = _rows(self._prepared).get(self._task_root)
-        if row is None:
-            raise ValueError(f"{self._prepared} has no row for {self._task_root}; run `flotilla prepare` on it")
-        directories = [task.env_dir.resolve() for task in task_environments(self._task_root)]
-        if self._directory not in directories:
-            raise ValueError(f"{self._directory} is not an environment of {self._task_root}")
-        role = ROLES[directories.index(self._directory)]
-        if role not in row.environments:
-            raise ValueError(f"row {row.id} has no {role} environment; rerun `flotilla prepare --force` on it")
-        return row.environment(role)
+        """Internal transient role only; production task inputs enter HarborAttempt."""
+        if self._transient_prepared is None:
+            raise ValueError("use HarborAttempt with a platform task_key, then FlotillaEnvironment.view(handle)")
+        return self._transient_prepared
 
     @classmethod
     def view(
@@ -186,7 +162,7 @@ class FlotillaEnvironment(BaseEnvironment):  # type: ignore[misc]
     async def start(self, force_build: bool = False) -> None:
         self._check_resources()
         if force_build:
-            raise ValueError("force_build is unsupported: images come from `flotilla prepare`; rerun it with --force")
+            raise ValueError("force_build is unsupported: images come from the platform workspace compiler")
         if self._environment is not None:
             return
         try:
@@ -438,7 +414,6 @@ class FlotillaEnvironment(BaseEnvironment):  # type: ignore[misc]
                             paths.agent_dir,
                             paths.user_agent_dir,
                             paths.verifier_dir,
-                            paths.artifacts_dir,
                         ):
                             destination = self._local_dir() / "stopped-main" / str(directory).lstrip("/")
                             await target.download_dir(str(directory), destination)

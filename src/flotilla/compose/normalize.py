@@ -5,7 +5,7 @@ from __future__ import annotations
 import posixpath
 import re
 import shlex
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from typing import Any, cast
 
 from flotilla.compose import resources as resource_values
@@ -35,17 +35,16 @@ KEEPALIVE = ("sh", "-c", "sleep infinity")
 
 # Service fields that are only recorded: they do not affect flotilla's behavior.
 _EQUIVALENT = {
-    "init": "the exec daemon reaps zombie processes",
-    "labels": "recorded only",
-    "logging": "recorded only",
-    "stop_signal": "services stop only when the sandbox is deleted; recorded only",
-    "stop_grace_period": "services stop only when the sandbox is deleted; recorded only",
-    "expose": "services on the same network already reach all ports; nothing is published, recorded only",
-    "container_name": "the name is written into other units' hosts",
-    "pull_policy": "images are pinned by digest; recorded only",
+    "labels": "metadata only; not applied as Docker container labels",
+    "expose": "does not publish ports or restrict peer connectivity in Compose",
 }
 # Rejected service fields (including platform capability gaps).
 _REJECT = {
+    "init": "Docker init/PID1 signal forwarding and reaping semantics are not implemented",
+    "logging": "Docker logging driver semantics are not implemented",
+    "stop_signal": "Docker stop signal semantics are not implemented",
+    "stop_grace_period": "Docker stop grace-period semantics are not implemented",
+    "pull_policy": "Docker pull policy semantics are not implemented",
     "group_add": "requires supplementary_groups; not supported yet",
     "cap_drop": "requires per-command capability control; not supported yet",
     "security_opt": "requires per-command capability control; not supported yet",
@@ -73,7 +72,7 @@ _REJECT = {
 _HANDLED = {
     "image", "build", "command", "entrypoint", "environment", "working_dir", "user", "healthcheck", "depends_on",
     "networks", "network_mode", "volumes", "tmpfs", "shm_size", "restart", "privileged", "hostname", "ports",
-    "cpus", "mem_limit", "deploy",
+    "cpus", "mem_limit", "deploy", "container_name",
 }  # fmt: skip
 
 
@@ -96,8 +95,8 @@ def harbor_overlay(compose: Mapping[str, Any], *, main_image: str | None, main_b
     image from task.toml `docker_image` or the environment Dockerfile. The task file merges on top and may override
     the keepalive command; an explicit docker_image always wins over the main service's image/build.
 
-    Merging matches `docker compose -f base -f task`: services merge by name, scalars and lists take the later
-    value, mappings merge recursively.
+    Legacy lightweight helper for offline callers only. This recursive merge is not general Compose merging;
+    production Harbor loading delegates the ordered documents to the official Compose config adapter.
     """
     base_main: dict[str, Any] = {"command": list(KEEPALIVE)}
     if main_image is not None:
@@ -125,8 +124,11 @@ def _merge(base: Any, over: Any) -> Any:
     return over
 
 
-def normalize(compose: Mapping[str, Any], variables: Mapping[str, str]) -> Project:
-    """Normalize a Compose document that already has the keepalive override applied."""
+def normalize(compose: Mapping[str, Any], variables: Mapping[str, str], *, resolved: bool = False) -> Project:
+    """Translate to the runtime model. Official config output uses resolved=True: never interpolate twice.
+
+    The default lightweight parser is retained for pure model tests and legacy offline callers only.
+    """
     c = _Collector()
     for key in compose:
         if key not in ("services", "networks", "volumes", "name", "version"):
@@ -148,6 +150,9 @@ def normalize(compose: Mapping[str, Any], variables: Mapping[str, str]) -> Proje
             continue
         env_raw = _environment(raw.get("environment"), f"{path}.environment", c)
         rest = {k: v for k, v in raw.items() if k != "environment"}
+        if resolved:
+            services[name] = _service(name, rest, env_raw, volumes, c)
+            continue
         try:
             rest_i = interpolate(rest, variables)
             env_i = interpolate(env_raw, variables)
@@ -203,6 +208,8 @@ def _service(
         else:
             c.reject(f"{path}.{key}", "unsupported field")
 
+    if raw.get("privileged"):
+        c.reject(f"{path}.privileged", "a privileged sandbox is not equivalent to Docker privileged mode")
     if "image" not in raw and "build" not in raw:
         c.reject(path, "neither image nor build")
     hc, hc_disabled = _healthcheck(raw.get("healthcheck"), f"{path}.healthcheck", c)
@@ -409,9 +416,8 @@ def _depends_on(value: object, path: str, c: _Collector) -> dict[str, Dependency
             continue
         for key in spec:
             if key == "restart":
-                c.equivalent(
-                    f"{path}.{dep}.restart", "applies only to explicit restarts; flotilla has no restart entry point"
-                )
+                if spec[key]:
+                    c.reject(f"{path}.{dep}.restart", "dependency restart propagation is not implemented")
             elif key not in ("condition", "required"):
                 c.reject(f"{path}.{dep}.{key}", "unsupported depends_on field")
         out[str(dep)] = Dependency(
@@ -447,10 +453,8 @@ def _service_networks(raw: Mapping[str, Any], path: str, c: _Collector) -> dict[
         spec = _mapping(spec, f"{path}.networks.{net}", c)
         for key in spec:
             if key in ("gw_priority", "priority"):
-                c.equivalent(
-                    f"{path}.networks.{net}.{key}",
-                    "affects only the default route with multiple NICs; sandboxes have one",
-                )
+                if spec[key] != 0:
+                    c.reject(f"{path}.networks.{net}.{key}", "Docker network attachment priorities are not implemented")
             elif key in ("ipv4_address", "ipv6_address"):
                 c.reject(f"{path}.networks.{net}.{key}", "addresses are platform-assigned; fixed-IP access cannot hold")
             elif key != "aliases":
@@ -633,9 +637,7 @@ def _restart(value: object, path: str, c: _Collector) -> RestartPolicy:
     text = str(value)
     if text in _RESTART:
         if text != "no":
-            c.equivalent(
-                path, "no restarts while running; a sample is void if the service exits and Docker would restart it"
-            )
+            c.reject(path, "Docker restart supervision is not implemented")
         return _RESTART[text]
     c.reject(path, f"unknown restart policy: {text!r}")
     return "no"
@@ -647,10 +649,7 @@ def _hostname(value: object, path: str, c: _Collector) -> str | None:
     if not valid_name(value):
         c.reject(path, "must be a valid hostname")
         return None
-    c.warn(
-        path,
-        "name resolution works via other units' hosts; the own hostname is unchanged (gethostname() is the platform's)",
-    )
+    c.reject(path, "actual Docker container identity/hostname cannot be set; DNS aliases are not equivalent")
     return str(value)
 
 
@@ -660,7 +659,8 @@ def _ports(value: object, path: str, c: _Collector) -> tuple[int, ...]:
     if not isinstance(value, list):
         c.reject(path, f"unrecognized syntax: {value!r}")
         return ()
-    c.equivalent(path, "services on the same network already reach all ports; no ports are published, recorded only")
+    if value:
+        c.reject(path, "published ports (including automatic host-port allocation) are not implemented")
     udp: list[int] = []
     for index, port in enumerate(value):
         field = f"{path}[{index}]"
@@ -689,15 +689,6 @@ def _ports(value: object, path: str, c: _Collector) -> tuple[int, ...]:
     return tuple(udp)
 
 
-# driver_opts allowlist: equivalent keys and values; None means any value is equivalent.
-_DRIVER_OPTS: dict[str, Callable[[str], bool]] = {
-    "com.docker.network.bridge.name": lambda v: True,
-    "com.docker.network.driver.mtu": lambda v: True,
-    "com.docker.network.bridge.gateway_mode_ipv4": lambda v: v in ("nat", "routed", "isolated"),
-    "com.docker.network.bridge.gateway_mode_ipv6": lambda v: v in ("nat", "routed", "isolated"),
-}
-
-
 def _networks(value: object, c: _Collector) -> dict[str, NetworkDef]:
     if not isinstance(value, dict):
         c.reject("networks", f"unrecognized syntax: {value!r}")
@@ -716,15 +707,8 @@ def _networks(value: object, c: _Collector) -> dict[str, NetworkDef]:
                 if v not in ({}, None) and v != {"driver": "default"}:
                     c.reject(f"{path}.ipam", "subnets, ranges, or gateways specified: addresses are platform-assigned")
             elif key == "driver_opts":
-                for opt, val in _mapping(v, f"{path}.driver_opts", c).items():
-                    ok = _DRIVER_OPTS.get(str(opt))
-                    if ok is None or not ok(str(val)):
-                        c.reject(f"{path}.driver_opts.{opt}", f"driver_opts not in allowlist: {opt}={val}")
-                    else:
-                        c.equivalent(
-                            f"{path}.driver_opts.{opt}",
-                            "affects only the host bridge or egress mode; egress is governed by the egress policy",
-                        )
+                for opt in _mapping(v, f"{path}.driver_opts", c):
+                    c.reject(f"{path}.driver_opts.{opt}", "Docker bridge driver options are not implemented")
             elif key == "external":
                 c.reject(f"{path}.external", "external networks shared across trials do not exist in training")
             else:

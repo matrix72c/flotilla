@@ -79,11 +79,13 @@ def test_report_requires_probed_shm_evidence_and_matching_profile() -> None:
     data = config_data()
     data["opensandbox"]["filesystem_protocol"] = "sandbox-system-v1"
     cfg = FlotillaConfig.from_mapping(data)
-    evidence = report(**{"storage.shm_size": ok(), "filesystem_profile": cfg.filesystem_profile()})
+    evidence = report(**{"storage.shm_size": ok(), "evidence_profile": cfg.evidence_profile()})
     assert cfg.platform_capabilities(evidence).shm_size
-    assert not cfg.platform_capabilities(report()).shm_size
-    assert not cfg.platform_capabilities(evidence.model_copy(update={"filesystem_profile": None})).shm_size
+    assert not cfg.platform_capabilities(report(evidence_profile=cfg.evidence_profile())).shm_size
+    with pytest.raises(ValueError, match="evidence"):
+        cfg.platform_capabilities(evidence.model_copy(update={"evidence_profile": ""}))
     upstream = cfg.model_copy(
         update={"opensandbox": cfg.opensandbox_settings().model_copy(update={"filesystem_protocol": "upstream"})}
     )
-    assert not upstream.platform_capabilities(evidence).shm_size
+    with pytest.raises(ValueError, match="evidence"):
+        upstream.platform_capabilities(evidence)

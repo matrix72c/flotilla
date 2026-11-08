@@ -208,6 +208,10 @@ class ExternalPolicy:
     cidrs: tuple[str, ...] = ()
 
 
+# Internal creation profile selected by trusted deployment wiring, never task data.
+InstanceProfile = Literal["default", "management"]
+
+
 @dataclass(frozen=True)
 class InstanceSpec:
     """Parameters for creating one instance. Contains only flotilla concepts.
@@ -231,6 +235,14 @@ class InstanceSpec:
     readonly_rootfs: bool = False
     tmpfs_mounts: tuple[TmpfsMount, ...] = ()
     shm_size_bytes: int | None = None  # None keeps the platform's default `/dev/shm`
+    # Independent of task privileged permission; only workspace anchors select management.
+    profile: InstanceProfile = "default"
+
+    def __post_init__(self) -> None:
+        if self.profile not in ("default", "management"):
+            raise ValueError("instance profile must be default or management")
+        if self.profile == "management" and self.privileged:
+            raise ValueError("management profile cannot be combined with task privileged permission")
 
 
 @dataclass(frozen=True)

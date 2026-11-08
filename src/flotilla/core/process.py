@@ -275,11 +275,8 @@ class _Runner:
         self._handles = handles
         self._poll = poll_interval_s
         # Three gates per service: started, healthy, exited with 0.
-        self._gates: dict[tuple[str, Condition], _Gate] = {
-            (u, c): _Gate()
-            for u in plan.units
-            for c in ("service_started", "service_healthy", "service_completed_successfully")
-        }
+        conditions: tuple[Condition, ...] = ("service_started", "service_healthy", "service_completed_successfully")
+        self._gates: dict[tuple[str, Condition], _Gate] = {(u, c): _Gate() for u in plan.units for c in conditions}
         awaited = {(dep, d.condition) for deps in plan.depends_on.values() for dep, d in deps.items()}
         self._wait_exit = {u for u, c in awaited if c == "service_completed_successfully"}
         self._wait_health = {u for u, c in awaited if c == "service_healthy"}

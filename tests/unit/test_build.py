@@ -100,23 +100,18 @@ def _project(**services: Any) -> Project:
 # ───────────────────────────── Derived Dockerfile ─────────────────────────────
 
 
-def test_derive_dockerfile_clears_then_copies() -> None:
-    df = derive_dockerfile(
-        "r.io/base@sha256:ab", copy=[("entrypoint.sh", "/secret/entrypoint.sh")], clear=["/var/cache"]
-    )
+def test_derive_dockerfile_only_prepares_mount_points() -> None:
+    df = derive_dockerfile("r.io/base@sha256:ab", directories=["/var/cache"])
     lines = df.splitlines()
     assert lines[0] == "FROM r.io/base@sha256:ab"
-    assert lines[1] == lines[-1] == "USER 0:0"  # minimal images without passwd/group can still build.
-    assert any("rm -rf /var/cache/*" in x for x in lines)
-    # bind writes delete the target first so directory shadowing holds; COPY uses exec form.
-    assert lines.index('RUN ["/bin/sh", "-c", "rm -rf /secret/entrypoint.sh"]') < lines.index(
-        'COPY ["entrypoint.sh", "/secret/entrypoint.sh"]'
-    )
+    assert lines[1] == lines[-1] == "USER 0:0"
+    assert "mkdir -p /var/cache" in df
+    assert "COPY " not in df and "rm -rf" not in df
 
 
 def test_derive_dockerfile_quotes_odd_paths() -> None:
-    df = derive_dockerfile("b", copy=[("a b.txt", "/opt/a b.txt")], clear=["/x y"])
-    assert '"a b.txt"' in df and '"/opt/a b.txt"' in df and "'/x y'" in df
+    df = derive_dockerfile("b", directories=["/x y"])
+    assert "'/x y'" in df
 
 
 # ───────────────────────────── Image naming ─────────────────────────────

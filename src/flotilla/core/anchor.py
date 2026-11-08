@@ -14,16 +14,19 @@ from flotilla.core.waiting import Aborted, Backoff, Expired, step_towards, wait_
 from flotilla.platform.base import (
     Clock,
     ErrorCategory,
+    ExecOutcomeUnknown,
     ExecResult,
     ExternalPolicy,
     FlotillaError,
     InstanceHandle,
+    InstanceProfile,
     InstanceSpec,
     Platform,
     ProcessSpec,
     Resources,
     SharedVolume,
     Stage,
+    overlaps,
 )
 
 log = logging.getLogger(__name__)
@@ -59,12 +62,27 @@ class AnchorSettings:
     retry_interval_s: float = 5.0  # retry interval after a failed renewal
     start_timeout_s: float = 600.0  # total for create, wait until exec-ready, wait until listed
     exec_timeout_s: float = 300.0  # per directory operation
+    # Only workspace-enabled runtime anchors get operator-configured builder access.
+    external: ExternalPolicy = field(default_factory=lambda: ExternalPolicy(mode="none"))
+    management_mounts: tuple[SharedVolume, ...] = ()
+    management_env: dict[str, str] = field(default_factory=dict)
+    profile: InstanceProfile = "default"
 
     def __post_init__(self) -> None:
         if not 0 < self.retry_interval_s <= self.renew_interval_s < self.grace_s < self.ttl_s:
             raise ValueError("must satisfy 0 < retry_interval_s <= renew_interval_s < grace_s < ttl_s")
         if not posixpath.isabs(self.mount_path):
             raise ValueError(f"mount_path must be absolute: {self.mount_path!r}")
+        occupied = [self.mount_path, "/.flotilla"]
+        for mount in self.management_mounts:
+            if not mount.read_only or not mount.key or any(p in ("", ".", "..") for p in mount.key.split("/")):
+                raise ValueError("management mounts require a relative storage key and read_only=true")
+            path = mount.mount_path
+            if not path.startswith("/") or path.startswith("//") or posixpath.normpath(path) != path:
+                raise ValueError("management mount paths must be canonical absolute paths")
+            if any(ord(c) < 32 for c in path + mount.key) or any(overlaps(path, other) for other in occupied):
+                raise ValueError("management mounts must not overlap the storage root, tools, or each other")
+            occupied.append(path)
 
 
 class Anchor:
@@ -188,6 +206,38 @@ class Anchor:
             await self.mkdir(parent, stage=stage)
         await self._run(("cp", "-a", "--", self._path(src_key), self._path(dest_key)), stage)
 
+    async def copy_source_tree(self, src_key: str, dest_key: str, *, stage: Stage) -> None:
+        """Copy a dataset directory, never a symlink to another namespace.
+
+        The dataset is operator-published and must remain immutable during a run.
+        Check each source component so cp cannot leave the copy itself as a link
+        back to canonical data. Interior links are validated by the task reader.
+        """
+        parts = src_key.split("/")
+        self._path(src_key)
+        for end in range(1, len(parts) + 1):
+            result = await self._run(
+                ("/.flotilla/bin/busybox", "stat", "-c", "%F", "--", self._path("/".join(parts[:end]))), stage
+            )
+            if result.stdout.strip() != b"directory":
+                raise ValueError("task source and its ancestors must be real directories, not symlinks")
+        if await self.exists(dest_key, stage=stage):
+            raise ValueError("workspace copy destination already exists")
+        await self.copy_tree(src_key, dest_key, stage=stage)
+
+    async def copy_contents(self, src_key: str, dest_key: str, *, stage: Stage) -> None:
+        """Copy directory contents, including dotfiles, into an owned directory."""
+        await self.mkdir(dest_key, stage=stage)
+        await self._run(("cp", "-a", "--", self._path(src_key) + "/.", self._path(dest_key)), stage)
+
+    def path(self, key: str) -> str:
+        """Path in the trusted management instance, not a workload-visible path."""
+        return self._path(key)
+
+    async def execute(self, argv: tuple[str, ...], *, timeout_s: float, stage: Stage) -> ExecResult:
+        """Run a configured management tool with an explicit, bounded lifetime."""
+        return await self._run(argv, stage, timeout_s=timeout_s, env={**_ENV, **self._settings.management_env})
+
     async def upload(self, key: str, data: bytes, *, mode: int, uid: int, gid: int, stage: Stage) -> None:
         """Managed upload: write as root, then restore the target owner and mode. The parent must exist.
 
@@ -299,10 +349,19 @@ class Anchor:
             raise ValueError(f"invalid volume key: {key!r}")
         return posixpath.join(self._settings.mount_path, *parts)
 
-    async def _run(self, argv: tuple[str, ...], stage: Stage) -> ExecResult:
+    async def _run(
+        self, argv: tuple[str, ...], stage: Stage, *, timeout_s: float | None = None, env: dict[str, str] | None = None
+    ) -> ExecResult:
         self.ensure_alive(stage)
         assert self._handle is not None
-        proc = ProcessSpec(argv=argv, uid=0, gid=0, cwd="/", env=_ENV, timeout_s=self._settings.exec_timeout_s)
+        proc = ProcessSpec(
+            argv=argv,
+            uid=0,
+            gid=0,
+            cwd="/",
+            env=_ENV if env is None else env,
+            timeout_s=self._settings.exec_timeout_s if timeout_s is None else timeout_s,
+        )
         try:
             # Cancel on deactivation: no directory op is in flight after t0 + G, and in-call backend retries stop too.
             result = await within(self._clock, None, self._platform.exec(self._handle, proc), abort=(self.deactivated,))
@@ -328,8 +387,9 @@ class Anchor:
             labels=labels.anchor_labels(self.launch_id),
             timeout_seconds=s.ttl_s,
             resources=s.resources,
-            volumes=(SharedVolume(key="", mount_path=s.mount_path, read_only=False),),
-            external=ExternalPolicy(mode="none"),
+            volumes=(SharedVolume(key="", mount_path=s.mount_path, read_only=False), *s.management_mounts),
+            external=s.external,
+            profile=s.profile,
         )
         sent = self._clock.monotonic()
         # Keep this at the request boundary: the outer startup deadline can
@@ -351,6 +411,7 @@ class Anchor:
         self._renewer = asyncio.create_task(self._renew_loop())
         await wait_running(self._platform, self._clock, self._handle.iid, stage="prepare")
         await self._wait_listed(returned)
+        await self._wait_executable()
         if not self._alive():  # create or waits took too long, grace expired during startup: launch is unusable
             raise FlotillaError(
                 f"anchor {self.launch_id} exceeded the {self._settings.grace_s}s grace period during startup",
@@ -358,6 +419,43 @@ class Anchor:
                 category=ErrorCategory.TRANSIENT,
                 retryable=True,
             )
+
+    async def _wait_executable(self) -> None:
+        """Running/listed need not mean the command service is ready yet.
+
+        Only this side-effect-free probe is retried, under start's existing
+        deadline and renewal/deactivation guard. Never replay directory/compiler
+        commands: a failed response may still mean their side effects occurred.
+        """
+        assert self._handle is not None
+        proc = ProcessSpec(argv=("true",), uid=0, gid=0, cwd="/", env=_ENV, timeout_s=10)
+        backoff = Backoff(1.0, cap=8.0)
+        while True:
+            if not self._alive():
+                raise self.lost("prepare")
+            try:
+                result = await within(
+                    self._clock, None, self._platform.exec(self._handle, proc), abort=(self.deactivated,)
+                )
+            except Aborted:
+                raise self.lost("prepare") from None
+            except FlotillaError as exc:
+                # A lost response to `true` is safe to repeat even when the
+                # command transport conservatively marks its outcome unknown.
+                if exc.category is not ErrorCategory.TRANSIENT or (
+                    not exc.retryable and not isinstance(exc, ExecOutcomeUnknown)
+                ):
+                    raise at_stage(exc, "prepare") from exc
+            else:
+                if result.exit_code != 0 or result.timed_out:
+                    raise FlotillaError(
+                        "anchor command readiness probe failed",
+                        stage="prepare",
+                        category=ErrorCategory.INVALID,
+                        retryable=False,
+                    )
+                return
+            await self._clock.sleep(backoff.next())
 
     async def _wait_listed(self, returned: float) -> None:
         """Wait for the anchor to appear in label listings. The platform guarantees it appears within

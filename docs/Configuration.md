@@ -1,6 +1,6 @@
 # Configuration reference
 
-A deployment is described by two operator-owned files: `deployment.toml`, read by every Flotilla client, and `declared.json`, which `flotilla probe` combines with its own measurements into `capabilities.json`. Templates are in [`deployments/examples/`](../deployments/examples/). Unknown keys are rejected in both files, and validation errors show field paths without echoing values.
+The only handwritten deployment file is `deployment.toml`. `flotilla probe` generates `capabilities.json`; it is evidence, not another configuration input. `declared.json` and manual capability assertions are no longer accepted. Templates are in [`deployments/examples/`](../deployments/examples/). Validation errors show field paths without echoing input values.
 
 ## deployment.toml
 
@@ -21,10 +21,11 @@ A configuration contains exactly one backend table: `[opensandbox]` for the buil
 |---|---|---|
 | `endpoint` | required | OpenSandbox server root (`http(s)://...`); the backend appends `/v1` |
 | `credential_env` | required | Name of the environment variable holding the API credential. Never put the credential itself here |
-| `capabilities` | required | Path to the capability report written by `flotilla probe` |
+| `capabilities` | `"capabilities.json"` | Path to the capability report written by `flotilla probe` |
 | `filesystem_protocol` | `"upstream"` | Lifecycle filesystem mapping: `"upstream"` omits extension fields; `"sandbox-system-v1"` enables the internal wire format, subject to matching probe evidence |
 | `extensions` | `{}` | Extra `extensions` sent with every create request |
 | `privileged_extensions` | `{}` | Extra `extensions` sent only for `privileged: true` services |
+| `management_extensions` | `{}` | Overrides of `extensions` sent only by workspace anchors explicitly selecting `prepare.management_profile = "management"`; never merged with `privileged_extensions` |
 | `create_fields` | `{}` | Extra top-level create-request fields. Fields managed by Flotilla (`image`, `entrypoint`, `metadata`, `timeout`, `resourceLimits`, `resourceRequests`, `volumes`, `networkPolicy`, `extensions`, `env`, `readOnlyRootFilesystem`, `tmpfsMounts`) are rejected |
 | `group_extension` | unset | Extension key used to place all sandboxes of one environment in one scheduling group. Set only if the deployment implements it |
 | `max_connections` | `100` | HTTP connections per pool. There are three pools: control plane, internal commands (health probes, address and hosts setup), and user commands. Requests beyond this wait in Flotilla; a command's timeout starts when it is sent, not while it waits |
@@ -48,7 +49,7 @@ A configuration contains exactly one backend table: `[opensandbox]` for the buil
 
 See the [OpenSandbox backend](backends/opensandbox.md) for the differences.
 
-The optional `probe_readonly_rootfs`, `probe_native_tmpfs`, and `probe_shm_size` booleans in `declared.json` request behavioral measurements and default to false. They do not assert support. New filesystem capabilities require matching `probed` evidence and a runtime configuration fingerprint. See [filesystem configuration and migration](Readonly_Rootfs_and_Tmpfs.md).
+Filesystem checks run when the explicitly selected backend protocol can express them. An unsupported dialect is `skipped`; behavior that violates the request is `failed`; unavailable tools or an incomplete test are `error`. There is no protocol or runtime fallback. Configuration selects a path but never grants a capability, including `ingress = "sandbox"`.
 
 ### `[storage]` (required)
 
@@ -83,7 +84,7 @@ The optional `probe_readonly_rootfs`, `probe_native_tmpfs`, and `probe_shm_size`
 | Key | Default | Meaning |
 |---|---|---|
 | `anchor_image` | required for use | Anchor image by digest (`repo@sha256:...`), built with `images/anchor/build.sh` |
-| `anchor_ttl` | `600` | Anchor sandbox TTL; must not exceed the deployment's maximum TTL |
+| `anchor_ttl` | `600` | Actual anchor TTL request tested by probe; no platform maximum is inferred |
 | `renew_interval` | `30` | Anchor renewal interval |
 | `grace` | `90` | After this long without a successful renewal, the launch stops admitting work. Must be at least `2 * renew_interval` and less than `anchor_ttl` |
 | `gc_window` | `180` | Minimum age before GC may collect another launch. Must exceed `grace + list_visibility_s` |
@@ -127,7 +128,7 @@ Per-stage startup deadlines. The whole startup, from admission to ready, is also
 | `prepare` | `600` | Preparing trial directories on shared storage |
 | `create` | `600` | Creating all sandboxes |
 | `create_request` | `60` | One create request. When no response arrives in time (for example, the gateway drops it under load), the sandbox is looked up by its labels and adopted. Must be below `create` |
-| `pending` | `300` | One sandbox staying pending. It is deleted and created again once; if the replacement also stays pending, the open fails. Must be below `create` when set; the default is off when `create` is not above it |
+| `pending` | `300` | One sandbox staying pending. It is deleted and created again once; if the replacement also stays pending, the open fails. An explicit numeric value must be below `create`; the default is off when `create` is not above it. Disabled pending replacement is serialized as JSON `null`, preserving the effective behavior when a workspace compiler reloads the full configuration snapshot |
 | `address` | `30` | Resolving sandbox addresses |
 | `wire` | `60` | Applying peer network links |
 | `hosts` | `30` | Writing `/etc/hosts` entries |
@@ -157,17 +158,44 @@ Precedence, lowest first: `[resources.default]`, resources declared in the Compo
 
 ### `[prepare]` and `[build]`
 
-Used by `flotilla prepare` only; opening prepared rows reads neither.
+Used by platform workspace preparation for every `HarborAttempt` and by optional `flotilla prepare` warmup. The latter emits diagnostics, not reusable training rows. The trusted management image must include this Flotilla version with its `harbor` extra, fixed Compose and build tools; it does not install tools or start DinD automatically.
 
 | Key | Default | Meaning |
 |---|---|---|
 | `prepare.concurrency` | `4` | Tasks prepared concurrently |
 | `prepare.docker_command` | `["docker"]` | Docker argv prefix, e.g. `["sudo", "-n", "docker"]` |
+| `prepare.workspace_command` | `["python3", "-I", "-m", "flotilla.integrations.workspace"]` | Helper in the trusted management image; installed Flotilla/Harbor/build tools required, never automatically installed |
+| `prepare.workspace_timeout` | `1800` | Total remote preparation budget |
+| `prepare.management_profile` | `"default"` | `"management"` selects the trusted backend-specific management overrides for workspace anchors only; OpenSandbox requires nonempty `management_extensions` |
+| `prepare.management_resources` | unset (`0.5` CPU / `512Mi`) | Optional `{cpu, memory}` allocation for workspace anchors only; set explicit builder-sized limits for local builds |
+| `prepare.management_network` | external none | Explicit management-only remote Docker/build and registry destinations; no automatic unrestricted egress |
+| `prepare.management_mounts` | `[]` | Explicit read-only shared-volume mounts for credential/config files, never baked into images or passed to task sandboxes |
+| `prepare.management_env` | `{}` | Nonsecret helper environment such as `DOCKER_HOST` and `DOCKER_CONFIG` paths; credential contents belong in mounted files |
+| `prepare.compose_command` | `["docker", "compose"]` | Official Compose argv used for normalization |
+| `prepare.compose_version` | `"2.39.4"` | Required official Compose version |
 | `prepare.export_timeout` | `600` | Seconds allowed for each `docker cp` that exports an image volume's initial content. Raise it for tasks with large volumes |
 | `build.target` | `""` | Repository that built and mirrored images are pushed to, e.g. `registry.example.com/team/tasks`. `flotilla prepare` pushes each dataset to `<target>/<dataset>` |
 | `build.pullable_registries` | `[]` | Registries or prefixes the platform can pull from directly; other images are mirrored to `build.target` |
 | `build.mirror_images` | `false` | Mirror every `image:` service, even from pullable registries |
 | `build.image_replacements` | `{}` | Map of image references to substitutes, e.g. to use an internal mirror |
+
+For a deployment whose management runtime supports Kata and local Docker, opt in without changing the ordinary task runtime:
+
+```toml
+[prepare]
+management_profile = "management"
+management_resources = { cpu = "2", memory = "4Gi" }
+management_env = { DOCKER_HOST = "unix:///var/run/docker.sock" }
+
+[opensandbox.management_extensions]
+runtimeClassName = "kata"
+```
+
+These are operator-owned deployment settings, not Compose fields or task runtime parameters. The internal profile is closed (`default` or `management`); selecting it does not grant task privileged permission, and combining management with `privileged=True` is rejected. Ordinary task, probe, bootstrap and GC requests retain their existing extensions and resource allocations. Management resource sizing also works with the default runtime. Management extensions may override global deployment extensions but cannot set Flotilla-managed placement-group or shared-memory keys.
+
+The management image still comes from `reaper.anchor_image`, and the anchor retains its explicit entrypoint. Verify that the platform starts Docker with that exact image, runtime and entrypoint; merely selecting Kata does not prove daemon readiness. This configuration does not add a daemon-start lifecycle. Keep Docker on a local Unix socket (or an explicitly authenticated remote endpoint), never an unauthenticated TCP listener. Mount credentials explicitly and read-only; do not put them in extensions, environment values or build contexts.
+
+Management-only extensions/profile/resources are excluded from the task capability fingerprint because probes do not use them. Task capability reports therefore do **not** validate Kata management builds. Record separate management diagnostics against the exact management image digest, extensions and resources before using local builds.
 
 ### `runtime_params` and `[agent_overlay]`
 
@@ -177,37 +205,34 @@ Used by `flotilla prepare` only; opening prepared rows reads neither.
 | `agent_overlay.env` | Environment variables added to the agent service. `${VAR}` refers to the service's original value, e.g. `PATH = "/opt/tools/bin:${PATH}"` |
 | `agent_overlay.services` | Services that receive the overlay instead of only the main service |
 
-## declared.json
+### `[probe]`
 
-`flotilla probe` measures what it can and takes everything else from this file. A declared item is an operator assertion, not a test result: set `ok` to `true` only with real evidence and describe it in `evidence`.
+All probe inputs live in the deployment file. Images must be pinned `repo@sha256:<64 lowercase hex>` references; empty optional images skip the corresponding phase.
 
-| Field | Meaning |
-|---|---|
-| `deployment` | Human-readable deployment name |
-| `max_ttl_seconds` | Maximum sandbox TTL the platform allows, or `null` |
-| `list_visibility_s` | Upper bound for a new sandbox to appear in label listings. The probe checks it |
-| `link_max_members` | Maximum number of sandboxes in one peer-linked group |
-| `external_forms` | Supported outbound policy forms: `"none"`, `"allowlist"`, `"any"` |
-| `implicit_egress` | Destinations the platform allows regardless of policy, as `target:port/protocol` strings |
-| `cluster_dns` | Optional concrete resolver IPs (default `[]`). Offline policies tolerate only matching `IP:53/udp`, `IP:53/tcp`, or comma-separated `tcp,udp` entries in `implicit_egress`; bracket IPv6 addresses, e.g. `[fd00::a]:53/udp`. Keep prose in evidence, not in these entries. No subnet, hostname, wildcard, or port-wide exception is accepted |
-| `devices` | Devices available to privileged services: `"fuse"`, `"kvm"` |
-| `notes` | Free-form notes copied into the report |
-
-Each of the following is an object `{"ok": bool, "source": "declared", "evidence": "..."}`:
-
-| Item | Kind | Asserts |
+| Key | Default | Meaning |
 |---|---|---|
-| `link` | Feature | Sandboxes can be linked so that services reach each other |
-| `link_udp` | Feature | Peer links carry UDP |
-| `inbound_isolation` | **Security** | A sandbox cannot be reached by sandboxes outside its group |
-| `implicit_egress_declared` | **Required** | `implicit_egress` lists every implicitly allowed destination |
-| `shared_volume` | Feature | Writable volumes can be shared between services |
-| `missing_subpath` | Informational | Platform behavior for a volume subpath that does not exist yet; recorded only |
-| `no_auto_mount` | **Security** | The platform mounts nothing beyond the requested volumes |
-| `volume_file` | Feature | Single files can be mounted |
-| `exec_auth` | **Security** | execd rejects requests without the sandbox's access token |
-| `diagnostics` | Informational | Platform diagnostics are available for failed sandboxes; recorded only |
-| `privileged_runtime` | Feature | `privileged: true` services are supported |
-| `multi_container` | Informational | Recorded only; not used |
+| `deployment` | `"deployment"` | Human-readable report name |
+| `image` | `""` | Required ordinary probe image |
+| `privileged_image` | `""` | Image for the configured privileged create path (e.g. Kata DinD) |
+| `inner_image` | `""` | Fixed lightweight image with `/bin/sh` for DinD execution/resource checks |
+| `link_members` | `9` | Measured group size, bounded to 2–32; not a platform maximum |
+| `hosts_recheck_s` | `600` | Delay before verifying that `/etc/hosts` was not rewritten |
+| `list_visibility_s` | `30` | Configured listing budget, also used by management bootstrap and GC safety |
+| `total_timeout_s` | `3600` | Total check budget; cleanup has its own budget |
+| `cleanup_timeout_s` | `180` | Bounded reconciliation and deletion confirmation |
+| `external_targets` | `[]` | Explicit `{host, port, protocol, service}` controls: `service = "echo"` (default, TCP/UDP), `"https"` (TCP), or `"ntp"` (UDP); `protocol` defaults to `"tcp"`; never inferred from workload egress |
+| `dns_name` | `""` | DNS query name for explicit TCP/UDP resolver checks |
 
-Missing **required** items, measured or declared, block startup. **Security** gaps block startup unless accepted in `security.accept_insecure`. Feature items gate tasks that need them; for example, a multi-service task needs `link`. See [Platform requirements](Platform_Requirements.md) for what the probe measures and how to gather evidence.
+For external isolation acceptance, provide TCP and UDP service controls (for example HTTPS and NTP, without operating echo servers) and a DNS query name. HTTPS/NTP resolve once under an allowing policy and use the same pinned IP for allow/deny/restore; HTTPS retains certificate hostname verification and SNI. Missing positives, invalid responses, certificate errors or restore failures never prove isolation. Measured cluster DNS on TCP/UDP 53 is allowed; this is not complete network disconnection. Non-53 controls on each resolver IP are optional and reported separately as `resolver_non_dns`; missing controls are `skipped`, not an isolation failure or proof of IP-wide blocking. See [Network validation](Network_Validation.md). Probe targets do not extend `[network].external` for tasks.
+
+The probe image needs the configured execd interface, shell/file utilities and Python 3's standard socket/TLS libraries and a CA trust store for HTTPS. The privileged phase additionally needs Docker; the fixed inner image must expose readable cgroup v2 limits. FUSE runs only when the actual configured extensions enable it and requires `fuse-overlayfs` and `fusermount3`; missing tools are errors, not evidence of unsupported platform behavior.
+
+## Generated capabilities.json
+
+Schema 2 stores one `status` per check: `passed`, `failed`, `skipped`, or `error`, plus concise evidence, measurements and runtime scope. Only `passed` enables a capability. `ok` is a derived internal property, not an accepted report field. Reports do not accept `source`, `declared`, `implicit_egress_declared`, `diagnostics`, or `multi_container`.
+
+`evidence_profile` binds backend, endpoint/project/extensions, ordinary and privileged runtime choices, execd/filesystem protocols, storage mapping, shared-tool release, network policy and relevant TTL/list budgets. Build settings and preparation concurrency are excluded. A different relevant configuration requires a new probe; endpoint equality alone is insufficient. Ordinary evidence does not enable privileged execution: its storage, auth, network and no-auto-mount checks are separate.
+
+The report records requested TTLs, observed expiries and measured group size, not maximum platform limits. The configured list budget remains subject to `reaper.grace + probe.list_visibility_s < reaper.gc_window`; a fast observation never shrinks the safety budget.
+
+Legacy reports are rejected, never upgraded or merged into new success results. Write a candidate report atomically with `--out`, inspect its complete summary and cleanup result, then promote it. Missing required checks block startup. Only the three existing security gaps can be explicitly waived; waivers never rewrite evidence to `passed` or waive incomplete network acceptance.

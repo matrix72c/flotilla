@@ -1,4 +1,4 @@
-"""Capability report builders: a fully met report, overridden per field. Used by `test_capabilities`/`test_config`."""
+"""Synthetic schema-2 evidence for offline tests only; never a runtime bootstrap."""
 
 from __future__ import annotations
 
@@ -8,42 +8,54 @@ from typing import Any
 from flotilla.capabilities import SCHEMA_VERSION, CapabilityReport
 
 
-def ok(source: str = "probed") -> dict[str, Any]:
-    return {"ok": True, "source": source}
+def ok() -> dict[str, Any]:
+    return {"status": "passed", "evidence": "synthetic unit-test evidence"}
 
 
-def no(source: str = "probed") -> dict[str, Any]:
-    return {"ok": False, "source": source}
+def no() -> dict[str, Any]:
+    return {"status": "failed", "evidence": "synthetic unit-test failure"}
 
 
 def report_data(**overrides: Any) -> dict[str, Any]:
-    """A report with all required, security and multi-service capabilities met; override by "section.field" or field."""
+    from flotilla.testing.config import config
+
     data: dict[str, Any] = {
         "schema": SCHEMA_VERSION,
         "deployment": "test",
         "endpoint": "http://os.test",
         "probed_at": datetime(2026, 10, 7, tzinfo=UTC).isoformat(),
         "probe_version": "0.0.0",
+        "evidence_profile": config().evidence_profile(),
         "lifecycle": {
             "create_get_delete": ok(),
             "label_list": ok(),
             "renew": ok(),
+            "anchor_ttl": ok(),
+            "trial_ttl": ok(),
             "max_label_value_len": 63,
             "list_visibility_s": 30.0,
             "max_ttl_seconds": None,
         },
-        "exec": {"exec_identity": ok(), "files": ok(), "placeholder_entry": ok(), "background": ok()},
+        "exec": {
+            "prerequisites": ok(),
+            "exec_identity": ok(),
+            "files": ok(),
+            "placeholder_entry": ok(),
+            "background": ok(),
+        },
         "network": {
             "link": ok(),
             "link_udp": ok(),
             "link_max_members": 10,
-            "inbound_isolation": ok("declared"),
-            "external_forms": ["none", "any", "allowlist"],
+            "inbound_isolation": ok(),
             "external_none": ok(),
+            "external_any": ok(),
+            "external_allowlist": ok(),
+            "network_acceptance": ok(),
+            "dns": ok(),
             "internal_address": "exec",
             "implicit_egress": ["10.96.0.10:53/udp"],
             "cluster_dns": ["10.96.0.10"],
-            "implicit_egress_declared": ok("declared"),
         },
         "storage": {
             "read_only": ok(),
@@ -55,15 +67,18 @@ def report_data(**overrides: Any) -> dict[str, Any]:
             "volume_file": ok(),
         },
         "runtime": {
-            "exec_auth": ok("declared"),
+            "exec_auth": ok(),
             "memory_limit": ok(),
             "cpu_limit": ok(),
             "cpu_limit_ratio": 1.0,
-            "diagnostics": ok(),
-            "privileged_runtime": ok(),
-            "devices": ["fuse"],
+            "privileged_runtime": {**ok(), "scope": "privileged"},
+            "privileged_storage": {**ok(), "scope": "privileged"},
+            "privileged_exec_auth": {**ok(), "scope": "privileged"},
+            "privileged_network": {**ok(), "scope": "privileged"},
+            "privileged_inbound_isolation": {**ok(), "scope": "privileged"},
+            "privileged_no_auto_mount": {**ok(), "scope": "privileged"},
+            "fuse": {**ok(), "scope": "privileged"},
             "image_digest": ok(),
-            "multi_container": no("declared"),
         },
     }
     for path, value in overrides.items():

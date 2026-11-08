@@ -30,7 +30,9 @@ A task is a directory with a `task.toml` and an `environment/` directory contain
 
 ```text
 task/
-  task.toml               # [environment] table, may be empty
+  instruction.md
+  tests/test.sh            # required Harbor verifier script
+  task.toml               # Harbor task configuration
   environment/
     docker-compose.yaml
 ```
@@ -50,36 +52,35 @@ services:
       retries: 15
 ```
 
-Prepare it once. This resolves or builds the images, publishes task files, and writes one row per task:
+Stage the complete original Harbor task (including `instruction.md`, `task.toml`, environments and tests) at `datasets/demo/task` under platform storage. The client uses this relative `task_key`, not a local task copy. Optional warmup emits diagnostics, not training inputs:
 
 ```sh
-flotilla prepare task --deployment deployment.toml --out prepared.jsonl
+flotilla prepare datasets/demo/task --deployment deployment.toml --out diagnostics.json
 ```
-
-Then open the row:
 
 ```python
 import asyncio
 
-from flotilla import Flotilla, OpenOptions, load_prepared
+from flotilla import Flotilla, OpenOptions
+from flotilla.integrations.harbor_attempt import HarborAttempt
 
 
 async def main():
-    [task] = load_prepared("prepared.jsonl")
     async with Flotilla(deployment="deployment.toml") as fleet:
-        async with fleet.environment(task.environment(), OpenOptions(startup_timeout=600, lifetime=300)) as env:
+        attempt = await HarborAttempt.create(fleet, "datasets/demo/task")
+        try:
+            env = await attempt.open("main", OpenOptions(startup_timeout=600, lifetime=300))
             pong = await env.service("cache").exec(["redis-cli", "ping"], timeout=30)
-            print("cache:", pong.stdout.decode().strip())
-            result = await env.agent.shell("printf 'PING\\r\\n' | nc -w 2 cache 6379", timeout=30)
-            print("main -> cache:", result.stdout.decode().strip())
-            assert result.exit_code == 0 and not result.timed_out
+            print(pong.stdout.decode().strip())
+        finally:
+            await attempt.close()
     assert fleet.cleanup_report is not None and fleet.cleanup_report.clean
 
 
 asyncio.run(main())
 ```
 
-Opening a row only creates sandboxes: images were pinned and task files published by `flotilla prepare`. Flotilla waits for `cache` to pass its healthcheck before starting `main`, makes `cache` resolvable by name from `main`, and confirms on exit that both sandboxes and their shared directories have been deleted. Harbor tasks run the same way through the [Harbor adapter](docs/Harbor_Quick_Start.md).
+`HarborAttempt` creates a private platform workspace, reads the original task, compiles Compose/build inputs there, and opens role environments. Closing releases roles and workspace; hidden tests are staged only for verification. See the [Harbor adapter](docs/Harbor_Quick_Start.md). This does not add `task_key` support to native Harbor CLI/Trial.
 
 ## Features
 
@@ -92,7 +93,7 @@ Opening a row only creates sandboxes: images were pinned and task files publishe
 
 ## Get started
 
-Flotilla runs on **Linux x86_64 with Python 3.12**, and needs Docker with BuildKit on the machine that prepares images.
+Flotilla runs on **Linux x86_64 with Python 3.12**. The platform management image additionally needs this Flotilla version with the `harbor` extra, pinned Docker Compose (default 2.39.4), and build tooling. Build-endpoint networking and credential mounts must be explicit; there is no automatic installation, DinD, or unrestricted egress. This redesign has offline tests only: no real platform acceptance or compatible published management image yet. The old anchor image is not sufficient.
 
 ```sh
 git clone https://github.com/matrix72c/flotilla.git
@@ -123,7 +124,7 @@ Then pick a path:
 **Operating a deployment**
 
 - [Deployment guide](docs/Deployment.md): one-time setup of images, the share release, and the capability probe.
-- [Configuration reference](docs/Configuration.md): every `deployment.toml` and `declared.json` field.
+- [Configuration reference](docs/Configuration.md): the single `deployment.toml` and generated capability evidence.
 - [Platform requirements](docs/Platform_Requirements.md) and [network validation](docs/Network_Validation.md): what a deployment must enable, feature by feature, and how to verify each.
 - [OpenSandbox backend](docs/backends/opensandbox.md), including [read-only root filesystems and tmpfs](docs/Readonly_Rootfs_and_Tmpfs.md).
 

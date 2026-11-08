@@ -9,7 +9,15 @@ import pytest
 
 from flotilla.core import labels
 from flotilla.core.anchor import Anchor, AnchorSettings
-from flotilla.platform.base import ErrorCategory, ExecResult, FlotillaError, InstanceHandle, InstanceStatus, ProcessSpec
+from flotilla.platform.base import (
+    ErrorCategory,
+    ExecOutcomeUnknown,
+    ExecResult,
+    FlotillaError,
+    InstanceHandle,
+    InstanceStatus,
+    ProcessSpec,
+)
 from flotilla.testing.platform import FakePlatform, ManualClock, SharedTree
 
 SETTINGS = AnchorSettings(image="anchor@sha256:abc")
@@ -89,6 +97,65 @@ async def test_not_ready_before_start(platform: FakePlatform, clock: ManualClock
     anchor = Anchor(platform, clock, "L1", SETTINGS)
     with pytest.raises(RuntimeError):
         anchor.ensure_alive("create")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unknown", [False, True])
+async def test_start_waits_for_command_readiness_without_replaying_work(
+    platform: FakePlatform, clock: ManualClock, unknown: bool
+) -> None:
+    seen: list[tuple[str, ...]] = []
+
+    def execute(_iid: str, proc: ProcessSpec) -> ExecResult:
+        seen.append(proc.argv)
+        if len(seen) < 3 or proc.argv != ("true",):
+            if unknown:
+                raise ExecOutcomeUnknown("command response was lost")
+            raise _transient()
+        return ExecResult(0, b"", b"")
+
+    platform.set_exec_handler(execute)
+    anchor = await _started(platform, clock)
+    assert seen == [("true",)] * 3
+    with pytest.raises(FlotillaError):
+        await anchor.execute(("compiler",), stage="prepare", timeout_s=10)
+    assert seen == [("true",)] * 3 + [("compiler",)]
+    await anchor.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["auth", "nonretryable", "nonzero", "timed_out", "unavailable", "hung"])
+async def test_start_readiness_failure_cleans_up(platform: FakePlatform, clock: ManualClock, outcome: str) -> None:
+    seen = 0
+
+    if outcome == "hung":
+        platform.set_latency("exec", 10000)
+
+    def execute(_iid: str, proc: ProcessSpec) -> ExecResult:
+        nonlocal seen
+        seen += 1
+        assert proc.argv == ("true",)
+        if outcome == "unavailable":
+            raise _transient()
+        if outcome in ("auth", "nonretryable"):
+            raise FlotillaError(
+                "unavailable",
+                stage="run",
+                category=ErrorCategory.INVALID if outcome == "auth" else ErrorCategory.TRANSIENT,
+                retryable=False,
+            )
+        return ExecResult(1 if outcome == "nonzero" else 0, b"", b"", timed_out=outcome == "timed_out")
+
+    platform.set_exec_handler(execute)
+    anchor = Anchor(platform, clock, "L1", SETTINGS)
+    with pytest.raises(FlotillaError):
+        await clock.run(anchor.start())
+    assert not platform.instances()
+    assert not anchor._ready
+    if outcome == "hung":
+        assert seen == 0
+    elif outcome != "unavailable":
+        assert seen == 1
 
 
 # ───────────────────────────── Renewal and deactivation ─────────────────────────────

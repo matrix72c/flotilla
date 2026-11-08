@@ -12,6 +12,7 @@ from typing import Any
 
 import yaml
 
+from flotilla.compose.adapter import ComposeConfigAdapter
 from flotilla.compose.model import MAIN, Finding, Project
 from flotilla.compose.normalize import harbor_overlay, normalize
 from flotilla.compose.paths import confined
@@ -54,16 +55,27 @@ def find_tasks(roots: Iterable[Path]) -> Iterator[Path]:
             dirs[:] = sorted(d for d in dirs if not d.startswith("."))
 
 
-def load_task(path: Path) -> HarborTask:
+def load_task(
+    path: Path,
+    *,
+    compose_adapter: ComposeConfigAdapter | None = None,
+    compose_files: tuple[Path, ...] | None = None,
+    compose_environment: Mapping[str, str] | None = None,
+) -> HarborTask:
     try:
-        return _load_task(path)
+        return _load_task(path, compose_adapter, compose_files, compose_environment)
     except TaskError:
         raise
     except (ValueError, OSError, RuntimeError) as exc:
         raise TaskError(f"task input: {exc}") from exc
 
 
-def _load_task(path: Path) -> HarborTask:
+def _load_task(
+    path: Path,
+    compose_adapter: ComposeConfigAdapter | None,
+    compose_files: tuple[Path, ...] | None,
+    compose_environment: Mapping[str, str] | None,
+) -> HarborTask:
     try:
         config = tomllib.loads(confined(path, TASK_FILE).read_text())
     except (OSError, tomllib.TOMLDecodeError) as exc:
@@ -74,6 +86,9 @@ def _load_task(path: Path) -> HarborTask:
         env_dir,
         _table(config, "environment"),
         name=_table(config, "task").get("name") or path.name,
+        compose_adapter=compose_adapter,
+        compose_files=compose_files,
+        compose_environment=compose_environment,
     )
 
 
@@ -84,6 +99,9 @@ def load_environment(
     *,
     name: str,
     findings: tuple[Finding, ...] = (),
+    compose_adapter: ComposeConfigAdapter | None = None,
+    compose_files: tuple[Path, ...] | None = None,
+    compose_environment: Mapping[str, str] | None = None,
 ) -> HarborTask:
     """Parse a concrete environment context without depending on Harbor's runtime."""
     if not env_dir.resolve().is_relative_to(task_dir.resolve()):
@@ -92,25 +110,36 @@ def load_environment(
         raise TaskError("task.name must be a nonempty string")
     findings = (*findings, *_network_policies({"environment": environment}))
     compose_path = confined(env_dir, COMPOSE_FILE)
-    compose: dict[str, Any] = {}
-    if compose_path.is_file():
-        try:
-            loaded = yaml.safe_load(compose_path.read_text())
-        except (OSError, yaml.YAMLError) as exc:
-            raise TaskError(f"failed to read {ENV_DIR}/{COMPOSE_FILE}: {exc}") from exc
-        if not isinstance(loaded, dict):
-            raise TaskError(f"{ENV_DIR}/{COMPOSE_FILE} is not a mapping")
-        compose = loaded
     image = environment.get("docker_image")
     main_image = image if isinstance(image, str) and image else None
-    overlay = harbor_overlay(
-        compose, main_image=main_image, main_build=main_image is None and (env_dir / "Dockerfile").is_file()
-    )
-    if environment.get("workdir") is not None:
-        overlay["services"][MAIN]["working_dir"] = environment["workdir"]
-    variables = {**_dotenv(confined(env_dir, ".env")), **HARBOR_VARIABLES}
-    _env_files(overlay, env_dir)
-    project = normalize(overlay, variables)
+    main_build = main_image is None and (env_dir / "Dockerfile").is_file()
+    if compose_adapter is not None:
+        project = compose_adapter.load(
+            env_dir,
+            files=compose_files if compose_files is not None else ((compose_path,) if compose_path.is_file() else ()),
+            environment=compose_environment or {},
+            main_image=main_image,
+            main_build=main_build,
+            workdir=environment.get("workdir"),
+        )
+    else:
+        if compose_files is not None or compose_environment is not None:
+            raise TaskError("explicit Compose files/environment require the official Compose adapter")
+        compose: dict[str, Any] = {}
+        if compose_path.is_file():
+            try:
+                loaded = yaml.safe_load(compose_path.read_text())
+            except (OSError, yaml.YAMLError) as exc:
+                raise TaskError(f"failed to read {ENV_DIR}/{COMPOSE_FILE}: {exc}") from exc
+            if not isinstance(loaded, dict):
+                raise TaskError(f"{ENV_DIR}/{COMPOSE_FILE} is not a mapping")
+            compose = loaded
+        overlay = harbor_overlay(compose, main_image=main_image, main_build=main_build)
+        if environment.get("workdir") is not None:
+            overlay["services"][MAIN]["working_dir"] = environment["workdir"]
+        variables = {**_dotenv(confined(env_dir, ".env")), **HARBOR_VARIABLES}
+        _env_files(overlay, env_dir)
+        project = normalize(overlay, variables)
     if _network_mode(environment) == "no-network":
         # Preserve peer topology while removing external access from every service. This survives
         # compilation/publication and cannot be undone by a caller's deployment egress policy.

@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import importlib.util
 import json
 import sys
 import uuid
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +20,7 @@ from flotilla.core.gc import Gc, GcReport
 from flotilla.core.volumes import LAUNCHES
 from flotilla.platform.base import FlotillaError
 from flotilla.platform.clock import SystemClock
-from flotilla.probe import Declared, ProbeSettings, probe
+from flotilla.probe import probe
 from flotilla.share.release import ReleaseError, VerifyReport, gc_releases, publish_release, verify_release
 
 
@@ -33,17 +33,10 @@ def _build_parser() -> argparse.ArgumentParser:
     command.add_argument("tasks", nargs="+", type=Path)
     command.add_argument("--deployment", required=True, type=Path)
     command.add_argument("--out", type=Path)
-    pr = sub.add_parser("prepare", help="build images and publish task files once; write one prepared row per task")
-    pr.add_argument("dirs", nargs="+", type=Path, help="dataset directories (or single task directories)")
+    pr = sub.add_parser("prepare", help="validate and warm images from platform-side Harbor tasks; no dataset export")
+    pr.add_argument("tasks", nargs="+", help="original Harbor task keys relative to deployment storage")
     pr.add_argument("--deployment", required=True, type=Path, help="deployment configuration (TOML)")
-    pr.add_argument("--out", required=True, type=Path, help="prepared rows (jsonl); existing rows are kept")
-    pr.add_argument("--failures", type=Path, help="failure report (jsonl); defaults to <out>.failures.jsonl")
-    pr.add_argument("--force", action="store_true", help="re-prepare tasks that already have a row")
-    pr.add_argument("--concurrency", type=int, help="tasks prepared at once; defaults to [prepare].concurrency")
-    pr.add_argument("--work", type=Path, help="local scratch directory; defaults to <out>.work")
-    pr.add_argument(
-        "--main-only", action="store_true", help="prepare only main environments (no Harbor verifier resolution)"
-    )
+    pr.add_argument("--out", type=Path, help="optional diagnostics JSON, not a training dataset")
     g = sub.add_parser("gc", help="clean up leftover launches via a temporary anchor")
     g.add_argument("--deployment", required=True, type=Path, help="deployment configuration (TOML)")
     g.add_argument(
@@ -57,12 +50,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p = sub.add_parser("probe", help="run contract tests against a deployment and write a capability report")
     p.add_argument("--deployment", required=True, type=Path, help="deployment configuration (TOML)")
-    p.add_argument(
-        "--declared", required=True, type=Path, help="deployer declarations for items probe cannot test (JSON)"
-    )
-    p.add_argument(
-        "--image", required=True, help="image under test (repo@sha256:..., must have /bin/sh and common tools)"
-    )
+    p.add_argument("--image", help="explicit override of [probe].image (digest-pinned)")
     p.add_argument(
         "--out",
         type=Path,
@@ -71,8 +59,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--hosts-recheck",
         type=float,
-        default=30.0,
-        help="seconds to wait before re-reading /etc/hosts (use 600 for acceptance runs)",
+        default=None,
+        help="explicit override of [probe].hosts_recheck_s",
     )
     sh = sub.add_parser("share", help="publish, verify, or gc share releases")
     share_sub = sh.add_subparsers(dest="share_command", required=True)
@@ -80,11 +68,6 @@ def _build_parser() -> argparse.ArgumentParser:
     sp.add_argument("dir", type=Path, help="release content root (becomes the contents of /.flotilla)")
     sp.add_argument("--deployment", required=True, type=Path, help="deployment configuration (TOML)")
     sp.add_argument("--release", help="release name; defaults to share.release in the config")
-    sp.add_argument(
-        "--declared",
-        type=Path,
-        help="deployer declarations (JSON); bootstraps the first publish before a capability report exists",
-    )
     sp.add_argument("--component", action="append", default=[], help="component version as name=version; repeatable")
     sv = share_sub.add_parser("verify", help="fully verify a release against the digest pinned in the config")
     sv.add_argument("--deployment", required=True, type=Path, help="deployment configuration (TOML)")
@@ -104,23 +87,20 @@ def _build_parser() -> argparse.ArgumentParser:
 
 async def _probe(args: argparse.Namespace) -> int:
     cfg = FlotillaConfig.load(args.deployment)
-    declared = Declared.model_validate_json(args.declared.read_bytes())
+    settings = cfg.probe_settings()
+    if args.image is not None:
+        settings = replace(settings, image=args.image)
+    if args.hosts_recheck is not None:
+        settings = replace(settings, hosts_recheck_s=args.hosts_recheck)
     clock = SystemClock()
-    platform = cfg.build_platform(clock=clock, caps=declared.bootstrap_capabilities())
+    platform = cfg.build_platform(clock=clock, caps=cfg.management_capabilities())
     # Temporary anchor with its own launch_id; mounts the shared root, removed on exit; only creates launches/<id>.
     anchor = Anchor(platform, clock, f"probe-{uuid.uuid4().hex[:12]}", cfg.anchor_settings())
     try:
         await anchor.start()
         await anchor.mkdir(f"launches/{anchor.launch_id}", stage="prepare")
         try:
-            settings = ProbeSettings(
-                image=args.image,
-                share_release=cfg.share.release,
-                endpoint=cfg.backend_settings.endpoint,
-                hosts_recheck_s=args.hosts_recheck,
-                filesystem_profile=cfg.filesystem_profile(),
-            )
-            report = await probe(platform, clock, anchor, declared, settings)
+            report = await probe(platform, clock, anchor, settings)
         finally:
             await anchor.remove(f"launches/{anchor.launch_id}", stage="run")
     finally:
@@ -128,8 +108,7 @@ async def _probe(args: argparse.Namespace) -> int:
         await platform.aclose()
 
     out = args.out or cfg.capabilities_path()
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(report.dump_json())
+    report.write_json(out)
     missing = report.missing_required()
     print(f"capability report written: {out}")
     print("required: " + ("all satisfied" if not missing else "unmet " + ", ".join(missing)))
@@ -164,57 +143,14 @@ async def _tasks(args: argparse.Namespace) -> int:
 
 async def _prepare(args: argparse.Namespace) -> int:
     from flotilla.prepare import prepare
-    from flotilla.prepare.inspect import main_only
-    from flotilla.prepare.runner import Environments, failures_path
 
-    if args.concurrency is not None and args.concurrency < 1:
-        print("--concurrency must be positive", file=sys.stderr)
-        return 2
-    environments: Environments = main_only
-    if not args.main_only:
-        if importlib.util.find_spec("harbor") is None:
-            print(
-                "verifier resolution needs Harbor: install flotilla-compose[harbor] or pass --main-only",
-                file=sys.stderr,
-            )
-            return 2
-        from flotilla.integrations.harbor_source import task_environments
-
-        environments = task_environments
-    cfg = FlotillaConfig.load(args.deployment)
-    clock = SystemClock()
-    platform = cfg.build_platform(clock=clock, caps=cfg.platform_capabilities())
-
-    async def start_anchor() -> Anchor:
-        # Like gc/share, a temporary anchor without `launches/<own id>`, so it never becomes a gc candidate.
-        anchor = Anchor(platform, clock, f"prepare-{uuid.uuid4().hex[:12]}", cfg.anchor_settings())
-        try:
-            await anchor.start()
-        except BaseException:
-            await anchor.close()
-            raise
-        return anchor
-
-    try:
-        report = await prepare(
-            cfg,
-            args.dirs,
-            args.out,
-            anchor=start_anchor,
-            environments=environments,
-            failures=args.failures,
-            force=args.force,
-            concurrency=args.concurrency,
-            work=args.work,
-        )
-    finally:
-        await platform.aclose()
-    print(f"prepared {len(report.prepared)}, skipped {len(report.skipped)}, failed {len(report.failed)} → {args.out}")
-    if report.failed:
-        print(f"failures: {args.failures or failures_path(args.out)}", file=sys.stderr)
-    if report.leftover_containers:
-        print(f"export containers not removed: {list(report.leftover_containers)}", file=sys.stderr)
-    return 1 if report.failed or report.leftover_containers else 0
+    results = await prepare(args.tasks, deployment=args.deployment)
+    document = json.dumps(results, ensure_ascii=False, indent=2)
+    if args.out is not None:
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(document + "\n")
+    print(document)
+    return int(any(row["status"] == "failed" for row in results))
 
 
 async def _gc(args: argparse.Namespace) -> int:
@@ -306,9 +242,10 @@ async def _share(args: argparse.Namespace) -> int:
             )
             return 2
         caps = cfg.platform_capabilities()
-    elif args.share_command == "publish" and args.declared is not None:
-        # No report exists before the first publish (probe needs a share release); bootstrap from declarations.
-        caps = Declared.model_validate_json(args.declared.read_bytes()).bootstrap_capabilities()
+    elif args.share_command == "publish":
+        # Restricted management operations bootstrap share without pretending
+        # untested task capabilities passed.
+        caps = cfg.management_capabilities()
         expected = ""
     else:
         caps = cfg.platform_capabilities()

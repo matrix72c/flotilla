@@ -4,11 +4,11 @@ This guide is for authors of evaluation runners, RL rollout workers, and agent f
 
 ## Who owns what
 
-Flotilla owns environment resources: images, sandboxes, network policies, shared directories, renewal, and cleanup. Your framework owns everything about the episode: which prepared environment to open for each phase, the order of phases, verifier selection, scoring, retries, and admission into training.
+Flotilla owns environment resources: images, sandboxes, network policies, shared directories, renewal, and cleanup. Your framework owns everything about the episode: which original platform task key to select and which role to open for each phase, the order of phases, verifier selection, scoring, retries, and admission into training.
 
 Two consequences follow:
 
-- `flotilla prepare` prepares a task's main environment and, for Harbor tasks with a separate verifier, its verifier environment. Your framework opens each one explicitly, with its own options.
+- One `HarborAttempt` owns the task workspace and its main/verifier roles. Your framework selects phases and scoring, stages tests only at verification, and closes the attempt. `flotilla prepare` is optional platform warmup, not a dataset-generation prerequisite.
 - A score never makes a cleanup failure acceptable. Check `CleanupReport.clean` separately and treat an unclean report as an infrastructure problem.
 
 ## One client per process
@@ -35,34 +35,25 @@ finally:
 
 `on_event` receives best-effort diagnostic events: lifecycle kinds such as `queued`, `admitted`, `open_failed`, `operation_started`, `operation_finished`, `cancel_requested`, `service_terminated`, and `cleanup_finished`, plus one timing event per startup stage with `elapsed_s` set. They never contain argv, output, environment values, or credentials. Don't use them as lifecycle acknowledgements; the return values and exceptions are authoritative.
 
-## Preparing and selecting tasks
+## Selecting platform tasks
 
-Prepare each dataset once, on a machine with Docker, and keep the jsonl with your experiment:
+Keep complete original Harbor task directories on platform storage, with versioned relative keys such as `datasets/web-bench/task-001`. Preserve `task.toml`, `instruction.md`, environment files, and hidden tests. Training rows contain `task_key` and framework metadata only: no local `task_dir`, generated `env`, or prepared JSONL is required. Native Harbor CLI/Trial has not gained `task_key` support; the framework must use the Flotilla attempt adapter.
 
 ```sh
-flotilla prepare harbor/web-bench --deployment deployment.toml --out web-bench.jsonl
+# Optional warmup/diagnostics, not a training input
+flotilla prepare datasets/web-bench/task-001 --deployment deployment.toml --out diagnostics.json
 ```
-
-Each line is one task: `id` (`<dataset>/<task path>`), `task_dir`, filter attributes, `dataset_rev`, `flotilla_version`, and the prepared environments under `env`. Filtering a dataset or deriving a subset is filtering lines. The filter attributes describe the main environment at the deployment's effective resources:
-
-| Attribute | Meaning |
-|---|---|
-| `services` | Number of Compose services |
-| `cpu`, `memory_mib` | Total CPU and memory across services |
-| `privileged` | Whether any service is privileged |
-| `has_verifier` | Whether the row has a separate verifier environment |
-
-Other top-level keys are kept as they are, so your framework may add its own fields to the lines. `env` belongs to Flotilla: regenerate it with `flotilla prepare --force` when a task or Flotilla's preparation rules change, and only while no job is using the rows.
-
-New environments use manifest schema 7: one runtime expression per service environment variable, with referenced `.env` values stored as literals. Schema 6 rows are converted when read and remain usable. Regenerate tasks affected by the nested-interpolation or volume-root metadata fixes; reading an older row cannot recover information omitted during its original preparation.
 
 ```python
-from flotilla import load_prepared
+from flotilla.integrations.harbor_attempt import HarborAttempt
 
-rows = [row for row in load_prepared("web-bench.jsonl") if not row.attrs["privileged"]]
-main = rows[0].environment()  # the "main" environment
-verifier = rows[0].verifier     # None unless the task has a separate verifier
+attempt = await HarborAttempt.create(fleet, selected_task_key, runtime_params={"FLAG": flag})
+main = attempt.roles["main"].prepared  # transient metadata for admission estimates
 ```
+
+Creation uses the trusted management image to copy the original task into an isolated platform workspace and compile/build roles there. The image needs Python, this Flotilla version with its `harbor` extra, pinned Compose (default 2.39.4), and build tools. Explicit `prepare.management_network` targets reach the remote Docker/build service and registries; `management_mounts` provides read-only credentials, and `management_env` carries nonsecret endpoint/config paths. Tools are not installed on demand, DinD is not started automatically, and credentials must not be baked into images. The current redesign has offline tests, not real platform acceptance or a compatible published management image.
+
+Do not change staged source directories during experiments. Per-attempt build outputs, tests and handoff data remain on the platform; only metadata and bounded runtime results return to the client. A warmup diagnostic is not reusable evidence of later environment success.
 
 ## Budgeting concurrent work
 
@@ -90,14 +81,15 @@ options = OpenOptions(
     disable_internet=True,
 )
 try:
-    async with fleet.environment(main, options) as env:
-        for action in agent.actions():
-            result = await env.agent.shell(action, timeout=120)
-            if result.timed_out:
-                agent.observe_timeout()  # the remote process was confirmed stopped
-            else:
-                agent.observe(result.exit_code, result.stdout, result.stderr)
-        reward = await score(env)
+    env = await attempt.open("main", options)
+    for action in agent.actions():
+        result = await env.agent.shell(action, timeout=120)
+        if result.timed_out:
+            agent.observe_timeout()  # the remote process was confirmed stopped
+        else:
+            agent.observe(result.exit_code, result.stdout, result.stderr)
+    await attempt.stage_tests()  # never stage hidden tests during the agent phase
+    reward = await score(attempt, env)  # use the adapter verifier, not local task files
 except ExecOutcomeUnknown:
     discard(episode_id, reason="command outcome unknown")
 except FlotillaError as exc:
@@ -107,6 +99,8 @@ except FlotillaError as exc:
         requeue(episode_id)
     else:
         fail(episode_id, exc)
+finally:
+    await attempt.close()
 ```
 
 How to treat each outcome:
@@ -137,7 +131,7 @@ A wait deadline or cancellation only stops waiting; the process stays owned by i
 
 ## Owned and borrowed handles
 
-An adapter that opens an environment owns it and must release it. An adapter that receives an existing `Environment` from elsewhere borrows it and must not release it. The Harbor adapter shows both: a normally constructed `FlotillaEnvironment` owns its fleet and environment, and `FlotillaEnvironment.view(...)` borrows both. Keep this distinction explicit in your own adapter, and make sure exactly one owner calls `release()`.
+An adapter that opens an environment owns it and must release it. An adapter that receives an existing `Environment` from elsewhere borrows it and must not release it. For platform tasks, `HarborAttempt` owns roles and workspace; `FlotillaEnvironment.view(...)` borrows an already-open role. Keep this distinction explicit in your own adapter, and make sure exactly one owner calls `release()`.
 
 ## After a crash
 
@@ -145,7 +139,7 @@ A process that dies without closing its client leaves its sandboxes and director
 
 ## Testing your integration
 
-Install the `testing` extra and use the public helpers in `flotilla.testing`. They run the real preparation, client, and runtime against an in-memory platform and fake image tooling, without a deployment, Docker, or credentials:
+Install the `testing` extra and use the public helpers in `flotilla.testing`. They run the low-level preparation, client, and runtime against an in-memory platform and fake image tooling, without a deployment, Docker, or credentials:
 
 ```python
 import pytest
@@ -171,5 +165,7 @@ async def test_episode_releases_its_environment(
     assert fleet.cleanup_report is not None and fleet.cleanup_report.clean
     assert platform.instances() == []
 ```
+
+The synthetic `prepared_environment` fixture above is for unit contracts, not a production task input or platform-acceptance result.
 
 `FakePlatform` lets tests inject faults (`inject_fault`, `inject_create_then_fail`), add latency, replace the command handler (`set_exec_handler`), and lose background processes, so you can test your handling of the outcomes above. It is a test double, not a production backend or an isolation boundary, and it deliberately fails on operations it does not model.

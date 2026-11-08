@@ -35,7 +35,7 @@ host_path = "/srv/flotilla"
 # root_subpath = "flotilla"
 
 [share]
-# Publish this immutable release before running probe: `flotilla share publish <dir> --declared <file>`
+# Publish this immutable release before running probe: `flotilla share publish <dir> --deployment deployment.toml`
 # writes RELEASE.json, uploads it, and prints the two lines below to paste back.
 release = "example-release"
 # Replace with the SHA256 of the published release's RELEASE.json.
@@ -85,12 +85,38 @@ memory = "2Gi"
 # cpu = "4"
 # memory = "8Gi"
 
-# `flotilla prepare` builds images and publishes task files; the machine running it needs Docker/BuildKit and
-# registry access. Opening prepared rows needs neither.
+# Compilation and optional `flotilla prepare <task_key>` warmup run inside the
+# management image, using attempt-private copies. The caller needs no local Docker.
 [prepare]
 concurrency = 4
-# docker_command = ["sudo", "-n", "docker"]
+# docker_command = ["docker"]
+# [prepare.management_network]
+# external = ["builder.example.com", "registry.example.com"]
+# [prepare.management_env]
+# DOCKER_HOST = "tcp://builder.example.com:2376"
+# DOCKER_TLS_VERIFY = "1"
+# DOCKER_CERT_PATH = "/builder-auth"
+# [[prepare.management_mounts]]
+# key = "operator-private/builder-auth"
+# mount_path = "/builder-auth"
+# read_only = true
 
 [build]
 pullable_registries = ["registry.example.com"]
 target = "registry.example.com/team/tasks"
+
+# Probe inputs are not capability assertions. Replace all digest placeholders and provide
+# controlled TCP/UDP echo services before requesting network acceptance.
+[probe]
+deployment = "example"
+image = "registry.example.com/team/probe@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+# privileged_image = "registry.example.com/team/dind@sha256:<resolved-64-hex>"
+# inner_image = "registry.example.com/team/busybox@sha256:<resolved-64-hex>"
+link_members = 9
+hosts_recheck_s = 600.0
+# dns_name = "probe.example.com"
+# external_targets = [
+#   {host = "192.0.2.10", port = 48080, protocol = "tcp"},
+#   {host = "192.0.2.10", port = 48080, protocol = "udp"},
+# ]
+# No-network acceptance also needs reachable non-53 echo controls on each resolver IP.

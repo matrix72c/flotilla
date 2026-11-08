@@ -50,6 +50,8 @@ def to_plan(
     overlay: AgentOverlay = NO_OVERLAY,
     resources: Mapping[str, Resources] | None = None,
     external_mounts: Mapping[str, tuple[SharedVolume, ...]] | None = None,
+    workspace_mounts: Mapping[str, tuple[SharedVolume, ...]] | None = None,
+    workspace_root: str | None = None,
 ) -> TrialPlan:
     """Turn a manifest into core trial input (see module docs). The result is already `validate()`d."""
     env_by_unit = {name: dict(u.context.env) for name, u in manifest.units.items()}
@@ -85,6 +87,8 @@ def to_plan(
         ),
         external_units=frozenset(manifest.external_units),
         external_mounts={name: tuple(mounts) for name, mounts in (external_mounts or {}).items()},
+        workspace_mounts={name: tuple(mounts) for name, mounts in (workspace_mounts or {}).items()},
+        workspace_root=workspace_root,
     )
     try:
         plan.validate()

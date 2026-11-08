@@ -42,7 +42,7 @@ class BackendSettings(BaseModel):
 
     endpoint: str  # identifies the deployment; the capability report must record the same value
     credential_env: str
-    capabilities: str  # capability report path (from `flotilla probe`); relative to the config file's directory
+    capabilities: str = "capabilities.json"  # generated report path, relative to the config file's directory
 
     @field_validator("endpoint")
     @classmethod

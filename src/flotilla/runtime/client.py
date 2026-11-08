@@ -12,7 +12,7 @@ from collections.abc import AsyncIterator, Callable, Coroutine
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from types import TracebackType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from flotilla.config import FlotillaConfig
 from flotilla.prepared import PreparedEnvironment
@@ -29,6 +29,9 @@ from flotilla.runtime.types import (
     RuntimeEvent,
 )
 from flotilla.runtime.worker import Worker
+
+if TYPE_CHECKING:
+    from flotilla.runtime.workspace import Workspace
 
 
 class Flotilla:
@@ -117,13 +120,25 @@ class Flotilla:
 
     def client_reservation(self) -> ResourceReservation:
         """Per-client anchor overhead, in addition to environment reservations."""
-        resource = self._deployment.anchor_settings().resources
+        resource = self._deployment.anchor_settings(workspace=True).resources
         return ResourceReservation({"anchor": {"cpu": resource.cpu, "memory": resource.memory}})
 
+    async def workspace(self, task_key: str) -> Workspace:
+        """Copy one original Harbor directory into an independent platform-side attempt."""
+        from flotilla.runtime.workspace import Workspace
+
+        await self.start()
+        info = await self._call(
+            lambda manager: manager.workspaces.create(task_key),
+            settle_cancel=True,
+            cancel_result=lambda manager, value: manager.release_workspace(value.id),
+        )
+        return Workspace(self, info)
+
     async def open(self, prepared: PreparedEnvironment, options: OpenOptions | None = None) -> Environment:
-        """Open one prepared environment (a row's `environment(role)`); no images are built or files published."""
+        """Open a transient compiled environment; Harbor callers should use HarborAttempt."""
         if not isinstance(prepared, PreparedEnvironment):
-            raise TypeError("open takes a PreparedEnvironment; run `flotilla prepare` and load its rows")
+            raise TypeError("open takes a transient PreparedEnvironment; use HarborAttempt for a platform task_key")
         options = copy.deepcopy(options or OpenOptions())
         admission = options.admission_timeout or self._deployment.limits.admission_timeout
         startup = options.startup_timeout or self._deployment.runtime.startup_timeout_s
@@ -139,6 +154,8 @@ class Flotilla:
             disable_internet=options.disable_internet,
             resources=options.resources,
             external_mounts=options.external_mounts,
+            workspace_id=options.workspace_id,
+            workspace_mounts=options.workspace_mounts,
             lifetime=lifetime,
         )
         try:

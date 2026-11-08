@@ -30,7 +30,9 @@ flowchart LR
 
 ```text
 task/
-  task.toml               # [environment] 表，可以为空
+  instruction.md
+  tests/test.sh            # required Harbor verifier script
+  task.toml               # Harbor 任务配置
   environment/
     docker-compose.yaml
 ```
@@ -50,36 +52,35 @@ services:
       retries: 15
 ```
 
-先准备一次：解析或构建镜像、发布任务文件，每个任务写出一行：
+将完整原始 Harbor 任务（含 `instruction.md`、`task.toml`、环境和测试目录）放到平台共享存储的 `datasets/demo/task`。训练客户端只持有相对此存储根的 `task_key`，不需要本地任务副本。可选预热输出的是诊断，不是训练输入：
 
 ```sh
-flotilla prepare task --deployment deployment.toml --out prepared.jsonl
+flotilla prepare datasets/demo/task --deployment deployment.toml --out diagnostics.json
 ```
-
-然后打开这一行：
 
 ```python
 import asyncio
 
-from flotilla import Flotilla, OpenOptions, load_prepared
+from flotilla import Flotilla, OpenOptions
+from flotilla.integrations.harbor_attempt import HarborAttempt
 
 
 async def main():
-    [task] = load_prepared("prepared.jsonl")
     async with Flotilla(deployment="deployment.toml") as fleet:
-        async with fleet.environment(task.environment(), OpenOptions(startup_timeout=600, lifetime=300)) as env:
+        attempt = await HarborAttempt.create(fleet, "datasets/demo/task")
+        try:
+            env = await attempt.open("main", OpenOptions(startup_timeout=600, lifetime=300))
             pong = await env.service("cache").exec(["redis-cli", "ping"], timeout=30)
-            print("cache:", pong.stdout.decode().strip())
-            result = await env.agent.shell("printf 'PING\\r\\n' | nc -w 2 cache 6379", timeout=30)
-            print("main -> cache:", result.stdout.decode().strip())
-            assert result.exit_code == 0 and not result.timed_out
+            print(pong.stdout.decode().strip())
+        finally:
+            await attempt.close()
     assert fleet.cleanup_report is not None and fleet.cleanup_report.clean
 
 
 asyncio.run(main())
 ```
 
-打开一行只会创建沙盒：镜像已由 `flotilla prepare` 按 digest 钉死，任务文件也已发布。Flotilla 会等 `cache` 通过健康检查后再启动 `main`，让 `main` 能按服务名访问 `cache`，并在退出时确认两个沙盒及其共享目录都已删除。Harbor 任务也通过 [Harbor 适配器](docs/Harbor_Quick_Start.md)以同样方式运行。
+`HarborAttempt` 在平台侧创建独立工作区，读取原任务、解析 Compose 并构建，再打开角色环境；关闭时回收角色和工作区。隐藏测试只在验证阶段挂载。详见 [Harbor 适配器](docs/Harbor_Quick_Start.md)。这不是原生 Harbor CLI/Trial 的 `task_key` 支持。
 
 ## 特性
 
@@ -92,7 +93,7 @@ asyncio.run(main())
 
 ## 开始使用
 
-Flotilla 运行在 **Linux x86_64 + Python 3.12** 上，准备镜像的机器上需要有支持 BuildKit 的 Docker。
+Flotilla 运行在 **Linux x86_64 + Python 3.12** 上。平台管理镜像还需预装本版本 Flotilla 的 `harbor` extra、固定版本 Docker Compose（默认 2.39.4）和构建工具，并显式配置构建端点网络及凭据挂载；不会自动安装工具、启动 DinD 或开放外网。当前重设计仅完成离线验证，尚无真实平台验收或兼容发布镜像，不能直接沿用旧 anchor 镜像。
 
 ```sh
 git clone https://github.com/matrix72c/flotilla.git
@@ -123,7 +124,7 @@ python -m pip install .            # 或：python -m pip install '.[harbor]'
 **运维部署**
 
 - [部署指南](docs/Deployment.md)：一次性准备镜像、share release 和能力探测。
-- [配置参考](docs/Configuration.md)：`deployment.toml` 和 `declared.json` 的全部字段。
+- [配置参考](docs/Configuration.md)：单一 `deployment.toml` 与生成的能力报告。
 - [平台要求](docs/Platform_Requirements.md)与[网络验证](docs/Network_Validation.md)：部署必须逐项启用哪些功能，以及如何逐项验证。
 - [OpenSandbox 后端](docs/backends/opensandbox.md)，包括[只读根文件系统与 tmpfs](docs/Readonly_Rootfs_and_Tmpfs.md)。
 

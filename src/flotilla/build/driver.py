@@ -27,7 +27,6 @@ from flotilla.build.images import (
     resolve_images,
 )
 from flotilla.build.meta import ImageAccounts, UserLookup, parse_config
-from flotilla.compose.layout import classify
 from flotilla.compose.manifest_gen import build_manifest
 from flotilla.compose.model import ImageMeta, Project
 from flotilla.compose.task import HarborTask
@@ -49,8 +48,8 @@ class BuildOutcome:
     manifest_path: Path | None = None
     dispositions: Mapping[str, str] = field(default_factory=dict)
     built: tuple[str, ...] = ()
-    #: Task files were exported (`files/` non-empty). Such tasks must be published before running: the
-    #: manifest's `task_files` is written by publication, and training accepts only published manifests.
+    #: Internal staging contains bind data or seeds. Legacy callers publish it; Harbor attempt owners
+    #: transfer it to attempt-private storage and set task_files without a persistent public dataset.
     needs_publish: bool = False
     reason: str = ""
     scan: ScanResult | None = None
@@ -215,27 +214,12 @@ def _build_one(task: HarborTask, name: str, plan: ServiceImage, key: str, ctx: B
 
 
 def _derive(task: HarborTask, service: str, base: str, *, user: str) -> str:
-    """Apply binds and nocopy on top of the digest-pinned image, regardless of where the image came from."""
-    layout = classify(task.project.services)
-    copy = [
-        (source, target)
-        for group in layout.binds
-        if group.mode == "image"
-        for unit, source, target, _ in group.references
-        if unit == service
-    ]
-    clear = [
-        target
-        for volume in layout.volumes
-        if volume.mode == "local" and volume.nocopy
-        for unit, target, _, _ in volume.references
-        if unit == service
-    ]
+    """Prepare mount-point directories without embedding bind or volume contents."""
     svc = task.project.services[service]
     directories = [m.mount_path for m in svc.tmpfs]
     if svc.readonly_rootfs:
         directories.append("/.flotilla-runtime")
-    return derive_dockerfile(base, copy=copy, clear=clear, directories=directories, user=user)
+    return derive_dockerfile(base, directories=directories, user=user)
 
 
 def _metadata(project: Project, images: Mapping[str, str], ctx: BuildContext) -> dict[str, ImageMeta]:

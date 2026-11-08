@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
 import math
 import posixpath
@@ -34,6 +36,9 @@ _ENV_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")  # variable names referenceable
 #: restores the original name for `env -i`, which clears the alias.
 _ENV_ALIAS = "FLOTILLA_ENV_"
 _CHOWN_TIMEOUT_S = 30.0  # chown after legacy upload
+_SYSTEM_FILES = frozenset({"/etc/hosts", "/etc/resolv.conf"})
+_SYSTEM_FILE_LIMIT = 1024 * 1024
+_SYSTEM_FILE_TIMEOUT_S = 30.0
 #: The wrapper path is written verbatim into `sh -c` scripts: only characters needing no quoting, so spaces, `$`,
 #: or quotes in the path are never interpreted by the shell.
 _SAFE_PATH = re.compile(r"/[A-Za-z0-9_./-]+")
@@ -401,8 +406,51 @@ class Execd:
             await self._chown(path, mode=mode, uid=uid, gid=gid)
 
     async def read_file(self, path: str) -> bytes:
-        """`GET /files/download?path=...` for raw bytes; 404 -> `not_found`. Idempotent and retryable."""
+        """Download ordinary files; use encoded exec for platform-managed hosts/resolver files.
+
+        These mounted system files can fail the download transport despite being readable in
+        the sandbox. Route them explicitly, never retry an authorization/download failure via
+        exec. Both paths use this instance's authenticated client and the existing root file
+        service identity. Base64 avoids fold_exec's lossy reconstruction of line endings.
+        """
+        if path in _SYSTEM_FILES:
+            return await self._read_system_file(path)
         return await self._http.download("/files/download", stage="run", params={"path": path})
+
+    async def _read_system_file(self, path: str) -> bytes:
+        proc = ProcessSpec(
+            argv=(self.settings.wrapper, "base64", path),
+            uid=0,
+            gid=0,
+            cwd="/",
+            env={},
+            timeout_s=_SYSTEM_FILE_TIMEOUT_S,
+        )
+        result = await self.exec(proc)
+        if result.timed_out or result.exit_code != 0:
+            raise FlotillaError(
+                f"cannot read system file {path} via encoded exec "
+                f"(exit={result.exit_code}, timeout={result.timed_out})",
+                stage="run",
+                category=ErrorCategory.INVALID,
+                retryable=False,
+            )
+        encoded = b"".join(result.stdout.split())
+        if len(encoded) > 4 * ((_SYSTEM_FILE_LIMIT + 2) // 3):
+            raise FlotillaError(
+                "system file exceeds read limit", stage="run", category=ErrorCategory.INVALID, retryable=False
+            )
+        try:
+            content = base64.b64decode(encoded, validate=True)
+        except binascii.Error as exc:
+            raise FlotillaError(
+                "invalid encoded system file response", stage="run", category=ErrorCategory.INVALID, retryable=False
+            ) from exc
+        if len(content) > _SYSTEM_FILE_LIMIT:
+            raise FlotillaError(
+                "system file exceeds read limit", stage="run", category=ErrorCategory.INVALID, retryable=False
+            )
+        return content
 
     async def _chown(self, path: str, *, mode: int, uid: int, gid: int) -> None:
         """Set owner and mode after legacy upload. Applets run via the wrapper's absolute path, not image PATH/tools."""

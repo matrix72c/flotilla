@@ -179,9 +179,9 @@ Never include raw response bodies, credentials, environment values, or command o
 
 ## Capabilities and the probe
 
-You don't write capability detection yourself. `flotilla probe` runs the same behavioral checks through your `Platform` and combines them with the operator's `declared.json` into `capabilities.json`. Startup then refuses deployments that lack required capabilities or have unaccepted security gaps. See [Platform requirements](Platform_Requirements.md) for what is measured and what must be declared.
+`flotilla probe` runs shared behavioral checks through your `Platform` and writes generated schema-2 `capabilities.json`. Each outcome is `passed`, `failed`, `skipped`, or `error`, bound to relevant deployment/runtime settings. There are no manual capability assertions. Unsupported backend-specific controls must remain non-passed; implement authentic backend hooks where required rather than fabricating success. Startup refuses missing required evidence, mismatched configurations, and unaccepted security gaps. See [Platform requirements](Platform_Requirements.md).
 
-The probe follows the normal [deployment guide](Deployment.md): build and push the anchor and probe images, publish a share release, run `flotilla probe`, and review the report. Nothing in those steps is OpenSandbox-specific once your backend is installed.
+The probe follows the normal [deployment guide](Deployment.md): build and push the anchor and probe images, publish a share release, run `flotilla probe`, and review the report. Common checks use the Platform contract. Current independent ingress, execd authentication and privileged-runtime checks also use explicit OpenSandbox helpers; another backend must provide equivalent measured controls before those capabilities can be enabled. Management bootstrap uses conservative capabilities and must not bypass normal create gates.
 
 ## Testing
 

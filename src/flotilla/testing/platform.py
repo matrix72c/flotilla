@@ -622,6 +622,8 @@ class SharedTree:
 
     def _exec(self, iid: str, proc: ProcessSpec) -> ExecResult:
         op = proc.argv[0]
+        if proc.argv == ("true",):
+            return ExecResult(0, b"", b"")
         missing = ExecResult(exit_code=1, stdout=b"", stderr=b"No such file or directory")
         if op == "tar":  # tar -xpf <tar> --numeric-owner -C <dest>
             tar, dest = self._rel(proc.argv[2]), self._rel(proc.argv[-1])

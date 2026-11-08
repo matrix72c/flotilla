@@ -38,6 +38,25 @@ def test_reservation_uses_prepared_resources_and_deployment_overrides(
     assert fleet.client_reservation().instances == 1
 
 
+def test_client_reservation_uses_workspace_anchor_resources(
+    deployment: tuple[FlotillaConfig, FakePlatform, SharedTree],
+) -> None:
+    cfg, _, _ = deployment
+    ordinary = Flotilla(deployment=cfg)
+    assert ordinary.client_reservation().resources == {"anchor": {"cpu": "0.5", "memory": "512Mi"}}
+    configured = cfg.model_copy(
+        update={"prepare": cfg.prepare.model_copy(update={"management_resources": Resource(cpu="2", memory="4Gi")})}
+    )
+    fleet = Flotilla(deployment=configured)
+    budget = fleet.client_reservation()
+    assert budget.instances == budget.copies == 1
+    resource = configured.anchor_settings(workspace=True).resources
+    assert budget.resources == {"anchor": {"cpu": resource.cpu, "memory": resource.memory}}
+    assert budget.resources == {"anchor": {"cpu": "2", "memory": "4Gi"}}
+    assert configured.anchor_settings().resources == cfg.anchor_settings().resources
+    assert fleet.reservation(task()) == ordinary.reservation(task())
+
+
 @pytest.mark.asyncio
 async def test_wait_timeout_is_not_a_stop_and_stop_confirms_exit(
     deployment: tuple[FlotillaConfig, FakePlatform, SharedTree],

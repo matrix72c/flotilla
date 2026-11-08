@@ -36,6 +36,7 @@ def unit_volumes(
     for m in plan.units[unit].mounts:
         out.append(SharedVolume(key=_resolve(plan, m, launch_id, trial_id), mount_path=m.target, read_only=m.read_only))
     out.extend(plan.external_mounts.get(unit, ()))
+    out.extend(plan.workspace_mounts.get(unit, ()))
     return tuple(out)
 
 
