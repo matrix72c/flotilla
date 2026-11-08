@@ -96,6 +96,12 @@ async def run(
             stage="prepare",
         )
         await anchor.copy_source_tree(key, other, stage="prepare")
+        batch = await store.describe_tasks([key, key, other])
+        check("batch_full_key_dedup_and_basename_independence", set(batch) == {key, other})
+        check("batch_creates_no_attempts", not store.records)
+        check(
+            "batch_temp_directories_removed", not await anchor.listdir(f"launches/{launch}/metadata", stage="prepare")
+        )
         owned = [await store.create(source) for source in (key, key, other)]
         check("duplicate_basename_preserved", [item.task_id for item in owned] == ["same-id"] * 3)
         check("independent_attempt_paths", len({item.key for item in owned}) == 3)
@@ -139,6 +145,10 @@ async def run(
             stage="prepare",
         )
         metadata = json.loads(await store.read(first.id, "result.json"))
+        check(
+            "batch_native_describe_parity",
+            batch[key] == batch[other] == {name: metadata[name] for name in ("instruction", "task_config")},
+        )
         check("native_instruction_description", metadata["instruction"] == files["instruction.md"].decode())
         check("native_basename_identity", metadata["task_id"] == "same-id")
         check(

@@ -8,7 +8,7 @@ import copy
 import threading
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable, Coroutine
+from collections.abc import AsyncIterator, Callable, Coroutine, Sequence
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from types import TracebackType
@@ -122,6 +122,17 @@ class Flotilla:
         """Per-client anchor overhead, in addition to environment reservations."""
         resource = self._deployment.anchor_settings(workspace=True).resources
         return ResourceReservation({"anchor": {"cpu": resource.cpu, "memory": resource.memory}})
+
+    async def describe_tasks(self, task_keys: Sequence[str]) -> dict[str, dict[str, Any]]:
+        """Read native Harbor instruction/config metadata without creating attempts.
+
+        Keys are canonical platform-relative source directories, deduplicated by
+        full key (never basename). Sources must remain immutable during the run.
+        Requests are bounded to 128 tasks / 1 MiB and results to 64 MiB per batch;
+        any invalid task or exceeded limit fails the call, without partial results.
+        """
+        await self.start()
+        return await self._call(lambda manager: manager.workspaces.describe_tasks(task_keys), settle_cancel=True)
 
     async def workspace(self, task_key: str) -> Workspace:
         """Copy one original Harbor directory into an independent platform-side attempt."""

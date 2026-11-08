@@ -6,6 +6,7 @@ import json
 import os
 import stat
 import subprocess
+import sys
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
@@ -269,6 +270,164 @@ def test_compiler_cleanup_preserves_primary_failure(
     if failure in ("build-and-cleanup", "cleanup-exception"):
         assert str(error.value) == "primary build error"
         assert any("cleanup" in note for note in error.value.__notes__)
+
+
+def source_snapshot(source: Path) -> dict[str, Any]:
+    return {
+        path.relative_to(source).as_posix(): (
+            path.lstat().st_mode,
+            path.lstat().st_uid,
+            path.lstat().st_gid,
+            path.lstat().st_mtime_ns,
+            path.lstat().st_ctime_ns,
+            os.readlink(path) if path.is_symlink() else path.read_bytes() if path.is_file() else None,
+        )
+        for path in [source, *source.rglob("*")]
+    }
+
+
+@pytest.mark.parametrize("mode", ["shared", "separate", "bundled"])
+def test_batch_native_parity_dedup_basename_and_no_source_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    toml = '[verifier]\nenvironment_mode="separate"\n' if mode != "shared" else ""
+    if mode == "bundled":
+        toml += '[verifier.environment]\ndocker_image="r.io/verifier:1"\n'
+    one, source = task_copy(tmp_path / "one", toml=toml, script=mode != "bundled")
+    two, other = task_copy(tmp_path / "two", toml=toml, script=mode != "bundled")
+    (other / "instruction.md").write_text("Different same-basename task.\n")
+    before = [source_snapshot(path) for path in (source, other)]
+    expected = {}
+    keys = [path.relative_to(tmp_path).as_posix() for path in (source, other)]
+    for key, path, workspace in zip(keys, (source, other), (one, two), strict=True):
+        description = compiler.describe(path, workspace)
+        expected[key] = {name: description[name] for name in ("instruction", "task_config")}
+    forbidden = Mock(side_effect=AssertionError("batch metadata must not stage, chmod or compile"))
+    for name in ("_copy_tests", "_directory", "compile_request", "build_task"):
+        monkeypatch.setattr(compiler, name, forbidden)
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    monkeypatch.setattr(Path, "chmod", forbidden)
+    parse = Mock(wraps=compiler._describe_source)
+    monkeypatch.setattr(compiler, "_describe_source", parse)
+    actual = json.loads(compiler.describe_tasks_request({"storage_root": str(tmp_path), "task_keys": [*keys, keys[0]]}))
+    assert actual == expected
+    assert parse.call_count == 2
+    assert [source_snapshot(path) for path in (source, other)] == before
+    forbidden.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "escape",
+        "dangling",
+        "fifo",
+        "source-link",
+        "ancestor-link",
+        "copy-sibling",
+        "absolute-test-link",
+        "multistep",
+        "missing-script",
+        "windows",
+    ],
+)
+def test_batch_rejects_unsupported_native_trees_and_symlink_ancestors(tmp_path: Path, kind: str) -> None:
+    workspace, source = task_copy(tmp_path)
+    if kind == "escape":
+        (source / "outside").symlink_to(tmp_path)
+    elif kind == "dangling":
+        (source / "dangling").symlink_to("missing")
+    elif kind == "fifo":
+        os.mkfifo(source / "fifo")
+    elif kind == "source-link":
+        alias = workspace / "source/alias"
+        alias.symlink_to(source, target_is_directory=True)
+        source = alias
+    elif kind == "ancestor-link":
+        alias = tmp_path / "alias"
+        alias.symlink_to(workspace, target_is_directory=True)
+        source = alias / "source/task"
+    elif kind == "copy-sibling":
+        (source / "payload").write_text("outside tests subtree")
+        (source / "tests/alias").symlink_to("../payload")
+    elif kind == "absolute-test-link":
+        (source / "tests/alias").symlink_to(source / "tests/test.sh")
+    elif kind == "multistep":
+        (source / "task.toml").write_text('[[steps]]\nname="first"\n')
+        (source / "steps/first").mkdir(parents=True)
+        (source / "steps/first/instruction.md").write_text("Step")
+    elif kind == "missing-script":
+        (source / "tests/test.sh").unlink()
+    else:
+        (source / "task.toml").write_text('[environment]\nos="windows"\ndocker_image="r.io/main:1"\n')
+        (source / "tests/test.bat").write_text("exit 0")
+    with pytest.raises((ValueError, OSError)):
+        compiler.describe_tasks_request(
+            {"storage_root": str(tmp_path), "task_keys": [source.relative_to(tmp_path).as_posix()]}
+        )
+    assert not (workspace / "public").exists()
+    assert not (workspace / "private-tests").exists()
+
+
+@pytest.mark.parametrize("key", ["../outside", "/outside", "a//b", "a/./b", "share/t", "launches/t", "a\\b", "a\x7fb"])
+def test_batch_reader_revalidates_canonical_source_keys(tmp_path: Path, key: str) -> None:
+    with pytest.raises(ValueError):
+        compiler.describe_tasks_request({"storage_root": str(tmp_path), "task_keys": [key]})
+
+
+def batch_request(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path, str]:
+    _, source = task_copy(tmp_path)
+    key = source.relative_to(tmp_path).as_posix()
+    workspace = tmp_path / "launches/test/metadata/unique"
+    workspace.mkdir(parents=True)
+    request = workspace / "request.json"
+    request.write_text(json.dumps({"storage_root": str(tmp_path), "workspace": str(workspace), "task_keys": [key]}))
+    monkeypatch.setattr(sys, "argv", ["workspace", "--describe-tasks", str(request)])
+    return request, workspace, key
+
+
+def test_batch_entrypoint_writes_only_bounded_metadata_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _, workspace, key = batch_request(tmp_path, monkeypatch)
+    compiler.main()
+    output = workspace / "result.json"
+    result = json.loads(output.read_bytes())
+    assert set(result) == {key}
+    assert set(result[key]) == {"instruction", "task_config"}
+    assert result[key]["instruction"] == "Solve the task.\n"
+    assert stat.S_IMODE(output.stat().st_mode) == 0o600
+    assert sorted(path.name for path in workspace.iterdir()) == ["request.json", "result.json"]
+
+
+@pytest.mark.parametrize(
+    "failure", ["count", "request-bytes", "output-bytes", "later-task", "output-path", "output-symlink"]
+)
+def test_batch_entrypoint_limits_and_failures_publish_no_partial_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    path, workspace, key = batch_request(tmp_path, monkeypatch)
+    request = json.loads(path.read_bytes())
+    if failure == "count":
+        request["task_keys"] = [key] * 129
+    elif failure == "request-bytes":
+        monkeypatch.setattr(compiler, "METADATA_REQUEST_BYTES", path.stat().st_size - 1)
+    elif failure == "output-bytes":
+        monkeypatch.setattr(compiler, "METADATA_RESULT_BYTES", 50)
+    elif failure == "later-task":
+        request["task_keys"].append("missing/task")
+    elif failure == "output-path":
+        request["workspace"] = str(tmp_path / key)
+    else:
+        alias = tmp_path / "launches/test/metadata/alias"
+        alias.symlink_to(workspace, target_is_directory=True)
+        request["workspace"] = str(alias)
+        path = alias / "request.json"
+        monkeypatch.setattr(sys, "argv", ["workspace", "--describe-tasks", str(path)])
+    path.write_text(json.dumps(request))
+    with pytest.raises((ValueError, OSError)):
+        compiler.main()
+    assert not (workspace / "result.json").exists()
+    assert not (workspace / "result.tmp").exists()
+    assert not (tmp_path / key / "result.json").exists()
 
 
 def test_restore_identities_uses_numeric_metadata_and_does_not_chmod_links(

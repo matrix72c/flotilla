@@ -7,15 +7,32 @@ import json
 import posixpath
 import uuid
 from dataclasses import dataclass, field
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from flotilla.core.anchor import Anchor
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Coroutine
+    from collections.abc import Awaitable, Callable, Coroutine, Iterator, Sequence
 
     from flotilla.config import FlotillaConfig
     from flotilla.runtime.client import Flotilla
+
+
+# Shared with the installed management reader. These bound each remote operation,
+# not the caller's dataset size; large datasets are split into sequential batches.
+METADATA_MAX_TASKS = 128
+METADATA_REQUEST_BYTES = 1024 * 1024
+METADATA_RESULT_BYTES = 64 * 1024 * 1024
+
+
+def source_task_key(value: str) -> str:
+    value = relative_key(value)
+    if "\x7f" in value:
+        raise ValueError("task keys cannot contain control characters")
+    if value.split("/", 1)[0] in {"launches", "share"}:
+        raise ValueError("task source must be an original Harbor dataset, not a runtime/publication directory")
+    return value
 
 
 def relative_key(value: str) -> str:
@@ -172,6 +189,82 @@ class WorkspaceStore:
             return result
 
         return await self.operation(wid, run)
+
+    def _metadata_batches(self, keys: list[str]) -> Iterator[tuple[str, list[str], bytes]]:
+        index = 0
+        while index < len(keys):
+            directory = f"launches/{self.anchor.launch_id}/metadata/{uuid.uuid4().hex}"
+            request = {"storage_root": self.anchor.path(""), "workspace": self.anchor.path(directory), "task_keys": []}
+            # Account for JSON escaping and separators, not just character count.
+            size = len(json.dumps(request).encode())
+            chunk: list[str] = []
+            while index < len(keys) and len(chunk) < METADATA_MAX_TASKS:
+                key = keys[index]
+                added = len(json.dumps(key).encode()) + (2 if chunk else 0)
+                if size + added > METADATA_REQUEST_BYTES:
+                    if not chunk:
+                        raise ValueError("metadata task key exceeds request byte limit")
+                    break
+                chunk.append(key)
+                size += added
+                index += 1
+            request["task_keys"] = chunk
+            yield directory, chunk, json.dumps(request).encode()
+
+    async def describe_tasks(self, task_keys: Sequence[str]) -> dict[str, dict[str, Any]]:
+        if isinstance(task_keys, (str, bytes)):
+            raise TypeError("task_keys must be a sequence of full task keys, not a string")
+        keys = list(dict.fromkeys(source_task_key(key) for key in task_keys))
+        result: dict[str, dict[str, Any]] = {}
+        for directory, chunk, request in self._metadata_batches(keys):
+            # Settle only the current chunk on cancellation, never the remaining dataset.
+            result.update(await self._settled(partial(self._describe_batch, directory, chunk, request)))
+        return result
+
+    async def _describe_batch(self, directory: str, keys: list[str], request: bytes) -> dict[str, dict[str, Any]]:
+        async with self.compile_slots:
+            primary: BaseException | None = None
+            try:
+                await self.anchor.mkdir(directory, stage="prepare")
+                key = f"{directory}/request.json"
+                await self.anchor.upload(key, request, mode=0o600, uid=0, gid=0, stage="prepare")
+                execution = await self.anchor.execute(
+                    (*self.config.prepare.workspace_command, "--describe-tasks", self.anchor.path(key)),
+                    timeout_s=self.config.prepare.workspace_timeout,
+                    stage="prepare",
+                )
+                if execution.timed_out or execution.exit_code != 0:
+                    raise RuntimeError("metadata compiler failed or timed out")
+                output = f"{directory}/result.json"
+                if (await self.anchor.stat(output, stage="prepare")).size > METADATA_RESULT_BYTES:
+                    raise ValueError("metadata result exceeds output byte limit")
+                data = await self.anchor.download(output, stage="prepare")
+                if len(data) > METADATA_RESULT_BYTES:
+                    raise ValueError("metadata result exceeds output byte limit")
+                result = json.loads(data)
+                if not isinstance(result, dict) or set(result) != set(keys):
+                    raise ValueError("metadata compiler returned unexpected task keys")
+                for value in result.values():
+                    if (
+                        not isinstance(value, dict)
+                        or set(value) != {"instruction", "task_config"}
+                        or not isinstance(value["instruction"], str)
+                        or not isinstance(value["task_config"], dict)
+                    ):
+                        raise ValueError("metadata compiler returned invalid task metadata")
+                return result
+            except BaseException as exc:
+                primary = exc
+                raise
+            finally:
+                try:
+                    # Even a failed mkdir/upload may have created data. The manager's
+                    # launch cleanup/GC owns this directory if removal itself fails.
+                    await self.anchor.remove(directory, stage="run")
+                except BaseException as cleanup:
+                    if primary is None:
+                        raise
+                    primary.add_note(f"metadata cleanup also failed: {cleanup!r}")
 
     async def remove(self, wid: str) -> None:
         record = self.records.get(wid)

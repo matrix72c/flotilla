@@ -1,6 +1,7 @@
-"""Trusted management-image entrypoint for an attempt-local Harbor task.
+"""Trusted management-image entrypoint for native Harbor tasks.
 
-Invoke with ``python -I -m flotilla.integrations.workspace /absolute/request.json``.
+Invoke with ``python -I -m flotilla.integrations.workspace /absolute/request.json``;
+add ``--describe-tasks`` before the path for read-only canonical-source metadata.
 The package and its tools must be installed in the management image. Nothing is
 imported or executed from the dataset by this reader. BuildKit executes Dockerfile
 instructions only through the explicitly configured builder.
@@ -26,6 +27,12 @@ from flotilla.config import FlotillaConfig
 from flotilla.integrations.harbor_source import task_environments
 from flotilla.manifest import Manifest
 from flotilla.prepare.docker import docker_context, sweep_journal
+from flotilla.runtime.workspace import (
+    METADATA_MAX_TASKS,
+    METADATA_REQUEST_BYTES,
+    METADATA_RESULT_BYTES,
+    source_task_key,
+)
 
 
 def validate_tree(root: Path) -> None:
@@ -53,7 +60,7 @@ def _directory(path: Path) -> Path:
     return path
 
 
-def _copy_tests(source: Path, target: Path) -> None:
+def _validate_tests(source: Path) -> None:
     # Relative symlinks confined to the tests subtree survive relocation. Links
     # into sibling task directories or absolute paths do not; reject, don't
     # silently dereference them or publish a dangling/escaping private copy.
@@ -62,6 +69,11 @@ def _copy_tests(source: Path, target: Path) -> None:
     for path in source.rglob("*"):
         if path.is_symlink() and Path(os.readlink(path)).is_absolute():
             raise ValueError(f"absolute test symlinks cannot be relocated: {path}")
+
+
+def _copy_tests(source: Path, target: Path) -> None:
+    source = source.resolve(strict=True)
+    _validate_tests(source)
     if target.is_symlink():
         raise ValueError("private tests directory must not be a symlink")
     if not target.exists():
@@ -69,7 +81,8 @@ def _copy_tests(source: Path, target: Path) -> None:
     validate_tree(target)
 
 
-def describe(source: Path, workspace: Path) -> dict[str, Any]:
+def _describe_source(source: Path) -> dict[str, Any]:
+    """Native parsing and supported-tree validation, with no filesystem writes."""
     from harbor.models.task.config import TaskOS
     from harbor.models.task.task import Task
     from harbor.models.task.verifier_mode import resolve_verifier_environment_definition
@@ -96,21 +109,10 @@ def describe(source: Path, workspace: Path) -> dict[str, Any]:
             "bundled_tests": definition.bundled_tests,
         }
     script = task.paths.discovered_test_path_for(configs[-1].os)
-    public = _directory(workspace / "public")
-    instruction = public / "instruction.md"
-    if instruction.is_symlink():
-        raise ValueError("public instruction must not be a symlink")
-    instruction.write_text(task.instruction)
-    instruction.chmod(0o644)
-    private_tests = workspace / "private-tests"
     if not (definition is not None and definition.bundled_tests):
         if script is None:
             raise ValueError("Harbor task is missing its verifier script")
-        _copy_tests(task.paths.tests_dir, private_tests)
-        executable = private_tests / script.name
-        # Native Harbor makes the test script executable before invocation. Keep
-        # its owner and read/write permissions; do not recursively chmod the tree.
-        executable.chmod(stat.S_IMODE(executable.stat().st_mode) | 0o111)
+        _validate_tests(task.paths.tests_dir)
     return {
         "task_id": source.name,
         "task_config": task.config.model_dump(mode="json"),
@@ -121,6 +123,54 @@ def describe(source: Path, workspace: Path) -> dict[str, Any]:
             "directory": "private-tests",
         },
     }
+
+
+def describe(source: Path, workspace: Path) -> dict[str, Any]:
+    from harbor.models.task.paths import TaskPaths
+
+    result = _describe_source(source)
+    public = _directory(workspace / "public")
+    instruction = public / "instruction.md"
+    if instruction.is_symlink():
+        raise ValueError("public instruction must not be a symlink")
+    instruction.write_text(result["instruction"])
+    instruction.chmod(0o644)
+    if not result["definitions"].get("verifier", {}).get("bundled_tests", False):
+        private_tests = workspace / "private-tests"
+        _copy_tests(TaskPaths(source).tests_dir, private_tests)
+        executable = private_tests / result["tests"]["script"]
+        # Native Harbor makes the test script executable before invocation. Keep
+        # its owner and read/write permissions; do not recursively chmod the tree.
+        executable.chmod(stat.S_IMODE(executable.stat().st_mode) | 0o111)
+    return result
+
+
+def describe_tasks_request(request: dict[str, Any]) -> bytes:
+    """Read immutable canonical sources; publish nothing until the whole batch succeeds."""
+    keys = request["task_keys"]
+    if not isinstance(keys, list) or not 1 <= len(keys) <= METADATA_MAX_TASKS:
+        raise ValueError("metadata request must contain 1 to 128 task keys")
+    keys = list(dict.fromkeys(source_task_key(key) for key in keys))
+    root = Path(request["storage_root"])
+    if not root.is_absolute() or root.is_symlink() or not root.is_dir():
+        raise ValueError("metadata storage root must be a real absolute directory")
+    root = root.resolve(strict=True)
+    parts: list[bytes] = []
+    size = 2  # outer JSON object braces
+    for key in keys:
+        source = root
+        for component in key.split("/"):
+            source = source / component
+            if source.is_symlink() or not source.is_dir():
+                raise ValueError("task source and its ancestors must be real directories, not symlinks")
+        metadata = _describe_source(source)
+        value = {"instruction": metadata["instruction"], "task_config": metadata["task_config"]}
+        entry = json.dumps(key).encode() + b":" + json.dumps(value).encode()
+        size += len(entry) + (1 if parts else 0)
+        if size > METADATA_RESULT_BYTES:
+            raise ValueError("metadata result exceeds output byte limit")
+        parts.append(entry)
+    return b"{" + b",".join(parts) + b"}"
 
 
 def restore_identities(root: Path) -> None:
@@ -209,17 +259,44 @@ def compile_request(request: dict[str, Any]) -> dict[str, Any]:
 
 
 def main() -> None:
-    if len(sys.argv) != 2:
-        raise SystemExit("usage: python -I -m flotilla.integrations.workspace /absolute/request.json")
-    path = Path(sys.argv[1])
+    batch = len(sys.argv) == 3 and sys.argv[1] == "--describe-tasks"
+    if not batch and len(sys.argv) != 2:
+        raise SystemExit(
+            "usage: python -I -m flotilla.integrations.workspace [--describe-tasks] /absolute/request.json"
+        )
+    path = Path(sys.argv[-1])
     if not path.is_absolute():
         raise ValueError("request path must be absolute")
-    request = json.loads(path.read_bytes())
-    result = compile_request(request)
+    if batch:
+        with path.open("rb") as stream:
+            data = stream.read(METADATA_REQUEST_BYTES + 1)
+        if len(data) > METADATA_REQUEST_BYTES:
+            raise ValueError("metadata request exceeds request byte limit")
+        request = json.loads(data)
+        root = Path(request["storage_root"])
+        workspace = Path(request["workspace"])
+        relative = workspace.relative_to(root)
+        if (
+            len(relative.parts) != 4
+            or relative.parts[0] != "launches"
+            or relative.parts[2] != "metadata"
+            or any(part in {".", ".."} for part in relative.parts)
+            or path != workspace / "request.json"
+        ):
+            raise ValueError("metadata output must belong to a launch metadata directory")
+        directory = root
+        for part in relative.parts:
+            directory /= part
+            if directory.is_symlink() or not directory.is_dir():
+                raise ValueError("metadata output ancestors must be real directories")
+        encoded = describe_tasks_request(request)
+    else:
+        request = json.loads(path.read_bytes())
+        encoded = json.dumps(compile_request(request)).encode()
     output = Path(request["workspace"]) / "result.json"
     temporary = output.with_suffix(".tmp")
-    with temporary.open("w") as stream:
-        json.dump(result, stream)
+    with temporary.open("wb") as stream:
+        stream.write(encoded)
     temporary.chmod(0o600)
     temporary.replace(output)
 
