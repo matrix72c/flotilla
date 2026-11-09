@@ -10,15 +10,20 @@ instructions only through the explicitly configured builder.
 
 from __future__ import annotations
 
+import errno
 import json
+import logging
 import os
 import shutil
 import stat
 import subprocess
 import sys
+import time
 import uuid
+from collections.abc import Callable, Iterator
 from copy import deepcopy
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from functools import partial
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -40,21 +45,74 @@ from flotilla.runtime.workspace import (
     source_task_key,
 )
 
+_LOG = logging.getLogger(__name__)
+_READ_DELAYS = (0.5, 1.0, 2.0, 4.0)
+_READ_RETRY_WINDOW = 30.0
+
+
+@dataclass
+class _ReadBudget:
+    """Shared added-wait allowance, not a timeout for hard-mounted NFS calls."""
+
+    remaining_sleep: float = 15.0
+
+    def run[T](self, operation: Callable[[], T], *, stage: str) -> T:
+        deadline = time.monotonic() + _READ_RETRY_WINDOW
+        for attempt in range(1, len(_READ_DELAYS) + 2):
+            try:
+                result = operation()
+            except OSError as exc:
+                if exc.errno != errno.ESTALE:
+                    raise
+                reason = "attempt limit"
+                if attempt <= len(_READ_DELAYS):
+                    delay = _READ_DELAYS[attempt - 1]
+                    if delay > self.remaining_sleep:
+                        reason = "request wait budget"
+                    elif time.monotonic() + delay >= deadline:
+                        reason = "read retry deadline"
+                    else:
+                        self.remaining_sleep -= delay
+                        time.sleep(delay)
+                        if time.monotonic() < deadline:
+                            continue
+                        reason = "read retry deadline"
+                exc.add_note(f"{stage}: stale read recovery exhausted after {attempt} attempts ({reason})")
+                raise
+            if attempt > 1:
+                _LOG.warning("%s: stale read recovered after %d attempts", stage, attempt)
+            return result
+        raise AssertionError("unreachable read retry state")
+
+
+def _tree_entries(root: Path) -> Iterator[tuple[Path, int]]:
+    # os.walk/rglob can suppress enumeration and DirEntry.is_dir errors. Use
+    # explicit lstat so a failed directory lookup cannot hide a whole subtree.
+    pending = [root]
+    while pending:
+        directory = pending.pop()
+        if not stat.S_ISDIR(directory.lstat().st_mode):
+            raise ValueError("task tree directory changed type during inspection")
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                path = Path(entry.path)
+                mode = path.lstat().st_mode
+                yield path, mode
+                if stat.S_ISDIR(mode):
+                    pending.append(path)
+
 
 def validate_tree(root: Path) -> None:
     """Check the whole private copy before any parser follows an input path."""
-    if root.is_symlink() or not root.is_dir():
+    if not stat.S_ISDIR(root.lstat().st_mode):
         raise ValueError("task copy must be a real directory")
     root = root.resolve(strict=True)
-    for directory, dirs, files in os.walk(root, followlinks=False):
-        for name in [*dirs, *files]:
-            path = Path(directory) / name
-            mode = path.lstat().st_mode
-            if stat.S_ISLNK(mode):
-                if not path.resolve(strict=True).is_relative_to(root):
-                    raise ValueError(f"task link escapes its private copy: {path.relative_to(root)}")
-            elif not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
-                raise ValueError(f"unsupported task file type: {path.relative_to(root)}")
+    for path, mode in _tree_entries(root):
+        if stat.S_ISLNK(mode):
+            if not path.resolve(strict=True).is_relative_to(root):
+                raise ValueError(f"task link escapes its private copy: {path.relative_to(root)}")
+        elif not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+            raise ValueError(f"unsupported task file type: {path.relative_to(root)}")
 
 
 def _directory(path: Path) -> Path:
@@ -72,8 +130,8 @@ def _validate_tests(source: Path) -> None:
     # silently dereference them or publish a dangling/escaping private copy.
     source = source.resolve(strict=True)
     validate_tree(source)
-    for path in source.rglob("*"):
-        if path.is_symlink() and Path(os.readlink(path)).is_absolute():
+    for path, mode in _tree_entries(source):
+        if stat.S_ISLNK(mode) and Path(os.readlink(path)).is_absolute():
             raise ValueError(f"absolute test symlinks cannot be relocated: {path}")
 
 
@@ -134,7 +192,7 @@ def _describe_source(source: Path) -> dict[str, Any]:
 def describe(source: Path, workspace: Path) -> dict[str, Any]:
     from harbor.models.task.paths import TaskPaths
 
-    result = _describe_source(source)
+    result = _ReadBudget().run(lambda: _describe_source(source), stage="task description")
     public = _directory(workspace / "public")
     instruction = public / "instruction.md"
     if instruction.is_symlink():
@@ -151,7 +209,9 @@ def describe(source: Path, workspace: Path) -> dict[str, Any]:
     return result
 
 
-def _describe_resources(source: Path, metadata: dict[str, Any], request: dict[str, Any]) -> dict[str, Any]:
+def _describe_resources(
+    source: Path, metadata: dict[str, Any], request: dict[str, Any], budget: _ReadBudget
+) -> dict[str, Any]:
     adapter = ComposeConfigAdapter(
         command=tuple(request["compose_command"]),
         expected_version=request["compose_version"],
@@ -177,10 +237,13 @@ def _describe_resources(source: Path, metadata: dict[str, Any], request: dict[st
             }
         return result
 
-    if not any(
-        confined(source / definition["directory"], COMPOSE_FILE).is_file()
-        for definition in metadata["definitions"].values()
-    ):
+    def has_compose() -> bool:
+        return any(
+            confined(source / definition["directory"], COMPOSE_FILE).is_file()
+            for definition in metadata["definitions"].values()
+        )
+
+    if not budget.run(has_compose, stage="resource context discovery"):
         return inspect(source)
     # Compose reads are confined to each environment by the existing adapter
     # gate (include/extends remain unsupported). Keep complete role contexts,
@@ -188,7 +251,9 @@ def _describe_resources(source: Path, metadata: dict[str, Any], request: dict[st
     # and payloads only when there are no links whose targets we might remove.
     contexts = {Path(definition["directory"]).parts[0] for definition in metadata["definitions"].values()}
     keep = contexts | {"task.toml"}
-    linked = any(path.is_symlink() for path in source.rglob("*"))
+    linked = budget.run(
+        lambda: any(stat.S_ISLNK(mode) for _, mode in _tree_entries(source)), stage="resource link discovery"
+    )
 
     def ignore(directory: str, names: list[str]) -> set[str]:
         return set(names) - keep if not linked and Path(directory) == source else set()
@@ -201,6 +266,21 @@ def _describe_resources(source: Path, metadata: dict[str, Any], request: dict[st
         return inspect(private)
 
 
+def _metadata_root(root: Path) -> Path:
+    if not root.is_absolute() or not stat.S_ISDIR(root.lstat().st_mode):
+        raise ValueError("metadata storage root must be a real absolute directory")
+    return root.resolve(strict=True)
+
+
+def _read_metadata(root: Path, key: str) -> tuple[Path, dict[str, Any]]:
+    source = _metadata_root(root)
+    for component in key.split("/"):
+        source = source / component
+        if not stat.S_ISDIR(source.lstat().st_mode):
+            raise ValueError("task source and its ancestors must be real directories, not symlinks")
+    return source, _describe_source(source)
+
+
 def describe_tasks_request(request: dict[str, Any], *, resources: bool = False) -> bytes:
     """Read immutable canonical sources; publish nothing until the whole batch succeeds."""
     if resources:
@@ -210,20 +290,14 @@ def describe_tasks_request(request: dict[str, Any], *, resources: bool = False) 
         raise ValueError("metadata request must contain 1 to 128 task keys")
     keys = list(dict.fromkeys(source_task_key(key) for key in keys))
     root = Path(request["storage_root"])
-    if not root.is_absolute() or root.is_symlink() or not root.is_dir():
-        raise ValueError("metadata storage root must be a real absolute directory")
-    root = root.resolve(strict=True)
+    budget = _ReadBudget()
+    budget.run(lambda: _metadata_root(root), stage="metadata storage root")
     parts: list[bytes] = []
     size = 2  # outer JSON object braces
     for key in keys:
-        source = root
-        for component in key.split("/"):
-            source = source / component
-            if source.is_symlink() or not source.is_dir():
-                raise ValueError("task source and its ancestors must be real directories, not symlinks")
-        metadata = _describe_source(source)
+        source, metadata = budget.run(partial(_read_metadata, root, key), stage="task metadata")
         value = (
-            _describe_resources(source, metadata, request)
+            _describe_resources(source, metadata, request, budget)
             if resources
             else {"instruction": metadata["instruction"], "task_config": metadata["task_config"]}
         )

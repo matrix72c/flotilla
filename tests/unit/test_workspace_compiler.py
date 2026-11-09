@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -95,6 +97,213 @@ def setup_compile(
     compiler.describe(workspace / "source/task", workspace)
     monkeypatch.setattr("flotilla.compose.adapter.subprocess.run", compose_run)
     return cfg, validate, context, docker_context, sweep, calls
+
+
+@pytest.fixture
+def read_clock(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    clock = SimpleNamespace(now=0.0, delays=[], oversleep=0.0)
+
+    def sleep(delay: float) -> None:
+        clock.delays.append(delay)
+        clock.now += delay + clock.oversleep
+
+    monkeypatch.setattr(compiler, "time", SimpleNamespace(monotonic=lambda: clock.now, sleep=sleep))
+    return clock
+
+
+@pytest.mark.parametrize("fault", ["root", "ancestor", "lstat", "scandir", "instruction"])
+@pytest.mark.parametrize("resources", [False, True])
+def test_stale_native_reads_recover_without_changing_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, read_clock: SimpleNamespace, fault: str, resources: bool
+) -> None:
+    from harbor.models.task import task as task_module
+
+    _, source = task_copy(tmp_path)
+    key = source.relative_to(tmp_path).as_posix()
+    request = {
+        "storage_root": str(tmp_path),
+        "task_keys": [key],
+        "compose_command": ["unused"],
+        "compose_version": COMPOSE_VERSION,
+    }
+    expected = compiler.describe_tasks_request(request, resources=resources)
+    task = Mock(wraps=task_module.Task)
+    monkeypatch.setattr(task_module, "Task", task)
+    target = {
+        "root": tmp_path,
+        "ancestor": source.parent,
+        "lstat": source / "tests/test.sh",
+        "scandir": source / "tests",
+        "instruction": source / "instruction.md",
+    }[fault]
+    owner, method = (
+        (os, "scandir") if fault == "scandir" else (Path, "read_text" if fault == "instruction" else "lstat")
+    )
+    original = getattr(owner, method)
+    failed = False
+
+    def read(path: Any, *args: Any, **kwargs: Any) -> Any:
+        nonlocal failed
+        if Path(path) == target and not failed:
+            failed = True
+            raise OSError(errno.ESTALE, "injected stale read")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(owner, method, read)
+    assert compiler.describe_tasks_request(request, resources=resources) == expected
+    assert failed and read_clock.delays == [0.5]
+    if fault == "instruction":
+        assert task.call_count >= 2  # no failed Task/cached_property is reused
+
+
+def test_stale_read_retry_limits_and_original_error(read_clock: SimpleNamespace) -> None:
+    error = OSError(errno.ESTALE, "persistent stale read")
+    operation = Mock(side_effect=error)
+    with pytest.raises(OSError) as caught:
+        compiler._ReadBudget().run(operation, stage="fixture")
+    assert caught.value is error
+    assert operation.call_count == 5
+    assert read_clock.delays == [0.5, 1.0, 2.0, 4.0]
+    assert "attempt limit" in error.__notes__[-1]
+
+
+@pytest.mark.parametrize("oversleep", [False, True])
+def test_stale_read_deadline_does_not_admit_another_attempt(read_clock: SimpleNamespace, oversleep: bool) -> None:
+    error = OSError(errno.ESTALE, "slow stale read")
+
+    def operation() -> None:
+        if not oversleep:
+            read_clock.now += 30
+        raise error
+
+    read_clock.oversleep = 30 if oversleep else 0
+    call = Mock(side_effect=operation)
+    with pytest.raises(OSError) as caught:
+        compiler._ReadBudget().run(call, stage="fixture")
+    assert caught.value is error and call.call_count == 1
+    assert read_clock.delays == ([0.5] if oversleep else [])
+    assert "deadline" in error.__notes__[-1]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        OSError(errno.EACCES, "denied"),
+        OSError(errno.ENOENT, "missing"),
+        OSError(errno.EIO, "io error"),
+        ValueError("invalid task"),
+        KeyboardInterrupt(),
+    ],
+)
+def test_read_recovery_does_not_swallow_other_errors(read_clock: SimpleNamespace, error: BaseException) -> None:
+    call = Mock(side_effect=error)
+    with pytest.raises(type(error)) as caught:
+        compiler._ReadBudget().run(call, stage="fixture")
+    assert caught.value is error and call.call_count == 1
+    assert read_clock.delays == []
+
+
+def test_batch_read_budget_is_shared_and_successful_tasks_are_not_replayed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, read_clock: SimpleNamespace
+) -> None:
+    sources = [task_copy(tmp_path / str(index))[1] for index in range(3)]
+    keys = [source.relative_to(tmp_path).as_posix() for source in sources]
+    original = compiler._describe_source
+    attempts = dict.fromkeys(sources, 0)
+
+    def read(source: Path) -> dict[str, Any]:
+        attempts[source] += 1
+        if attempts[source] < 5:
+            raise OSError(errno.ESTALE, "injected stale read")
+        return original(source)
+
+    monkeypatch.setattr(compiler, "_describe_source", read)
+    with pytest.raises(OSError) as error:
+        compiler.describe_tasks_request({"storage_root": str(tmp_path), "task_keys": keys})
+    assert list(attempts.values()) == [5, 5, 1]
+    assert sum(read_clock.delays) == 15
+    assert "request wait budget" in error.value.__notes__[-1]
+
+
+def test_enumeration_permission_error_cannot_hide_a_subtree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, read_clock: SimpleNamespace
+) -> None:
+    _, source = task_copy(tmp_path)
+    original = os.scandir
+
+    def scan(path: Any) -> Any:
+        if Path(path) == source / "tests":
+            raise PermissionError(errno.EACCES, "injected enumeration failure")
+        return original(path)
+
+    monkeypatch.setattr(os, "scandir", scan)
+    with pytest.raises(PermissionError):
+        compiler.describe_tasks_request(
+            {"storage_root": str(tmp_path), "task_keys": [source.relative_to(tmp_path).as_posix()]}
+        )
+    assert not read_clock.delays
+
+
+def test_traversal_does_not_follow_a_replaced_directory(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    child = root / "child"
+    child.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    traversal = compiler._tree_entries(root)
+    path, mode = next(traversal)
+    assert path == child and stat.S_ISDIR(mode)
+    child.rmdir()
+    child.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ValueError, match="changed type"):
+        list(traversal)
+
+
+def test_compilation_recovers_reads_without_replaying_side_effects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, read_clock: SimpleNamespace
+) -> None:
+    workspace, source = task_copy(tmp_path)
+    _, _, _, docker_context, sweep, calls = setup_compile(monkeypatch, workspace)
+    parse = Mock(side_effect=[OSError(errno.ESTALE, "injected"), compiler._describe_source(source)])
+    copy = Mock(wraps=compiler._copy_tests)
+    build = Mock(wraps=build_task)
+    monkeypatch.setattr(compiler, "_describe_source", parse)
+    monkeypatch.setattr(compiler, "_copy_tests", copy)
+    monkeypatch.setattr(compiler, "build_task", build)
+    compiler.compile_request(request_for(workspace, source))
+    assert parse.call_count == 2 and read_clock.delays == [0.5]
+    copy.assert_called_once()
+    build.assert_called_once()
+    docker_context.assert_called_once()
+    sweep.assert_called_once()
+    assert len(calls) == 2  # one Compose version check and one config invocation
+
+
+def test_test_copy_failure_is_not_replayed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, read_clock: SimpleNamespace
+) -> None:
+    workspace, source = task_copy(tmp_path)
+    copy = Mock(side_effect=OSError(errno.ESTALE, "copy failure, not a safe read"))
+    monkeypatch.setattr(compiler, "_copy_tests", copy)
+    with pytest.raises(OSError):
+        compiler.describe(source, workspace)
+    copy.assert_called_once()
+    assert not read_clock.delays
+
+
+@pytest.mark.parametrize("resources", [False, True])
+def test_stale_read_exhaustion_publishes_no_batch_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, read_clock: SimpleNamespace, resources: bool
+) -> None:
+    _, workspace, _ = batch_request(tmp_path, monkeypatch, resources)
+    parse = Mock(side_effect=OSError(errno.ESTALE, "persistent native read"))
+    monkeypatch.setattr(compiler, "_describe_source", parse)
+    with pytest.raises(OSError):
+        compiler.main()
+    assert parse.call_count == 5
+    assert not (workspace / "result.json").exists()
+    assert not (workspace / "result.tmp").exists()
+    assert sum(read_clock.delays) == 7.5
 
 
 def test_describe_uses_native_harbor_without_compose_or_build(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -542,7 +751,7 @@ async def test_resource_reader_matches_compiled_reservations(
         monkeypatch.setattr(compiler, name, forbidden)
     monkeypatch.setattr(subprocess, "run", forbidden)
     if not compose:
-        monkeypatch.setattr(compiler.shutil, "copytree", forbidden)
+        monkeypatch.setattr(shutil, "copytree", forbidden)
     key = source.relative_to(tmp_path).as_posix()
     request = {
         "storage_root": str(tmp_path),
@@ -609,7 +818,9 @@ def test_resource_private_copy_preserves_internal_relative_links(
     assert source_snapshot(source) == before
 
 
-@pytest.mark.parametrize("failure", ["cli", "invalid-resource", "include", "extends", "env-escape", "copy"])
+@pytest.mark.parametrize(
+    "failure", ["cli", "invalid-resource", "include", "extends", "env-escape", "copy", "copy-stale"]
+)
 def test_resource_compose_failure_cleans_private_tree_and_preserves_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
@@ -626,14 +837,15 @@ def test_resource_compose_failure_cleans_private_tree_and_preserves_source(
     (source / "environment/docker-compose.yaml").write_text(text)
     before = source_snapshot(source)
     private: list[Path] = []
-    original_copy = compiler.shutil.copytree
+    original_copy = shutil.copytree
 
     def copy(src: Path, dst: Path, *args: Any, **kwargs: Any) -> Path:
         private.append(Path(dst))
-        if failure == "copy":
+        if failure in ("copy", "copy-stale"):
+            assert len(private) == 1  # never replay a partially written destination
             Path(dst).mkdir()
-            raise OSError("copy failure")
-        return original_copy(src, dst, *args, **kwargs)
+            raise OSError(errno.ESTALE if failure == "copy-stale" else errno.EIO, "copy failure")
+        return Path(original_copy(src, dst, *args, **kwargs))
 
     def run(args: list[str], cwd: Path, env: dict[str, str]) -> str:
         if failure == "cli":
@@ -642,7 +854,7 @@ def test_resource_compose_failure_cleans_private_tree_and_preserves_source(
             return COMPOSE_VERSION
         return json.dumps({"services": {"main": {"image": "r.io/main:1", "cpus": "bad"}}})
 
-    monkeypatch.setattr(compiler.shutil, "copytree", copy)
+    monkeypatch.setattr(shutil, "copytree", copy)
     monkeypatch.setattr(ComposeConfigAdapter, "_run", staticmethod(run))
     with pytest.raises((ValueError, OSError)):
         compiler.describe_tasks_request(
