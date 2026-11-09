@@ -2,7 +2,7 @@
 
 Flotilla runs original [Harbor](https://github.com/harbor-framework/harbor) tasks from platform storage. Each attempt makes a private platform-side copy, preserving the directory basename as its task ID. Native `harbor run` additionally reads metadata from a local original-task source mapped to those platform keys; it does not upload that source or use a prepared dataset. The lower-level attempt API can use platform keys alone.
 
-Install with `python -m pip install '.[harbor]'`. The extra pins the **compatible patched Harbor build** at [`4a6bbc4a8351e110dfb55d754c029d510ecaeb23`](https://github.com/matrix72c/harbor/commit/4a6bbc4a8351e110dfb55d754c029d510ecaeb23), providing the explicit `task_source`, trial `runtime`, and metadata-backed `Task.from_metadata` interfaces. Stock Harbor 0.24.0 does not provide this native entrypoint; installing an unpatched Harbor version or changing only the environment class is insufficient. Follow the [deployment guide](Deployment.md) for the trusted management image, which needs matching Flotilla/Harbor code, pinned official Compose and explicitly configured build tooling. Builder access and credentials are operator-configured; Flotilla does not start DinD or bake credentials into images. A compatible released image and real platform acceptance are still required before deploying this integration.
+Install with `python -m pip install '.[harbor]'`. The extra pins the **compatible patched Harbor build** at [`d78eb9c262e7074944106d16bff0ba6426bb2d34`](https://github.com/matrix72c/harbor/commit/d78eb9c262e7074944106d16bff0ba6426bb2d34), providing the explicit `task_source`, trial `runtime`, and metadata-backed `Task.from_metadata` interfaces. Stock Harbor 0.24.0 does not provide this native entrypoint; installing an unpatched Harbor version or changing only the environment class is insufficient. Follow the [deployment guide](Deployment.md) for the trusted management image, which needs matching Flotilla/Harbor code, pinned official Compose and explicitly configured build tooling. Builder access and credentials are operator-configured; Flotilla does not start DinD or bake credentials into images. A compatible released image and real platform acceptance are still required before deploying this integration.
 
 ## Inputs and optional warmup
 
@@ -19,7 +19,7 @@ This validates and warms image caches, then removes its workspace. Its output is
 
 Keep a local original dataset at `data/terminal-bench/` and deliver the same version to platform storage under `datasets/terminal-bench/`. A local `data/terminal-bench/task-a` then maps to the platform key `datasets/terminal-bench/task-a`. This mapping does not copy, publish, or synchronize data. Keep both sources immutable and accessible for the entire run.
 
-Save the following as `harbor-job.yaml`, next to `deployment.toml`, and run the command from that directory. Relative paths in this Harbor example are relative to the process working directory, not implicitly to the YAML file. The `nop` agent is a lifecycle smoke example, not a solver; replace it with your intended native Harbor agent configuration for evaluation. Provide platform and agent credentials through their documented external credential inputs, never in the task or example config.
+Save the following as `/srv/eval/harbor-job.yaml`, with original tasks in `/srv/eval/data/terminal-bench` and the deployment in `/srv/eval/deployment.toml` (replace these example absolute paths with your own). Relative `sources[].local_root` paths resolve against the config file that defines `sources`, not the process working directory. Other Harbor paths retain their existing semantics: the example uses absolute dataset and deployment paths so it can run from any directory. The `nop` agent is a lifecycle smoke example, not a solver; replace it with your intended native Harbor agent configuration for evaluation. Provide platform and agent credentials through their documented external credential inputs, never in the task or example config.
 
 ```yaml
 job_name: flotilla-native-smoke
@@ -27,7 +27,7 @@ n_concurrent_trials: 1
 agents:
   - name: nop
 datasets:
-  - path: data/terminal-bench
+  - path: /srv/eval/data/terminal-bench
     task_names: [task-a]
 task_source:
   import_path: flotilla.integrations.harbor_native:FlotillaTaskSource
@@ -39,7 +39,7 @@ task_source:
 runtime:
   import_path: flotilla.integrations.harbor_native:NativeFlotillaRuntime
   kwargs:
-    deployment: deployment.toml
+    deployment: /srv/eval/deployment.toml
     runtime_params: {}
 environment:
   import_path: flotilla.integrations.harbor_native:NativeFlotillaEnvironment
@@ -49,10 +49,12 @@ verifier:
 ```
 
 ```sh
-harbor run --config harbor-job.yaml
+harbor run --config /srv/eval/harbor-job.yaml
 ```
 
-For explicit selection, replace `datasets` with `tasks: [{path: data/terminal-bench/task-a}]`; do not supply both unless you intend to concatenate their selections. Dataset discovery examines immediate child directories containing `task.toml`, applies Harbor's name/exclusion/count filters, and reads only selected configs. Instructions are loaded when their individual Trial is created. Git/package downloads, multi-step tasks and non-Linux environments are not supported by this adapter.
+Harbor preserves source-kwarg origins across layered configs and Job/Trial JSON snapshots. Overriding only `metadata_workers` does not rebase inherited `sources`; replacing the `sources` list uses the replacing file's directory. Once loaded, the native source stores absolute external roots in snapshots; it does not copy the task tree. Remote config URLs require absolute `local_root` paths. Direct Python construction without config-origin metadata retains CWD-relative roots; use absolute roots when saving such configs before loading tasks.
+
+For explicit selection, replace `datasets` with `tasks: [{path: /srv/eval/data/terminal-bench/task-a}]`; do not supply both unless you intend to concatenate their selections. Dataset discovery examines immediate child directories containing `task.toml`, applies Harbor's name/exclusion/count filters, and reads only selected configs. Instructions are loaded when their individual Trial is created. Git/package downloads, multi-step tasks and non-Linux environments are not supported by this adapter.
 
 `task_source` owns local selection and metadata; `runtime` owns the Flotilla client, attempt and role transitions; `environment` is the native Harbor I/O adapter. Configure all three together. The runtime selects the platform-aware verifier above even when its `import_path` is omitted; unrelated verifier overrides and `environment.delete: false` are rejected. `runtime.kwargs.run_timeout`, if supplied, must be positive and no greater than the deployment's runtime lifetime.
 

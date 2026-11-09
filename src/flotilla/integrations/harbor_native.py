@@ -36,9 +36,38 @@ class FlotillaTaskSource:
             raise ValueError("metadata_workers must be a positive integer")
         if not hasattr(Task, "from_metadata"):
             raise RuntimeError("native Flotilla requires Harbor with task_source/runtime extension support")
-        self.reader = NativeTaskSource(sources)
+        self.sources = tuple(SourceMapping.model_validate(source) for source in sources)
+        self._reader: NativeTaskSource | None = None
         self.metadata_workers = metadata_workers
         self.identities: dict[str, str] = {}
+
+    @property
+    def reader(self) -> NativeTaskSource:
+        if self._reader is None:
+            raise RuntimeError("task source must resolve or load tasks before accessing its reader")
+        return self._reader
+
+    def _init_reader(self, config: Any) -> None:
+        if self._reader is not None:
+            return
+        source_config = config.task_source
+        base_dir = (
+            source_config.kwargs_base_dirs.get("sources", Path.cwd()) if source_config is not None else Path.cwd()
+        )
+        sources = []
+        for source in self.sources:
+            root = source.local_root.expanduser()
+            if not root.is_absolute():
+                if base_dir is None:
+                    raise ValueError(
+                        "relative local_root requires a local config file; use absolute roots in remote configs"
+                    )
+                root = base_dir / root
+            sources.append(source.model_copy(update={"local_root": root}))
+        self._reader = NativeTaskSource(sources)
+        if source_config is not None:
+            # Snapshots carry resolved external roots, not the invocation's CWD.
+            source_config.kwargs["sources"] = [source.model_dump(mode="json") for source in self.reader.sources]
 
     @staticmethod
     def _supported(config: Any) -> None:
@@ -53,6 +82,7 @@ class FlotillaTaskSource:
         return self.reader.key_for_path(config.path)
 
     async def resolve_task_configs(self, config: Any) -> list[Any]:
+        self._init_reader(config)
         tasks = [task.model_copy(deep=True) for task in config.tasks]
         for dataset in config.datasets:
             if not dataset.is_local():
@@ -84,6 +114,7 @@ class FlotillaTaskSource:
         return tasks
 
     async def load_task(self, config: Any) -> tuple[Task, TaskDownloadResult]:
+        self._init_reader(config)
         key = self._key(config.task)
         description = await asyncio.to_thread(self.reader.read_metadata, key)
         from harbor.models.task.config import TaskConfig

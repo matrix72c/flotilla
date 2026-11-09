@@ -297,7 +297,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "harbor", marker = "extra == 'harbor'", git = "https://github.com/matrix72c/harbor.git?rev=4a6bbc4a8351e110dfb55d754c029d510ecaeb23" },
+    { name = "harbor", marker = "extra == 'harbor'", git = "https://github.com/matrix72c/harbor.git?rev=d78eb9c262e7074944106d16bff0ba6426bb2d34" },
     { name = "httpx", specifier = ">=0.27,<1" },
     { name = "pydantic", specifier = ">=2.10,<3" },
     { name = "pytest", marker = "extra == 'testing'", specifier = ">=8.3" },
@@ -371,7 +371,7 @@ wheels = [
 [[package]]
 name = "harbor"
 version = "0.24.0"
-source = { git = "https://github.com/matrix72c/harbor.git?rev=4a6bbc4a8351e110dfb55d754c029d510ecaeb23#4a6bbc4a8351e110dfb55d754c029d510ecaeb23" }
+source = { git = "https://github.com/matrix72c/harbor.git?rev=d78eb9c262e7074944106d16bff0ba6426bb2d34#d78eb9c262e7074944106d16bff0ba6426bb2d34" }
 dependencies = [
     { name = "dirhash" },
     { name = "fastapi" },

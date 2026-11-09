@@ -23,7 +23,7 @@ dependencies = [
 
 [project.optional-dependencies]
 # Native evaluation and training share explicit source/runtime extension support.
-harbor = ["harbor @ git+https://github.com/matrix72c/harbor.git@4a6bbc4a8351e110dfb55d754c029d510ecaeb23"]
+harbor = ["harbor @ git+https://github.com/matrix72c/harbor.git@d78eb9c262e7074944106d16bff0ba6426bb2d34"]
 testing = ["pytest>=8.3", "pytest-asyncio>=0.25"]
 
 [project.scripts]

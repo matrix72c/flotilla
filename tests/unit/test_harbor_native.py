@@ -11,10 +11,14 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
+from typer.testing import CliRunner
 
 pytest.importorskip("harbor.models.extensions")
 import toml
 from harbor.agents.nop import NopAgent
+from harbor.cli.main import app
+from harbor.job_plan import JobPlan
 from harbor.models.job.config import JobConfig
 from harbor.models.task.task import Task
 from harbor.models.trial.config import TrialConfig
@@ -50,6 +54,127 @@ def task_files(root: Path, name: str, *, instruction: bool = True) -> Path:
 
 def task_source(root: Path) -> FlotillaTaskSource:
     return FlotillaTaskSource(sources=[SourceMapping(local_root=root, platform_prefix="datasets")], metadata_workers=1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command", ["job", "trial"])
+@pytest.mark.parametrize("replace_sources", [False, True])
+async def test_native_source_config_relative_roots_cli_layers_and_resume(
+    tmp_path, monkeypatch, command, replace_sources
+):
+    monkeypatch.setenv("HARBOR_TELEMETRY", "off")
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first_task = task_files(first / "data", "task")
+    second_task = task_files(second / "data", "task")
+    selected = second_task if replace_sources else first_task
+    origin = second if replace_sources else first
+    base = first / "base.yaml"
+    override = second / "override.json"
+    selection = (
+        {"task": {"path": str(selected)}, "agent": {"name": "nop"}}
+        if command == "trial"
+        else {"tasks": [{"path": str(selected)}], "agents": [{"name": "nop"}], "jobs_dir": str(tmp_path / "jobs")}
+    )
+    base.write_text(
+        yaml.safe_dump(
+            {
+                **selection,
+                "task_source": {
+                    "import_path": "flotilla.integrations.harbor_native:FlotillaTaskSource",
+                    "kwargs": {
+                        "sources": [{"local_root": "data", "platform_prefix": "datasets"}],
+                        "metadata_workers": 8,
+                    },
+                },
+            }
+        )
+    )
+    patch = {"metadata_workers": 1}
+    if replace_sources:
+        patch["sources"] = [{"local_root": "data", "platform_prefix": "datasets"}]
+    override.write_text(json.dumps({"task_source": {"kwargs": patch}}))
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    snapshot = elsewhere / "snapshot.yaml"
+    result = CliRunner().invoke(app, [command, "init", str(snapshot), "-c", str(base), "-c", str(override)])
+    assert result.exit_code == 0, result.exception
+    model = TrialConfig if command == "trial" else JobConfig
+    config = model.model_validate(yaml.safe_load(snapshot.read_text()))
+    # A snapshot taken before source resolution must retain the defining layer.
+    config = model.model_validate_json(config.model_dump_json())
+    assert config.task_source.kwargs_base_dirs["sources"] == origin
+    source = config.task_source.resolve()
+    assert source._reader is None
+    monkeypatch.chdir(second)
+    if command == "job":
+        plan = await JobPlan.from_config(config)
+        trial_config = plan.trial_configs[0]
+        assert trial_config.task_source is config.task_source
+        assert trial_config.task_source.resolve() is source
+    else:
+        trial_config = config
+    task, _ = await Trial._load_task(trial_config)
+    assert task.task_dir == selected
+    assert source.reader.sources[0].local_root == origin / "data"
+    assert config.task_source.kwargs["sources"][0]["local_root"] == str(origin / "data")
+    reader = source.reader
+    kwargs = config.task_source.kwargs["sources"]
+    await Trial._load_task(trial_config)
+    assert source.reader is reader
+    assert config.task_source.kwargs["sources"] is kwargs  # no repeated rewriting
+    # Post-resolution Job and Trial snapshots carry absolute external roots.
+    saved = TrialConfig.model_validate_json(trial_config.model_dump_json())
+    restored_job_or_trial = model.model_validate_json(config.model_dump_json())
+    monkeypatch.chdir(elsewhere)
+    if command == "job":
+        restored_plan = await JobPlan.from_config(restored_job_or_trial)
+        assert restored_plan.task_configs[0].path == selected
+    restored_task, _ = await Trial._load_task(saved)
+    assert restored_task.task_dir == selected
+    assert saved.task_source.resolve() is not source
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("root", ["data", "~/data"])
+async def test_native_source_programmatic_and_home_roots(tmp_path, monkeypatch, root):
+    task = task_files(tmp_path / "data", "task")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    config = TrialConfig.model_validate(
+        {
+            "task": {"path": task},
+            "task_source": {
+                "import_path": "flotilla.integrations.harbor_native:FlotillaTaskSource",
+                "kwargs": {"sources": [{"local_root": root, "platform_prefix": "datasets"}]},
+            },
+        }
+    )
+    loaded, _ = await Trial._load_task(config)
+    assert loaded.task_dir == task
+    assert config.task_source.kwargs["sources"][0]["local_root"] == str(task.parent)
+
+
+@pytest.mark.asyncio
+async def test_native_source_rejects_relative_roots_in_remote_config(tmp_path):
+    task = task_files(tmp_path, "task")
+    config = TrialConfig.model_validate(
+        {
+            "task": {"path": task},
+            "task_source": {
+                "import_path": "flotilla.integrations.harbor_native:FlotillaTaskSource",
+                "kwargs": {"sources": [{"local_root": ".", "platform_prefix": "datasets"}]},
+                "kwargs_base_dirs": {"sources": None},
+            },
+        }
+    )
+    with pytest.raises(ValueError, match="relative local_root requires a local config file"):
+        await Trial._load_task(config)
+    config.task_source.kwargs["sources"][0]["local_root"] = str(tmp_path)
+    restored = TrialConfig.model_validate_json(config.model_dump_json())
+    loaded, _ = await Trial._load_task(restored)
+    assert loaded.task_dir == task
 
 
 @pytest.mark.asyncio
@@ -295,9 +420,10 @@ async def test_real_native_trial_uses_source_runtime_and_platform_verification(
             "task_source": {
                 "import_path": "flotilla.integrations.harbor_native:FlotillaTaskSource",
                 "kwargs": {
-                    "sources": [{"local_root": str(root), "platform_prefix": "datasets"}],
+                    "sources": [{"local_root": root.name, "platform_prefix": "datasets"}],
                     "metadata_workers": 1,
                 },
+                "kwargs_base_dirs": {"sources": root.parent},
             },
             "runtime": {
                 "import_path": "flotilla.integrations.harbor_native:NativeFlotillaRuntime",
@@ -312,7 +438,13 @@ async def test_real_native_trial_uses_source_runtime_and_platform_verification(
             "trials_dir": tmp_path / "trials",
         }
     )
+    config = TrialConfig.model_validate_json(config.model_dump_json())
+    source = config.task_source.resolve()
+    assert source._reader is None
     trial = await Trial.create(config)
+    assert config.task_source.resolve() is source
+    assert source.reader.sources[0].local_root == root
+    assert trial.runtime_context.key == "datasets/task"
     assert isinstance(trial.task, Task)
     assert isinstance(trial.runtime_context, NativeFlotillaRuntime)
     assert isinstance(trial.agent_environment, NativeFlotillaEnvironment)
