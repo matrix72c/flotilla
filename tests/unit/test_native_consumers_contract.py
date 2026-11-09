@@ -2,6 +2,10 @@
 
 import json
 
+import pytest
+
+pytest.importorskip("harbor.agents.nop")
+
 from flotilla.compose.manifest_gen import synthesize_command
 from flotilla.compose.model import ImageMeta
 from flotilla.compose.normalize import normalize
