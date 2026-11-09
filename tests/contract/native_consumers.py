@@ -96,6 +96,8 @@ def fixture_files(mode: str, image: str) -> dict[str, bytes]:
                     "main": {"image": image},
                     "db": {
                         "image": image,
+                        # The fixture command must not inherit an image's ENTRYPOINT.
+                        "entrypoint": [],
                         "command": [
                             "/bin/sh",
                             "-c",
@@ -168,7 +170,7 @@ async def run_native(deployment: Path, root: Path, prefix: str, output: Path) ->
     if returncode:
         raise RuntimeError("Harbor CLI subprocess failed; inspect private output logs")
     owners = []
-    for path in (output / "harbor-jobs").rglob("contract-ownership.json"):
+    for path in (output / "harbor-jobs").glob("*/*/agent/contract-ownership.json"):
         owner = json.loads(path.read_text())
         trial = path.parent.parent
         result = json.loads((trial / "result.json").read_text())
@@ -317,7 +319,7 @@ async def run(deployment: Path, image: str, runtime_file: Path, output: Path) ->
                     # so operators can inspect exact resources rather than broad deletion.
                     result["native_ownership"] = [
                         json.loads(path.read_text())
-                        for path in (output / "harbor-jobs").rglob("contract-ownership.json")
+                        for path in (output / "harbor-jobs").glob("*/*/agent/contract-ownership.json")
                     ]
                     sandbox_ownership = output / "sandbox-ownership.json"
                     result["sandbox_ownership"] = (
