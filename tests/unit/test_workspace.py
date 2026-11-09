@@ -11,10 +11,12 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from flotilla.core.anchor import Anchor, AnchorSettings
 from flotilla.core.plan import ExecContext, TrialPlan, Unit
-from flotilla.platform.base import Resources, SharedVolume
+from flotilla.platform.base import ExecOutcomeUnknown, ExecResult, InstanceHandle, ProcessSpec, Resources, SharedVolume
 from flotilla.runtime.workspace import WorkspaceInfo, WorkspaceStore, relative_key
 from flotilla.testing.config import config
+from flotilla.testing.platform import FakePlatform, ManualClock, SharedTree
 
 
 def store() -> tuple[WorkspaceStore, Mock]:
@@ -184,6 +186,66 @@ async def test_metadata_batches_deduplicate_full_keys_without_attempts_or_copies
         assert call.args[0][:-2] == workspaces.config.prepare.workspace_command
         assert call.args[0][-2] == "--describe-tasks"
         assert call.kwargs["timeout_s"] == workspaces.config.prepare.workspace_timeout
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("metadata_mode")
+async def test_metadata_result_stat_recovers_without_replaying_helper_or_early_cleanup(
+    platform: FakePlatform, clock: ManualClock, tree: SharedTree, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    anchor = Anchor(platform, clock, "launch-test", AnchorSettings(image="anchor@sha256:abc"))
+    await clock.run(anchor.start())
+    workspaces = WorkspaceStore(anchor, config())
+    events: list[str] = []
+    output_key = ""
+    expected: dict[str, Any] = {}
+    read_file = platform.read_file
+
+    def execute(iid: str, proc: ProcessSpec) -> ExecResult:
+        nonlocal output_key, expected
+        if proc.argv[:-2] == workspaces.config.prepare.workspace_command:
+            events.append("helper")
+            request_key = proc.argv[-1].removeprefix(tree.mount)
+            request = json.loads(tree.content(request_key))
+            output_key = request_key.rsplit("/", 1)[0] + "/result.json"
+            expected = {
+                key: (
+                    {"main": {"main": {"cpu": "2", "memory": "3Gi"}}}
+                    if proc.argv[-2] == "--describe-task-resources"
+                    else {"instruction": key, "task_config": {}}
+                )
+                for key in request["task_keys"]
+            }
+            tree.files.add(output_key)
+            platform.tree_contents[output_key] = json.dumps(expected).encode()
+            return ExecResult(0, b"", b"")
+        if proc.argv[:2] == ("/.flotilla/bin/busybox", "stat"):
+            assert output_key and proc.argv[-1] == anchor.path(output_key)
+            assert output_key in tree.files
+            events.append("stat")
+            if events.count("stat") == 1:
+                raise ExecOutcomeUnknown("result stat response lost after helper success")
+        if proc.argv[0] == "rm":
+            assert events[-1] == "read"
+            events.append("cleanup")
+        return tree._exec(iid, proc)
+
+    async def read(handle: InstanceHandle, path: str) -> bytes:
+        assert path == anchor.path(output_key) and output_key in tree.files
+        data = await read_file(handle, path)
+        events.append("read")
+        return data
+
+    platform.set_exec_handler(execute)
+    monkeypatch.setattr(platform, "read_file", read)
+    try:
+        result = await clock.run(workspaces.describe_tasks(["dataset/t"]))
+        assert result == expected
+        assert events == ["helper", "stat", "stat", "read", "cleanup"]
+        assert output_key not in tree.files
+        assert not workspaces.records and not workspaces.jobs
+    finally:
+        await anchor.close()
 
 
 @pytest.mark.asyncio

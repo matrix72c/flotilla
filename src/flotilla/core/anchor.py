@@ -322,7 +322,11 @@ class Anchor:
 
     async def stat(self, key: str, *, stage: Stage) -> FileStat:
         """Read numeric metadata without losing special permission bits."""
-        result = await self._run(("/.flotilla/bin/busybox", "stat", "-c", "%a %u %g %s", "--", self._path(key)), stage)
+        result = await self._run(
+            ("/.flotilla/bin/busybox", "stat", "-c", "%a %u %g %s", "--", self._path(key)), stage, read_only=True
+        )
+        if result.timed_out:
+            raise FlotillaError("anchor stat timed out", stage=stage, category=ErrorCategory.TRANSIENT, retryable=True)
         try:
             mode, uid, gid, size = result.stdout.decode("ascii").split()
             values = FileStat(int(mode, 8), int(uid), int(gid), int(size))
@@ -350,7 +354,13 @@ class Anchor:
         return posixpath.join(self._settings.mount_path, *parts)
 
     async def _run(
-        self, argv: tuple[str, ...], stage: Stage, *, timeout_s: float | None = None, env: dict[str, str] | None = None
+        self,
+        argv: tuple[str, ...],
+        stage: Stage,
+        *,
+        timeout_s: float | None = None,
+        env: dict[str, str] | None = None,
+        read_only: bool = False,
     ) -> ExecResult:
         self.ensure_alive(stage)
         assert self._handle is not None
@@ -362,13 +372,41 @@ class Anchor:
             env=_ENV if env is None else env,
             timeout_s=self._settings.exec_timeout_s if timeout_s is None else timeout_s,
         )
-        try:
-            # Cancel on deactivation: no directory op is in flight after t0 + G, and in-call backend retries stop too.
-            result = await within(self._clock, None, self._platform.exec(self._handle, proc), abort=(self.deactivated,))
-        except Aborted:
-            raise self.lost(stage) from None
-        except FlotillaError as exc:
-            raise at_stage(exc, stage) from exc
+        # Only stat opts in: an unknown response can safely be repeated for this
+        # read, but never for an arbitrary management command or a filesystem write.
+        # This bounds retry admission, not the duration of an in-flight remote call.
+        deadline = self._clock.monotonic() + 30.0
+        delays = (0.5, 1.0, 2.0, 4.0)
+        for attempt in range(5):
+            self.ensure_alive(stage)
+            try:
+                result = await within(
+                    self._clock, None, self._platform.exec(self._handle, proc), abort=(self.deactivated,)
+                )
+            except Aborted:
+                raise self.lost(stage) from None
+            except FlotillaError as exc:
+                recoverable = isinstance(exc, ExecOutcomeUnknown) or (
+                    exc.retryable and exc.category in (ErrorCategory.TRANSIENT, ErrorCategory.RATE_LIMITED)
+                )
+                if not read_only or not recoverable:
+                    raise at_stage(exc, stage) from exc
+                if attempt < len(delays) and self._clock.monotonic() + delays[attempt] < deadline:
+                    try:
+                        await within(self._clock, None, self._clock.sleep(delays[attempt]), abort=(self.deactivated,))
+                    except Aborted:
+                        raise self.lost(stage) from None
+                    if self._clock.monotonic() < deadline:
+                        continue
+                error = at_stage(exc, stage)
+                error.add_note(
+                    f"stat transport recovery exhausted after {attempt + 1} attempts (5 attempts / 30s admission limit)"
+                )
+                raise error from exc
+            else:
+                if attempt:
+                    log.warning("Anchor stat transport recovered after %d attempts", attempt + 1)
+                break
         if result.exit_code != 0:
             stderr = result.stderr.decode(errors="replace").strip()[-500:]
             raise FlotillaError(

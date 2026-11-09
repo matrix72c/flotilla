@@ -34,6 +34,8 @@ The helper recovers actual `OSError(ESTALE)` in native description and explicit 
 
 The same description recovery runs before an attempt publishes its instruction or stages tests. It does **not** retry file copies, Compose commands, builds, Agent/Verifier execution, remote command failures, or unknown execution outcomes. Permissions, missing files, invalid task data and unsafe links are not transient-read retries. Exhaustion preserves the original error with a short diagnostic note; it never becomes missing metadata or a task score. Successful recovery emits one concise helper diagnostic.
 
+Separately, the client's **read-only `Anchor.stat`** retries transient/rate-limited transport errors and unknown command responses (for example an HTTP 504 after sending `stat`): at most five attempts with 0.5/1/2/4 second delays and a 30-second retry-admission window. Command exit failures and malformed stat output are not retried. The metadata helper is not replayed: its result directory stays alive until result retrieval/validation finishes or fails, then normal cleanup runs. Cancellation or anchor deactivation interrupts recovery. OpenSandbox result downloads already use the HTTP layer's bounded idempotent GET retries; no outer download or batch retry multiplies them. Generic execution, writes, copies, builds and workloads remain non-replayed even when their response is unknown.
+
 These limits bound retry admission and added waiting, not kernel-blocked reads on a hard NFS mount. Existing command timeouts, settled cancellation and cleanup remain in force. This is transient-read recovery, not a repair of the underlying storage service.
 
 ## Services and processes
