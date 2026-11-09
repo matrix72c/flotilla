@@ -151,10 +151,22 @@ class HarborAttempt:
         self._close_task: asyncio.Task[None] | None = None
 
     @classmethod
-    async def create(cls, fleet: Flotilla, key: str, *, runtime_params: dict[str, str] | None = None) -> HarborAttempt:
+    async def create(
+        cls,
+        fleet: Flotilla,
+        key: str,
+        *,
+        runtime_params: dict[str, str] | None = None,
+        expected_metadata_identity: str | None = None,
+    ) -> HarborAttempt:
         workspace = await fleet.workspace(task_key(key))
         try:
             metadata = await workspace.prepare(runtime_params=runtime_params)
+            if expected_metadata_identity is not None:
+                from flotilla.integrations.harbor_source_reader import metadata_identity
+
+                if metadata_identity(metadata) != expected_metadata_identity:
+                    raise ValueError(f"host/platform instruction or task config differs for {key!r}")
             attempt = cls(fleet, workspace, metadata, runtime_params)
             await workspace.mkdir("tests")
             for service in attempt.roles["main"].prepared.manifest().units:

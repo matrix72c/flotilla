@@ -52,7 +52,7 @@ services:
       retries: 15
 ```
 
-将完整原始 Harbor 任务（含 `instruction.md`、`task.toml`、环境和测试目录）放到平台共享存储的 `datasets/demo/task`。训练客户端只持有相对此存储根的 `task_key`，不需要本地任务副本。可选预热输出的是诊断，不是训练输入：
+将完整原始 Harbor 任务（含 `instruction.md`、`task.toml`、环境和测试目录）放到平台共享存储的 `datasets/demo/task`。以下低层 attempt API 只需相对此存储根的 `task_key`；原生 Harbor CLI 的 source 入口还需对应的本地原始任务目录来读取元数据，不会把该目录上传到沙盒。可选预热输出的是诊断，不是训练输入：
 
 ```sh
 flotilla prepare datasets/demo/task --deployment deployment.toml --out diagnostics.json
@@ -80,7 +80,7 @@ async def main():
 asyncio.run(main())
 ```
 
-`HarborAttempt` 在平台侧创建独立工作区，读取原任务、解析 Compose 并构建，再打开角色环境；关闭时回收角色和工作区。隐藏测试只在验证阶段挂载。详见 [Harbor 适配器](docs/Harbor_Quick_Start.md)。这不是原生 Harbor CLI/Trial 的 `task_key` 支持。
+`HarborAttempt` 在平台侧创建独立工作区，读取原任务、解析 Compose 并构建，再打开角色环境；关闭时回收角色和工作区。隐藏测试只在验证阶段提供。原生 **`harbor run --config harbor-job.yaml`** 通过显式 `FlotillaTaskSource`、`NativeFlotillaRuntime` 和 `NativeFlotillaEnvironment` 接入：本地 metadata 映射到平台原始任务 key，运行、隐藏测试及产物交接仍在平台。完整 YAML 与 patched Harbor 接口要求见 [Harbor 快速上手](docs/Harbor_Quick_Start.md#native-harbor-run)。不使用 prepared 数据集或持久 metadata cache。
 
 ## 特性
 
@@ -136,7 +136,7 @@ python -m pip install .            # 或：python -m pip install '.[harbor]'
 
 ## 项目状态
 
-Flotilla 目前是 alpha 版本。支持的目标环境为 Linux x86_64、Python 3.12、OpenSandbox 的 `current` 和 `legacy` 两种 execd 协议，可选的 Harbor 适配器对应 Harbor 0.24.0。1.0 之前，次版本之间的 API 和配置可能发生变化，详见[变更日志](CHANGELOG.md)。
+Flotilla 目前是 alpha 版本。支持的目标环境为 Linux x86_64、Python 3.12、OpenSandbox 的 `current` 和 `legacy` 两种 execd 协议，可选的原生 Harbor 适配器要求提供 source/runtime 接口的兼容 patched Harbor；原版 Harbor 0.24.0 不具备这些接口。1.0 之前，次版本之间的 API 和配置可能发生变化，详见[变更日志](CHANGELOG.md)。
 
 ## 参与贡献
 

@@ -22,8 +22,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Install the Harbor adapter only for evaluation workloads.
-harbor = ["harbor==0.24.0"]
+# Native evaluation and training share explicit source/runtime extension support.
+harbor = ["harbor @ git+https://github.com/matrix72c/harbor.git@4a6bbc4a8351e110dfb55d754c029d510ecaeb23"]
 testing = ["pytest>=8.3", "pytest-asyncio>=0.25"]
 
 [project.scripts]
@@ -32,6 +32,9 @@ flotilla = "flotilla.cli:main"
 [project.urls]
 Repository = "https://github.com/matrix72c/flotilla"
 Issues = "https://github.com/matrix72c/flotilla/issues"
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.hatch.version]
 source = "vcs"

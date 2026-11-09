@@ -12,6 +12,7 @@ from harbor.models.task.config import TaskConfig
 from harbor.models.trial.paths import TrialPaths
 
 from flotilla.integrations.harbor_attempt import HarborAttempt, WorkspaceVerifier, task_key
+from flotilla.integrations.harbor_source_reader import metadata_identity
 from flotilla.platform.base import SharedVolume
 
 
@@ -168,3 +169,49 @@ async def test_native_verifier_uses_remote_discovery_and_reward_parser(tmp_path:
     assert "/tests/test.sh" in environment.exec.call_args.args[0]
     assert not hasattr(attempt.task, "paths")
     await attempt.close()
+
+
+@pytest.mark.asyncio
+async def test_expected_metadata_identity_accepts_canonical_match_before_open() -> None:
+    data = metadata()
+    expected = metadata_identity({"task_config": {}, "instruction": "# Canary\n\nreal instruction"})
+    fleet, workspace = fleet_for(data)
+    attempt = await HarborAttempt.create(fleet, "dataset/task", expected_metadata_identity=expected)
+    assert attempt.task.instruction == "real instruction"
+    workspace.close.assert_not_awaited()
+    workspace.mkdir.assert_awaited()
+    fleet.open.assert_not_awaited()
+    fleet.open.return_value = SimpleNamespace(release=AsyncMock())
+    await attempt.open()
+    fleet.open.assert_awaited_once()
+    await attempt.close()
+    workspace.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("changed", ["instruction", "task_config"])
+async def test_metadata_mismatch_closes_workspace_before_open(changed: str) -> None:
+    data = metadata()
+    expected = metadata_identity(data)
+    if changed == "instruction":
+        data["instruction"] = "different instructions"
+    else:
+        data["task_config"]["environment"]["cpus"] = 7
+    fleet, workspace = fleet_for(data)
+    with pytest.raises(ValueError, match="host/platform instruction or task config differs"):
+        await HarborAttempt.create(fleet, "dataset/task", expected_metadata_identity=expected)
+    workspace.prepare.assert_awaited_once()
+    workspace.close.assert_awaited_once()
+    workspace.mkdir.assert_not_awaited()
+    fleet.open.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_metadata_mismatch_remains_primary_when_workspace_close_fails() -> None:
+    fleet, workspace = fleet_for(metadata())
+    workspace.close.side_effect = RuntimeError("close failed")
+    with pytest.raises(ValueError, match="host/platform") as caught:
+        await HarborAttempt.create(fleet, "dataset/task", expected_metadata_identity="not-the-current-identity")
+    assert any("workspace cleanup also failed" in note and "close failed" in note for note in caught.value.__notes__)
+    workspace.close.assert_awaited_once()
+    fleet.open.assert_not_awaited()

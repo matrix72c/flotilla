@@ -111,12 +111,12 @@ def read_clock(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     return clock
 
 
-@pytest.mark.parametrize("fault", ["root", "ancestor", "lstat", "scandir", "instruction"])
+@pytest.mark.parametrize("fault", ["root", "ancestor", "config", "instruction"])
 @pytest.mark.parametrize("resources", [False, True])
 def test_stale_native_reads_recover_without_changing_metadata(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, read_clock: SimpleNamespace, fault: str, resources: bool
 ) -> None:
-    from harbor.models.task import task as task_module
+    from harbor.models.task.config import TaskConfig
 
     _, source = task_copy(tmp_path)
     key = source.relative_to(tmp_path).as_posix()
@@ -127,18 +127,15 @@ def test_stale_native_reads_recover_without_changing_metadata(
         "compose_version": COMPOSE_VERSION,
     }
     expected = compiler.describe_tasks_request(request, resources=resources)
-    task = Mock(wraps=task_module.Task)
-    monkeypatch.setattr(task_module, "Task", task)
+    parse = Mock(wraps=TaskConfig.model_validate_toml)
+    monkeypatch.setattr(TaskConfig, "model_validate_toml", parse)
     target = {
         "root": tmp_path,
         "ancestor": source.parent,
-        "lstat": source / "tests/test.sh",
-        "scandir": source / "tests",
+        "config": source / "task.toml",
         "instruction": source / "instruction.md",
     }[fault]
-    owner, method = (
-        (os, "scandir") if fault == "scandir" else (Path, "read_text" if fault == "instruction" else "lstat")
-    )
+    owner, method = Path, "read_text" if fault in {"config", "instruction"} else "lstat"
     original = getattr(owner, method)
     failed = False
 
@@ -152,8 +149,8 @@ def test_stale_native_reads_recover_without_changing_metadata(
     monkeypatch.setattr(owner, method, read)
     assert compiler.describe_tasks_request(request, resources=resources) == expected
     assert failed and read_clock.delays == [0.5]
-    if fault == "instruction":
-        assert task.call_count >= 2  # no failed Task/cached_property is reused
+    # Failed instruction hydration restarts parsing; no partially-read metadata is cached.
+    assert parse.call_count == (2 if fault == "instruction" else 1)
 
 
 def test_stale_read_retry_limits_and_original_error(read_clock: SimpleNamespace) -> None:
@@ -225,23 +222,76 @@ def test_batch_read_budget_is_shared_and_successful_tasks_are_not_replayed(
     assert "request wait budget" in error.value.__notes__[-1]
 
 
-def test_enumeration_permission_error_cannot_hide_a_subtree(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, read_clock: SimpleNamespace
+@pytest.mark.parametrize("resources", [False, True])
+@pytest.mark.parametrize("fault", ["lstat", "scandir"])
+def test_payload_access_errors_are_deferred_until_private_copy_use(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, read_clock: SimpleNamespace, resources: bool, fault: str
 ) -> None:
-    _, source = task_copy(tmp_path)
-    original = os.scandir
+    workspace, source = task_copy(tmp_path)
+    request = {
+        "storage_root": str(tmp_path),
+        "task_keys": [source.relative_to(tmp_path).as_posix()],
+        "compose_command": ["unused"],
+        "compose_version": COMPOSE_VERSION,
+    }
+    expected = compiler.describe_tasks_request(request, resources=resources)
+    owner, method = (os, "scandir") if fault == "scandir" else (Path, "lstat")
+    target = source / ("tests" if fault == "scandir" else "tests/test.sh")
+    original = getattr(owner, method)
+    attempts = 0
 
-    def scan(path: Any) -> Any:
-        if Path(path) == source / "tests":
-            raise PermissionError(errno.EACCES, "injected enumeration failure")
-        return original(path)
+    def read(path: Any, *args: Any, **kwargs: Any) -> Any:
+        nonlocal attempts
+        if Path(path) == target:
+            attempts += 1
+            raise PermissionError(errno.EACCES, "injected payload access failure")
+        return original(path, *args, **kwargs)
 
-    monkeypatch.setattr(os, "scandir", scan)
-    with pytest.raises(PermissionError):
-        compiler.describe_tasks_request(
-            {"storage_root": str(tmp_path), "task_keys": [source.relative_to(tmp_path).as_posix()]}
-        )
+    monkeypatch.setattr(owner, method, read)
+    assert compiler.describe_tasks_request(request, resources=resources) == expected
+    assert attempts == 0  # Metadata and non-Compose resources do not inspect payload trees.
+    assert not (workspace / "public").exists()
+    assert not (workspace / "private-tests").exists()
+    with pytest.raises(PermissionError, match="payload access failure"):
+        compiler.describe(source, workspace)
+    assert attempts == 1  # The actual copy/use boundary cannot suppress the same failure.
     assert not read_clock.delays
+    assert not (workspace / "public").exists()
+    assert not (workspace / "private-tests").exists()
+
+
+@pytest.mark.parametrize("fault", ["lstat", "scandir"])
+def test_private_copy_payload_validation_retries_safe_reads_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, read_clock: SimpleNamespace, fault: str
+) -> None:
+    workspace, source = task_copy(tmp_path)
+    owner, method = (os, "scandir") if fault == "scandir" else (Path, "lstat")
+    target = source / ("tests" if fault == "scandir" else "tests/test.sh")
+    original = getattr(owner, method)
+    failed = False
+
+    def read(path: Any, *args: Any, **kwargs: Any) -> Any:
+        nonlocal failed
+        if Path(path) == target and not failed:
+            failed = True
+            raise OSError(errno.ESTALE, "injected private payload read")
+        return original(path, *args, **kwargs)
+
+    copy = Mock(wraps=compiler._copy_tests)
+    monkeypatch.setattr(owner, method, read)
+    monkeypatch.setattr(compiler, "_copy_tests", copy)
+    assert compiler.describe(source, workspace)["tests"]["script"] == "test.sh"
+    assert failed and read_clock.delays == [0.5]
+    copy.assert_called_once()
+
+
+def test_relocatable_test_validation_traverses_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _, source = task_copy(tmp_path)
+    (source / "tests/alias").symlink_to("test.sh")
+    traversal = Mock(wraps=compiler._tree_entries)
+    monkeypatch.setattr(compiler, "_tree_entries", traversal)
+    compiler._validate_tests(source / "tests")
+    traversal.assert_called_once_with(source / "tests")
 
 
 def test_traversal_does_not_follow_a_replaced_directory(tmp_path: Path) -> None:
@@ -349,7 +399,7 @@ def test_describe_rejects_multistep(tmp_path: Path) -> None:
 
 def test_native_task_validation_is_not_bypassed(tmp_path: Path) -> None:
     workspace, source = task_copy(tmp_path, script=False)
-    with pytest.raises(FileNotFoundError, match=r"test\.sh"):
+    with pytest.raises(ValueError, match="missing its verifier script"):
         compiler.describe(source, workspace)
 
 
@@ -541,10 +591,17 @@ def test_batch_native_parity_dedup_basename_and_no_source_writes(
     ],
 )
 @pytest.mark.parametrize("resources", [False, True])
-def test_batch_rejects_unsupported_native_trees_and_symlink_ancestors(
+def test_batch_rejects_invalid_coordinates_but_defers_unused_payload_validation(
     tmp_path: Path, kind: str, resources: bool
 ) -> None:
     workspace, source = task_copy(tmp_path)
+    request = {
+        "storage_root": str(tmp_path),
+        "task_keys": [source.relative_to(tmp_path).as_posix()],
+        "compose_command": ["unused"],
+        "compose_version": COMPOSE_VERSION,
+    }
+    expected = compiler.describe_tasks_request(request, resources=resources)
     if kind == "escape":
         (source / "outside").symlink_to(tmp_path)
     elif kind == "dangling":
@@ -573,12 +630,21 @@ def test_batch_rejects_unsupported_native_trees_and_symlink_ancestors(
     else:
         (source / "task.toml").write_text('[environment]\nos="windows"\ndocker_image="r.io/main:1"\n')
         (source / "tests/test.bat").write_text("exit 0")
-    with pytest.raises((ValueError, OSError)):
-        compiler.describe_tasks_request(
-            {"storage_root": str(tmp_path), "task_keys": [source.relative_to(tmp_path).as_posix()]}, resources=resources
-        )
-    assert not (workspace / "public").exists()
-    assert not (workspace / "private-tests").exists()
+    request["task_keys"] = [source.relative_to(tmp_path).as_posix()]
+    if kind in {"escape", "dangling", "fifo", "copy-sibling", "absolute-test-link"}:
+        assert compiler.describe_tasks_request(request, resources=resources) == expected
+        assert not (workspace / "public").exists()
+        assert not (workspace / "private-tests").exists()
+        # Validation is deferred, never dropped: unsafe private copies and test
+        # links that cannot survive relocation still fail at actual use.
+        with pytest.raises((ValueError, OSError)):
+            compiler.describe(source, workspace)
+        assert not (workspace / "private-tests").exists()
+    else:
+        with pytest.raises((ValueError, OSError)):
+            compiler.describe_tasks_request(request, resources=resources)
+        assert not (workspace / "public").exists()
+        assert not (workspace / "private-tests").exists()
 
 
 @pytest.mark.parametrize("key", ["../outside", "/outside", "a//b", "a/./b", "share/t", "launches/t", "a\\b", "a\x7fb"])

@@ -37,7 +37,7 @@ finally:
 
 ## Selecting platform tasks
 
-Keep complete original Harbor task directories on platform storage, with versioned relative keys such as `datasets/web-bench/task-001`. Preserve `task.toml`, `instruction.md`, environment files, and hidden tests. Training rows contain `task_key` and framework metadata only: no local `task_dir`, generated `env`, or prepared JSONL is required. Native Harbor CLI/Trial has not gained `task_key` support; the framework must use the Flotilla attempt adapter.
+Keep complete original Harbor task directories on platform storage, with versioned relative keys such as `datasets/web-bench/task-001`. Preserve `task.toml`, `instruction.md`, environment files, and hidden tests. Training rows contain `task_key` and framework metadata only: no local `task_dir`, generated `env`, or prepared JSONL is required. For native Harbor CLI/Trial, configure the explicit task source, trial runtime and environment together as shown in [Harbor quick start](Harbor_Quick_Start.md#native-harbor-run). That source maps local original-task metadata to platform keys; the trial runtime owns the attempt. A framework with its own lifecycle can use the attempt adapter below and optionally the shared local metadata reader.
 
 ```sh
 # Optional warmup/diagnostics, not a training input

@@ -102,13 +102,15 @@ def _tree_entries(root: Path) -> Iterator[tuple[Path, int]]:
                     pending.append(path)
 
 
-def validate_tree(root: Path) -> None:
+def validate_tree(root: Path, *, relocatable: bool = False) -> None:
     """Check the whole private copy before any parser follows an input path."""
     if not stat.S_ISDIR(root.lstat().st_mode):
         raise ValueError("task copy must be a real directory")
     root = root.resolve(strict=True)
     for path, mode in _tree_entries(root):
         if stat.S_ISLNK(mode):
+            if relocatable and Path(os.readlink(path)).is_absolute():
+                raise ValueError(f"absolute test symlinks cannot be relocated: {path}")
             if not path.resolve(strict=True).is_relative_to(root):
                 raise ValueError(f"task link escapes its private copy: {path.relative_to(root)}")
         elif not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
@@ -128,11 +130,7 @@ def _validate_tests(source: Path) -> None:
     # Relative symlinks confined to the tests subtree survive relocation. Links
     # into sibling task directories or absolute paths do not; reject, don't
     # silently dereference them or publish a dangling/escaping private copy.
-    source = source.resolve(strict=True)
-    validate_tree(source)
-    for path, mode in _tree_entries(source):
-        if stat.S_ISLNK(mode) and Path(os.readlink(path)).is_absolute():
-            raise ValueError(f"absolute test symlinks cannot be relocated: {path}")
+    validate_tree(source.resolve(strict=True), relocatable=True)
 
 
 def _copy_tests(source: Path, target: Path) -> None:
@@ -146,23 +144,28 @@ def _copy_tests(source: Path, target: Path) -> None:
 
 
 def _describe_source(source: Path) -> dict[str, Any]:
-    """Native parsing and supported-tree validation, with no filesystem writes."""
-    from harbor.models.task.config import TaskOS
-    from harbor.models.task.task import Task
+    """Read metadata and role coordinates; payload validation belongs to use sites."""
+    from harbor.models.task.config import TaskConfig, TaskOS
+    from harbor.models.task.paths import TaskPaths
     from harbor.models.task.verifier_mode import resolve_verifier_environment_definition
 
-    validate_tree(source)
-    task = Task(source)
-    if task.has_steps:
+    from flotilla.integrations.harbor_source_reader import NativeTaskSource, SourceMapping
+
+    source = source.resolve(strict=True)
+    reader = NativeTaskSource([SourceMapping(local_root=source.parent, platform_prefix="source")])
+    metadata = reader.read_metadata(f"source/{source.name}")
+    config = TaskConfig.model_validate(metadata["task_config"])
+    paths = TaskPaths(source)
+    if config.steps:
         raise ValueError("training supports single-step Harbor tasks; multi-step tasks are not silently flattened")
-    definition = resolve_verifier_environment_definition(task.config, task.paths)
-    configs = [task.config.environment] + ([definition.config] if definition is not None else [])
+    definition = resolve_verifier_environment_definition(config, paths)
+    configs = [config.environment] + ([definition.config] if definition is not None else [])
     if any(config.os != TaskOS.LINUX for config in configs):
         raise ValueError("this backend supports Linux Harbor environments only")
     definitions = {
         "main": {
-            "directory": task.paths.environment_dir.relative_to(source).as_posix(),
-            "config": task.config.environment.model_dump(mode="json"),
+            "directory": paths.environment_dir.relative_to(source).as_posix(),
+            "config": config.environment.model_dump(mode="json"),
             "bundled_tests": False,
         }
     }
@@ -172,15 +175,11 @@ def _describe_source(source: Path) -> dict[str, Any]:
             "config": definition.config.model_dump(mode="json"),
             "bundled_tests": definition.bundled_tests,
         }
-    script = task.paths.discovered_test_path_for(configs[-1].os)
-    if not (definition is not None and definition.bundled_tests):
-        if script is None:
-            raise ValueError("Harbor task is missing its verifier script")
-        _validate_tests(task.paths.tests_dir)
+    script = paths.discovered_test_path_for(configs[-1].os)
+    if not (definition is not None and definition.bundled_tests) and script is None:
+        raise ValueError("Harbor task is missing its verifier script")
     return {
-        "task_id": source.name,
-        "task_config": task.config.model_dump(mode="json"),
-        "instruction": task.instruction,
+        **metadata,
         "definitions": definitions,
         "tests": {
             "script": script.name if script is not None else None,
@@ -192,7 +191,10 @@ def _describe_source(source: Path) -> dict[str, Any]:
 def describe(source: Path, workspace: Path) -> dict[str, Any]:
     from harbor.models.task.paths import TaskPaths
 
-    result = _ReadBudget().run(lambda: _describe_source(source), stage="task description")
+    # This is the private copy about to be compiled/transferred, not host metadata hydration.
+    budget = _ReadBudget()
+    budget.run(lambda: validate_tree(source), stage="private task copy")
+    result = budget.run(lambda: _describe_source(source), stage="task description")
     public = _directory(workspace / "public")
     instruction = public / "instruction.md"
     if instruction.is_symlink():

@@ -18,7 +18,9 @@ Import public types from `flotilla`. Configuration is loaded locally at construc
 
 For production Harbor tasks use `HarborAttempt.create(fleet, task_key)` from `flotilla.integrations.harbor_attempt`, then `await attempt.open("main", options)` and `await attempt.close()` in `finally`. `task_key` is a relative key of an original Harbor task below platform storage, not a local path. Attempt creation allocates a private workspace and runs the trusted platform compiler/build helper; it returns metadata, not task files. `await attempt.stage_tests()` makes hidden tests available only for verification; a separate verifier role can then be opened when defined. Close roles before deleting their workspace (the attempt owner does this).
 
-`PreparedEnvironment` remains a low-level transient compiler/testing boundary for `fleet.open`, not a persistent dataset interchange format. Do not use old `prepared.jsonl` or `load_prepared` as production inputs. `flotilla prepare` is optional platform warmup with diagnostic output. Native Harbor CLI/Trial does not accept `task_key` through this API.
+`PreparedEnvironment` remains a low-level transient compiler/testing boundary for `fleet.open`, not a persistent dataset interchange format. Do not use old `prepared.jsonl` or `load_prepared` as production inputs. `flotilla prepare` is optional platform warmup with diagnostic output. Native Harbor CLI/Trial uses the explicit source/runtime/environment adapters in [Harbor quick start](Harbor_Quick_Start.md#native-harbor-run), not an environment-only `task_key` option. That entrypoint requires the compatible patched Harbor interfaces.
+
+`HarborAttempt.create(..., expected_metadata_identity=...)` optionally compares platform metadata with the caller's local config/instruction identity before any task environment opens. A mismatch closes the workspace and fails. `HarborVerification` supplies shared/separate verifier transitions and platform-only artifact handoff for both native Harbor and training integrations; it releases the main role before staging hidden tests for a separate verifier, and releases the verifier on success, failure or cancellation. The enclosing attempt retains workspace ownership.
 
 The management image requires Python, Flotilla with its `harbor` extra, pinned Compose and build tooling. Remote build network targets, read-only credential mounts and nonsecret endpoint settings are explicit deployment inputs. No compatible release image or real platform acceptance is provided by the current offline implementation.
 
@@ -26,11 +28,28 @@ The management image requires Python, Flotilla with its `harbor` extra, pinned C
 
 Each phase of an open has its own budget. Client start (once per client) is bounded by `timeouts.client_start`. Waiting for a `trial_concurrency` / `instance_budget` slot is bounded by `admission_timeout` (default `limits.admission_timeout`) and raises `AdmissionTimeout` with the current counts. `startup_timeout` (default `runtime.startup_timeout_s`) starts at admission and ends when the environment is ready. `lifetime` starts at readiness and cannot exceed `runtime.run_timeout_s`. Runtime parameters are literal substitution values; only explicit network-policy targets are interpreted as network destinations.
 
-## Native metadata read recovery
+## Local native metadata
+
+`flotilla.integrations.harbor_source_reader` provides `SourceMapping(local_root=..., platform_prefix=...)` and `NativeTaskSource(sources)`. Prefixes match whole path components; overlapping mappings and metadata files escaping their task/source roots are rejected.
+
+| Operation | Result |
+|---|---|
+| `resolve_task(key)` / `key_for_path(path)` | Map an original platform key to a contained local task directory, or back |
+| `read_config(key)` | Harbor `TaskConfig` with native defaults; does not read the instruction |
+| `read_metadata(key)` | `task_id` (directory basename), canary-stripped `instruction`, JSON-mode `task_config` |
+| `await read_configs(keys, workers=8)` | Full-key-to-`TaskConfig` mapping, config only |
+| `await read_many(keys, workers=8)` | Full-key-to-metadata mapping |
+| `metadata_identity(description)` | In-memory digest of canonical config and stripped instruction, not a full-tree hash |
+
+Single-task calls are synchronous. Bulk calls keep filesystem work off the event loop, deduplicate only full keys and preserve first-occurrence order. Spawn workers process batches of 64 with at most `2 × workers` in flight; small requests cap the effective worker count, and a single worker uses no subprocess. Cancellation stops new submissions, cancels queued work and joins active reads before propagating. Neither API constructs a filesystem Harbor `Task`, scans tests/solution/environment payloads, initializes a platform client or writes a persistent cache. Kernel-blocked filesystem reads still have to return before cleanup completes.
+
+Native dataset selection uses config-only reads; individual Trials load instructions when selected for execution. Dataset discovery and lifetime of any in-memory results belong to the caller. Keep original sources immutable during a run; the identity check does not compare hidden tests or other payload files.
+
+## Platform metadata read recovery
 
 `await fleet.describe_tasks(task_keys)` reads instruction/config metadata from native tasks without creating attempts. `await fleet.describe_task_resources(task_keys, runtime_params=...)` inspects declared resources without building images. The management image must contain the matching workspace helper. Inputs remain immutable throughout a run; metadata reuse does not deduplicate dataset rows or rename task IDs.
 
-The helper recovers actual `OSError(ESTALE)` in native description and explicit source-path/resource-discovery reads. Each logical read gets at most five attempts, with 0.5, 1, 2 and 4 second delays. No new retry is admitted after 30 seconds for that read, and one metadata request (at most 128 unique keys) shares 15 seconds of added sleep. A failed description is rebuilt from a fresh Harbor `Task`; previously successful tasks are not reread. Directory enumeration errors propagate instead of silently accepting an incomplete tree. No partial metadata batch is published.
+The helper recovers actual `OSError(ESTALE)` in native description and explicit source-path/resource-discovery reads. Each logical read gets at most five attempts, with 0.5, 1, 2 and 4 second delays. No new retry is admitted after 30 seconds for that read, and one metadata request (at most 128 unique keys) shares 15 seconds of added sleep. A failed description rereads and reparses metadata directly, without constructing a filesystem Harbor `Task`; previously successful tasks are not reread. Metadata-only reads do not validate unrelated payload trees. The private-copy compile/use boundary still validates the task tree and relocatable test inputs, and enumeration errors there propagate instead of accepting an incomplete tree. No partial metadata batch is published.
 
 The same description recovery runs before an attempt publishes its instruction or stages tests. It does **not** retry file copies, Compose commands, builds, Agent/Verifier execution, remote command failures, or unknown execution outcomes. Permissions, missing files, invalid task data and unsafe links are not transient-read retries. Exhaustion preserves the original error with a short diagnostic note; it never becomes missing metadata or a task score. Successful recovery emits one concise helper diagnostic.
 

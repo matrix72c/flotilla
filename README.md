@@ -52,7 +52,7 @@ services:
       retries: 15
 ```
 
-Stage the complete original Harbor task (including `instruction.md`, `task.toml`, environments and tests) at `datasets/demo/task` under platform storage. The client uses this relative `task_key`, not a local task copy. Optional warmup emits diagnostics, not training inputs:
+Stage the complete original Harbor task (including `instruction.md`, `task.toml`, environments and tests) at `datasets/demo/task` under platform storage. The attempt API below uses this relative `task_key`, without needing a local task copy. Optional warmup emits diagnostics, not training inputs:
 
 ```sh
 flotilla prepare datasets/demo/task --deployment deployment.toml --out diagnostics.json
@@ -80,7 +80,7 @@ async def main():
 asyncio.run(main())
 ```
 
-`HarborAttempt` creates a private platform workspace, reads the original task, compiles Compose/build inputs there, and opens role environments. Closing releases roles and workspace; hidden tests are staged only for verification. See the [Harbor adapter](docs/Harbor_Quick_Start.md). This does not add `task_key` support to native Harbor CLI/Trial.
+`HarborAttempt` creates a private platform workspace, reads the original task, compiles Compose/build inputs there, and opens role environments. Closing releases roles and workspace; hidden tests are staged only for verification. Native **`harbor run --config harbor-job.yaml`** uses an explicit `FlotillaTaskSource` + `NativeFlotillaRuntime` + `NativeFlotillaEnvironment` configuration: local original-task metadata maps to platform keys, while execution and test/artifact staging remain platform-owned. See the [Harbor quick start](docs/Harbor_Quick_Start.md#native-harbor-run) for the complete YAML and patched-Harbor requirement. No prepared dataset or persistent metadata cache is used.
 
 For dataset initialization, `await fleet.describe_tasks(task_keys)` reads native instruction/config metadata in bounded platform-side batches without creating attempts or copying task trees. It returns `{full_task_key: {"instruction": ..., "task_config": ...}}`; only metadata reads are deduplicated, not dataset rows or basename IDs. Keep source tasks immutable during a run. Each batch is limited to 128 tasks, a 1 MiB request and a 64 MiB result; invalid tasks or exceeded limits fail the call rather than returning partial metadata. Batches run in bounded windows of at most `prepare.concurrency`, sharing the workspace compile slots. Failure or cancellation settles the current window and its cleanup without scheduling the remaining dataset or replaying commands. Temporary metadata files are launch-owned and cleaned up. The management image must contain the matching installed workspace entrypoint; this API does not change the independent workspace created for actual execution.
 
@@ -140,7 +140,7 @@ Then pick a path:
 
 ## Status
 
-Flotilla is alpha software. The supported targets are Linux x86_64, Python 3.12, the OpenSandbox `current` and `legacy` execd protocols, and Harbor 0.24.0 for the optional adapter. APIs and configuration may change between minor versions before 1.0; see the [changelog](CHANGELOG.md).
+Flotilla is alpha software. The supported targets are Linux x86_64, Python 3.12, the OpenSandbox `current` and `legacy` execd protocols, and a compatible patched Harbor build for the optional native source/runtime adapter (stock Harbor 0.24.0 lacks those interfaces). APIs and configuration may change between minor versions before 1.0; see the [changelog](CHANGELOG.md).
 
 ## Contributing
 
