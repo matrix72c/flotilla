@@ -218,8 +218,8 @@ async def run_sandbox(deployment: Path, root: Path, prefix: str, runtime: dict, 
     owners = []
     recipe = HarborRecipe()
     try:
-        for mode in MODES:
-            item = recipe.build_rollout_item(recipe.parse_record({"task_key": f"{prefix}/{mode}"}))
+        for uid, mode in enumerate(MODES, start=1):
+            item = recipe.build_rollout_item(recipe.parse_record({"task_key": f"{prefix}/{mode}"}), uid=uid)
             async with provider.open(item) as episode:
                 owners.append(ownership(episode.attempt.workspace.key, item.environment["task_key"]))
                 (output / "sandbox-ownership.json").write_text(json.dumps(owners, indent=2) + "\n")
