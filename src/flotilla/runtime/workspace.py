@@ -6,11 +6,13 @@ import asyncio
 import json
 import posixpath
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from functools import partial
 from itertools import islice
 from typing import TYPE_CHECKING, Any
 
+from flotilla.compose.resources import cpu, memory
 from flotilla.core.anchor import Anchor
 
 if TYPE_CHECKING:
@@ -43,6 +45,31 @@ def relative_key(value: str) -> str:
     if "\\" in value or any(ord(c) < 32 for c in value):
         raise ValueError("storage paths cannot contain backslashes or control characters")
     return value
+
+
+def runtime_parameters(value: Mapping[str, str] | None) -> dict[str, str]:
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping) or any(
+        not isinstance(k, str) or not isinstance(v, str) for k, v in value.items()
+    ):
+        raise TypeError("runtime_params must be a mapping of strings to strings")
+    return dict(value)
+
+
+def _validate_resource_metadata(value: Any) -> None:
+    if not isinstance(value, dict) or set(value) not in ({"main"}, {"main", "verifier"}):
+        raise ValueError("metadata compiler returned invalid resource roles")
+    for services in value.values():
+        if not isinstance(services, dict) or "main" not in services:
+            raise ValueError("metadata compiler returned invalid resource services")
+        for name, resources in services.items():
+            if not isinstance(name, str) or not name or not isinstance(resources, dict):
+                raise ValueError("metadata compiler returned invalid service resources")
+            for key, amount in resources.items():
+                if key not in {"cpu", "memory"} or not isinstance(amount, str):
+                    raise ValueError("metadata compiler returned invalid resource declaration")
+                (cpu if key == "cpu" else memory)(amount)
 
 
 @dataclass(frozen=True)
@@ -191,11 +218,18 @@ class WorkspaceStore:
 
         return await self.operation(wid, run)
 
-    def _metadata_batches(self, keys: list[str]) -> Iterator[tuple[str, list[str], bytes]]:
+    def _metadata_batches(
+        self, keys: list[str], options: dict[str, Any] | None = None
+    ) -> Iterator[tuple[str, list[str], bytes]]:
         index = 0
         while index < len(keys):
             directory = f"launches/{self.anchor.launch_id}/metadata/{uuid.uuid4().hex}"
-            request = {"storage_root": self.anchor.path(""), "workspace": self.anchor.path(directory), "task_keys": []}
+            request = {
+                **(options or {}),
+                "storage_root": self.anchor.path(""),
+                "workspace": self.anchor.path(directory),
+                "task_keys": [],
+            }
             # Account for JSON escaping and separators, not just character count.
             size = len(json.dumps(request).encode())
             chunk: list[str] = []
@@ -213,6 +247,23 @@ class WorkspaceStore:
             yield directory, chunk, json.dumps(request).encode()
 
     async def describe_tasks(self, task_keys: Sequence[str]) -> dict[str, dict[str, Any]]:
+        return await self._describe(task_keys)
+
+    async def describe_task_resources(
+        self, task_keys: Sequence[str], *, runtime_params: Mapping[str, str] | None = None
+    ) -> dict[str, dict[str, Any]]:
+        return await self._describe(
+            task_keys,
+            options={
+                "compose_command": self.config.prepare.compose_command,
+                "compose_version": self.config.prepare.compose_version,
+                "runtime_params": {**self.config.runtime_params, **runtime_parameters(runtime_params)},
+            },
+        )
+
+    async def _describe(
+        self, task_keys: Sequence[str], *, options: dict[str, Any] | None = None
+    ) -> dict[str, dict[str, Any]]:
         if isinstance(task_keys, (str, bytes)):
             raise TypeError("task_keys must be a sequence of full task keys, not a string")
         keys = list(dict.fromkeys(source_task_key(key) for key in task_keys))
@@ -220,7 +271,10 @@ class WorkspaceStore:
         async def read_window(batches: list[tuple[str, list[str], bytes]]) -> dict[str, dict[str, Any]]:
             # Finish all in-flight operations and their cleanup before propagating
             # a failure. Never cancel a remote command whose outcome is unknown.
-            values = await asyncio.gather(*(self._describe_batch(*batch) for batch in batches), return_exceptions=True)
+            values = await asyncio.gather(
+                *(self._describe_batch(*batch, resources=options is not None) for batch in batches),
+                return_exceptions=True,
+            )
             merged: dict[str, dict[str, Any]] = {}
             for value in values:
                 if isinstance(value, BaseException):
@@ -229,13 +283,15 @@ class WorkspaceStore:
             return merged
 
         result: dict[str, dict[str, Any]] = {}
-        batches = self._metadata_batches(keys)
+        batches = self._metadata_batches(keys, options)
         while window := list(islice(batches, self.config.prepare.concurrency)):
             # Only this bounded window is scheduled/settled on failure or cancellation.
             result.update(await self._settled(partial(read_window, window)))
         return result
 
-    async def _describe_batch(self, directory: str, keys: list[str], request: bytes) -> dict[str, dict[str, Any]]:
+    async def _describe_batch(
+        self, directory: str, keys: list[str], request: bytes, *, resources: bool = False
+    ) -> dict[str, dict[str, Any]]:
         async with self.compile_slots:
             primary: BaseException | None = None
             try:
@@ -243,7 +299,11 @@ class WorkspaceStore:
                 key = f"{directory}/request.json"
                 await self.anchor.upload(key, request, mode=0o600, uid=0, gid=0, stage="prepare")
                 execution = await self.anchor.execute(
-                    (*self.config.prepare.workspace_command, "--describe-tasks", self.anchor.path(key)),
+                    (
+                        *self.config.prepare.workspace_command,
+                        "--describe-task-resources" if resources else "--describe-tasks",
+                        self.anchor.path(key),
+                    ),
                     timeout_s=self.config.prepare.workspace_timeout,
                     stage="prepare",
                 )
@@ -259,6 +319,9 @@ class WorkspaceStore:
                 if not isinstance(result, dict) or set(result) != set(keys):
                     raise ValueError("metadata compiler returned unexpected task keys")
                 for value in result.values():
+                    if resources:
+                        _validate_resource_metadata(value)
+                        continue
                     if (
                         not isinstance(value, dict)
                         or set(value) != {"instruction", "task_config"}

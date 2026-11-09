@@ -331,7 +331,10 @@ def test_batch_native_parity_dedup_basename_and_no_source_writes(
         "windows",
     ],
 )
-def test_batch_rejects_unsupported_native_trees_and_symlink_ancestors(tmp_path: Path, kind: str) -> None:
+@pytest.mark.parametrize("resources", [False, True])
+def test_batch_rejects_unsupported_native_trees_and_symlink_ancestors(
+    tmp_path: Path, kind: str, resources: bool
+) -> None:
     workspace, source = task_copy(tmp_path)
     if kind == "escape":
         (source / "outside").symlink_to(tmp_path)
@@ -363,7 +366,7 @@ def test_batch_rejects_unsupported_native_trees_and_symlink_ancestors(tmp_path: 
         (source / "tests/test.bat").write_text("exit 0")
     with pytest.raises((ValueError, OSError)):
         compiler.describe_tasks_request(
-            {"storage_root": str(tmp_path), "task_keys": [source.relative_to(tmp_path).as_posix()]}
+            {"storage_root": str(tmp_path), "task_keys": [source.relative_to(tmp_path).as_posix()]}, resources=resources
         )
     assert not (workspace / "public").exists()
     assert not (workspace / "private-tests").exists()
@@ -375,25 +378,43 @@ def test_batch_reader_revalidates_canonical_source_keys(tmp_path: Path, key: str
         compiler.describe_tasks_request({"storage_root": str(tmp_path), "task_keys": [key]})
 
 
-def batch_request(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path, str]:
+def batch_request(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resources: bool = False) -> tuple[Path, Path, str]:
     _, source = task_copy(tmp_path)
     key = source.relative_to(tmp_path).as_posix()
     workspace = tmp_path / "launches/test/metadata/unique"
     workspace.mkdir(parents=True)
     request = workspace / "request.json"
-    request.write_text(json.dumps({"storage_root": str(tmp_path), "workspace": str(workspace), "task_keys": [key]}))
-    monkeypatch.setattr(sys, "argv", ["workspace", "--describe-tasks", str(request)])
+    request.write_text(
+        json.dumps(
+            {
+                "storage_root": str(tmp_path),
+                "workspace": str(workspace),
+                "task_keys": [key],
+                "compose_command": ["docker", "compose"],
+                "compose_version": COMPOSE_VERSION,
+            }
+        )
+    )
+    monkeypatch.setattr(
+        sys, "argv", ["workspace", "--describe-task-resources" if resources else "--describe-tasks", str(request)]
+    )
     return request, workspace, key
 
 
-def test_batch_entrypoint_writes_only_bounded_metadata_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _, workspace, key = batch_request(tmp_path, monkeypatch)
+@pytest.mark.parametrize("resources", [False, True])
+def test_batch_entrypoint_writes_only_bounded_metadata_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resources: bool
+) -> None:
+    _, workspace, key = batch_request(tmp_path, monkeypatch, resources)
     compiler.main()
     output = workspace / "result.json"
     result = json.loads(output.read_bytes())
     assert set(result) == {key}
-    assert set(result[key]) == {"instruction", "task_config"}
-    assert result[key]["instruction"] == "Solve the task.\n"
+    if resources:
+        assert result[key] == {"main": {"main": {}}}  # Missing declarations are not invented.
+    else:
+        assert set(result[key]) == {"instruction", "task_config"}
+        assert result[key]["instruction"] == "Solve the task.\n"
     assert stat.S_IMODE(output.stat().st_mode) == 0o600
     assert sorted(path.name for path in workspace.iterdir()) == ["request.json", "result.json"]
 
@@ -401,17 +422,18 @@ def test_batch_entrypoint_writes_only_bounded_metadata_result(tmp_path: Path, mo
 @pytest.mark.parametrize(
     "failure", ["count", "request-bytes", "output-bytes", "later-task", "output-path", "output-symlink"]
 )
+@pytest.mark.parametrize("resources", [False, True])
 def test_batch_entrypoint_limits_and_failures_publish_no_partial_result(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str, resources: bool
 ) -> None:
-    path, workspace, key = batch_request(tmp_path, monkeypatch)
+    path, workspace, key = batch_request(tmp_path, monkeypatch, resources)
     request = json.loads(path.read_bytes())
     if failure == "count":
         request["task_keys"] = [key] * 129
     elif failure == "request-bytes":
         monkeypatch.setattr(compiler, "METADATA_REQUEST_BYTES", path.stat().st_size - 1)
     elif failure == "output-bytes":
-        monkeypatch.setattr(compiler, "METADATA_RESULT_BYTES", 50)
+        monkeypatch.setattr(compiler, "METADATA_RESULT_BYTES", 10)
     elif failure == "later-task":
         request["task_keys"].append("missing/task")
     elif failure == "output-path":
@@ -421,13 +443,219 @@ def test_batch_entrypoint_limits_and_failures_publish_no_partial_result(
         alias.symlink_to(workspace, target_is_directory=True)
         request["workspace"] = str(alias)
         path = alias / "request.json"
-        monkeypatch.setattr(sys, "argv", ["workspace", "--describe-tasks", str(path)])
+        monkeypatch.setattr(
+            sys, "argv", ["workspace", "--describe-task-resources" if resources else "--describe-tasks", str(path)]
+        )
     path.write_text(json.dumps(request))
     with pytest.raises((ValueError, OSError)):
         compiler.main()
     assert not (workspace / "result.json").exists()
     assert not (workspace / "result.tmp").exists()
     assert not (tmp_path / key / "result.json").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("compose", [False, True])
+@pytest.mark.parametrize("mode", ["shared", "separate", "bundled"])
+@pytest.mark.parametrize("image", [False, True])
+async def test_resource_reader_matches_compiled_reservations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, compose: bool, mode: str, image: bool
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from flotilla import Flotilla
+    from flotilla.compose.adapter import ComposeConfigAdapter
+    from flotilla.config import ResourceDefaults
+    from flotilla.integrations.harbor_source import task_environments
+    from flotilla.manifest import Manifest
+    from flotilla.prepared import PreparedEnvironment
+    from flotilla.testing.config import config
+
+    toml = "cpus=3\nmemory_mb=768\n"
+    if mode != "shared":
+        toml += '[verifier]\nenvironment_mode="separate"\n'
+    if mode == "bundled":
+        toml += '[verifier.environment]\ndocker_image="r.io/verifier:1"\ncpus=4\n'
+    _, source = task_copy(tmp_path, toml=toml)
+    if not image:
+        text = (source / "task.toml").read_text().replace('docker_image="r.io/main:1"\n', "")
+        (source / "task.toml").write_text(text)
+        (source / "environment/Dockerfile").write_text("FROM r.io/main:1\n")
+    if compose:
+        (source / "environment/docker-compose.yaml").write_text(
+            'services:\n  main:\n    cpus: "${CPU}"\n    mem_limit: 1Gi\n'
+            '  db:\n    image: r.io/db:1\n    cpus: "${CPU}"\n    mem_limit: 5Gi\n'
+            "    env_file: settings.env\n  other:\n    image: r.io/other:1\n"
+        )
+        (source / "environment/settings.env").write_text("X=env-file\n")
+        if mode == "separate":
+            (source / "tests/docker-compose.yaml").write_text("services:\n  main:\n    image: r.io/verifier:1\n")
+    calls: list[Path] = []
+
+    def normalize(args: list[str], cwd: Path, env: dict[str, str]) -> str:
+        # Mock only the official CLI output, not the task/native resource rules.
+        calls.append(cwd)
+        if not cwd.is_relative_to(source):
+            assert not (cwd.parent / "instruction.md").exists()
+            if mode == "shared":
+                assert not (cwd.parent / "tests").exists()
+            if cwd.name == "environment":
+                assert (cwd / "settings.env").read_text() == "X=env-file\n"
+        if args[-2:] == ["version", "--short"]:
+            return COMPOSE_VERSION
+        assert args[-4:] == ["config", "--format", "json", "--no-path-resolution"]
+        assert env["CPU"] == "2"
+        services: dict[str, Any] = {"main": {"image": "r.io/main:1"}}
+        if (cwd / "settings.env").exists():
+            services["main"].update(cpus="2", mem_limit="1Gi")
+            services["db"] = {"image": "r.io/db:1", "cpus": "2", "mem_limit": "5Gi"}
+            services["other"] = {"image": "r.io/other:1"}
+        return json.dumps({"services": services})
+
+    monkeypatch.setattr(ComposeConfigAdapter, "_run", staticmethod(normalize))
+    policy = ResourceDefaults.model_validate(
+        {
+            "default": {"cpu": "1", "memory": "2Gi"},
+            "services": {"db": {"cpu": "7", "memory": "8Gi"}},
+            "tasks": {"task": {"services": {"db": {"cpu": "9", "memory": "10Gi"}}}},
+        }
+    )
+    fleet = Flotilla(deployment=config().model_copy(update={"resources": policy}))
+    environments = task_environments(source, compose_adapter=ComposeConfigAdapter(), compose_environment={"CPU": "2"})
+    roles = ["main"] if mode == "shared" else ["main", "verifier"]
+    expected = {}
+    for role, environment in zip(roles, environments, strict=True):
+        outcome = build_task(environment, tmp_path / "built" / role, _ctx())
+        assert outcome.manifest_path is not None, outcome.reason
+        expected[role] = fleet.reservation(PreparedEnvironment(Manifest.load_json(outcome.manifest_path.read_bytes())))
+    before = source_snapshot(source)
+    calls.clear()
+    forbidden = Mock(side_effect=AssertionError("resource inspection must not build/export/copy tests"))
+    for name in (
+        "build_task",
+        "docker_context",
+        "_copy_tests",
+        "compile_request",
+        "restore_identities",
+        "sweep_journal",
+    ):
+        monkeypatch.setattr(compiler, name, forbidden)
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    if not compose:
+        monkeypatch.setattr(compiler.shutil, "copytree", forbidden)
+    key = source.relative_to(tmp_path).as_posix()
+    request = {
+        "storage_root": str(tmp_path),
+        "task_keys": [key, key],
+        "runtime_params": {"CPU": "2"},
+        "compose_command": ["docker", "compose"],
+        "compose_version": COMPOSE_VERSION,
+    }
+    raw = json.loads(compiler.describe_tasks_request(request, resources=True))
+    assert set(raw) == {key}
+    assert raw[key]["main"]["main"] == {"cpu": "3", "memory": "768Mi"}
+    if compose:
+        assert raw[key]["main"]["db"] == {"cpu": "2", "memory": "5Gi"}
+        assert calls and all(not path.is_relative_to(source) and not path.exists() for path in calls)
+    else:
+        assert calls == []  # No Compose subprocess, even for Dockerfile/separate verifier.
+    assert source_snapshot(source) == before
+    forbidden.assert_not_called()
+    manager = SimpleNamespace(workspaces=SimpleNamespace(describe_task_resources=AsyncMock(return_value=raw)))
+    monkeypatch.setattr(fleet, "start", AsyncMock())
+
+    async def call(action: Any, **kwargs: Any) -> Any:
+        return await action(manager)
+
+    monkeypatch.setattr(fleet, "_call", call)
+    assert await fleet.describe_task_resources([key], runtime_params={"CPU": "2"}) == {key: expected}
+
+
+def test_resource_private_copy_preserves_internal_relative_links(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from flotilla.compose.adapter import ComposeConfigAdapter
+
+    _, source = task_copy(tmp_path)
+    (source / "payload").write_text("linked payload")
+    (source / "environment/alias").symlink_to("../payload")
+    (source / "environment/docker-compose.yaml").write_text("services:\n  main:\n    image: r.io/main:1\n")
+    before = source_snapshot(source)
+    roots = []
+
+    def run(args: list[str], cwd: Path, env: dict[str, str]) -> str:
+        roots.append(cwd)
+        assert (cwd / "alias").is_symlink()
+        assert os.readlink(cwd / "alias") == "../payload"
+        assert (cwd / "alias").read_text() == "linked payload"
+        if args[-2:] == ["version", "--short"]:
+            return COMPOSE_VERSION
+        return json.dumps({"services": {"main": {"image": "r.io/main:1"}}})
+
+    monkeypatch.setattr(ComposeConfigAdapter, "_run", staticmethod(run))
+    key = source.relative_to(tmp_path).as_posix()
+    assert json.loads(
+        compiler.describe_tasks_request(
+            {
+                "storage_root": str(tmp_path),
+                "task_keys": [key],
+                "compose_command": ["docker", "compose"],
+                "compose_version": COMPOSE_VERSION,
+            },
+            resources=True,
+        )
+    ) == {key: {"main": {"main": {}}}}
+    assert roots and all(not path.exists() for path in roots)
+    assert source_snapshot(source) == before
+
+
+@pytest.mark.parametrize("failure", ["cli", "invalid-resource", "include", "extends", "env-escape", "copy"])
+def test_resource_compose_failure_cleans_private_tree_and_preserves_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    from flotilla.compose.adapter import ComposeConfigAdapter
+
+    _, source = task_copy(tmp_path)
+    text = "services:\n  main:\n    image: r.io/main:1\n"
+    if failure == "include":
+        text += "include: [extra.yaml]\n"
+    elif failure == "extends":
+        text += "    extends: {file: extra.yaml, service: main}\n"
+    elif failure == "env-escape":
+        text += "    env_file: ../../outside\n"
+    (source / "environment/docker-compose.yaml").write_text(text)
+    before = source_snapshot(source)
+    private: list[Path] = []
+    original_copy = compiler.shutil.copytree
+
+    def copy(src: Path, dst: Path, *args: Any, **kwargs: Any) -> Path:
+        private.append(Path(dst))
+        if failure == "copy":
+            Path(dst).mkdir()
+            raise OSError("copy failure")
+        return original_copy(src, dst, *args, **kwargs)
+
+    def run(args: list[str], cwd: Path, env: dict[str, str]) -> str:
+        if failure == "cli":
+            raise ValueError("CLI failure")
+        if args[-2:] == ["version", "--short"]:
+            return COMPOSE_VERSION
+        return json.dumps({"services": {"main": {"image": "r.io/main:1", "cpus": "bad"}}})
+
+    monkeypatch.setattr(compiler.shutil, "copytree", copy)
+    monkeypatch.setattr(ComposeConfigAdapter, "_run", staticmethod(run))
+    with pytest.raises((ValueError, OSError)):
+        compiler.describe_tasks_request(
+            {
+                "storage_root": str(tmp_path),
+                "task_keys": [source.relative_to(tmp_path).as_posix()],
+                "compose_command": ["docker", "compose"],
+                "compose_version": COMPOSE_VERSION,
+            },
+            resources=True,
+        )
+    assert private and all(not path.exists() for path in private)
+    assert source_snapshot(source) == before
 
 
 def test_restore_identities_uses_numeric_metadata_and_does_not_chmod_links(

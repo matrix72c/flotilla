@@ -1,7 +1,8 @@
 """Trusted management-image entrypoint for native Harbor tasks.
 
 Invoke with ``python -I -m flotilla.integrations.workspace /absolute/request.json``;
-add ``--describe-tasks`` before the path for read-only canonical-source metadata.
+add ``--describe-tasks`` for canonical-source instruction/config metadata, or
+``--describe-task-resources`` for capacity-only inspection without image work.
 The package and its tools must be installed in the management image. Nothing is
 imported or executed from the dataset by this reader. BuildKit executes Dockerfile
 instructions only through the explicitly configured builder.
@@ -11,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -18,19 +20,23 @@ import uuid
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 from flotilla.build.driver import build_task
 from flotilla.build.keys import entries
 from flotilla.compose.adapter import ComposeConfigAdapter
+from flotilla.compose.paths import confined
+from flotilla.compose.task import COMPOSE_FILE
 from flotilla.config import FlotillaConfig
 from flotilla.integrations.harbor_source import task_environments
-from flotilla.manifest import Manifest
+from flotilla.manifest import Manifest, Resources
 from flotilla.prepare.docker import docker_context, sweep_journal
 from flotilla.runtime.workspace import (
     METADATA_MAX_TASKS,
     METADATA_REQUEST_BYTES,
     METADATA_RESULT_BYTES,
+    runtime_parameters,
     source_task_key,
 )
 
@@ -145,8 +151,60 @@ def describe(source: Path, workspace: Path) -> dict[str, Any]:
     return result
 
 
-def describe_tasks_request(request: dict[str, Any]) -> bytes:
+def _describe_resources(source: Path, metadata: dict[str, Any], request: dict[str, Any]) -> dict[str, Any]:
+    adapter = ComposeConfigAdapter(
+        command=tuple(request["compose_command"]),
+        expected_version=request["compose_version"],
+        resources_only=True,
+    )
+
+    def inspect(path: Path) -> dict[str, Any]:
+        environments = task_environments(path, compose_adapter=adapter, compose_environment=request["runtime_params"])
+        result = {}
+        for role, environment in zip(metadata["definitions"], environments, strict=True):
+            rejected = [
+                finding.reason
+                for finding in (*environment.findings, *environment.project.findings)
+                if finding.kind == "reject"
+            ]
+            if rejected:
+                raise ValueError(f"{source.name}/{role}: {'; '.join(rejected[:3])}")
+            # Same declared resources as build_task, before any image planning,
+            # registry access, build, export or workload creation.
+            result[role] = {
+                name: Resources.model_validate(service.resources).model_dump(exclude_none=True)
+                for name, service in environment.project.services.items()
+            }
+        return result
+
+    if not any(
+        confined(source / definition["directory"], COMPOSE_FILE).is_file()
+        for definition in metadata["definitions"].values()
+    ):
+        return inspect(source)
+    # Compose reads are confined to each environment by the existing adapter
+    # gate (include/extends remain unsupported). Keep complete role contexts,
+    # including .env/env_file and build/bind paths; omit unrelated hidden tests
+    # and payloads only when there are no links whose targets we might remove.
+    contexts = {Path(definition["directory"]).parts[0] for definition in metadata["definitions"].values()}
+    keep = contexts | {"task.toml"}
+    linked = any(path.is_symlink() for path in source.rglob("*"))
+
+    def ignore(directory: str, names: list[str]) -> set[str]:
+        return set(names) - keep if not linked and Path(directory) == source else set()
+
+    # Compose and its overlays must never run in the immutable native tree.
+    with TemporaryDirectory(prefix="flotilla-resources-") as temporary:
+        private = Path(temporary) / source.name
+        shutil.copytree(source, private, symlinks=True, ignore=ignore)
+        validate_tree(private)
+        return inspect(private)
+
+
+def describe_tasks_request(request: dict[str, Any], *, resources: bool = False) -> bytes:
     """Read immutable canonical sources; publish nothing until the whole batch succeeds."""
+    if resources:
+        request = {**request, "runtime_params": runtime_parameters(request.get("runtime_params"))}
     keys = request["task_keys"]
     if not isinstance(keys, list) or not 1 <= len(keys) <= METADATA_MAX_TASKS:
         raise ValueError("metadata request must contain 1 to 128 task keys")
@@ -164,7 +222,11 @@ def describe_tasks_request(request: dict[str, Any]) -> bytes:
             if source.is_symlink() or not source.is_dir():
                 raise ValueError("task source and its ancestors must be real directories, not symlinks")
         metadata = _describe_source(source)
-        value = {"instruction": metadata["instruction"], "task_config": metadata["task_config"]}
+        value = (
+            _describe_resources(source, metadata, request)
+            if resources
+            else {"instruction": metadata["instruction"], "task_config": metadata["task_config"]}
+        )
         entry = json.dumps(key).encode() + b":" + json.dumps(value).encode()
         size += len(entry) + (1 if parts else 0)
         if size > METADATA_RESULT_BYTES:
@@ -259,10 +321,11 @@ def compile_request(request: dict[str, Any]) -> dict[str, Any]:
 
 
 def main() -> None:
-    batch = len(sys.argv) == 3 and sys.argv[1] == "--describe-tasks"
+    batch = len(sys.argv) == 3 and sys.argv[1] in {"--describe-tasks", "--describe-task-resources"}
     if not batch and len(sys.argv) != 2:
         raise SystemExit(
-            "usage: python -I -m flotilla.integrations.workspace [--describe-tasks] /absolute/request.json"
+            "usage: python -I -m flotilla.integrations.workspace "
+            "[--describe-tasks|--describe-task-resources] /absolute/request.json"
         )
     path = Path(sys.argv[-1])
     if not path.is_absolute():
@@ -289,7 +352,7 @@ def main() -> None:
             directory /= part
             if directory.is_symlink() or not directory.is_dir():
                 raise ValueError("metadata output ancestors must be real directories")
-        encoded = describe_tasks_request(request)
+        encoded = describe_tasks_request(request, resources=sys.argv[1] == "--describe-task-resources")
     else:
         request = json.loads(path.read_bytes())
         encoded = json.dumps(compile_request(request)).encode()

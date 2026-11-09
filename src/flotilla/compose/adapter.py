@@ -103,6 +103,9 @@ class ComposeConfigAdapter:
 
     command: tuple[str, ...] = ("docker", "compose")
     expected_version: str = COMPOSE_VERSION
+    # Capacity inspection needs no CLI for an empty Compose input: the shared
+    # Harbor base below has no resource declarations or interpolation to resolve.
+    resources_only: bool = False
 
     def __post_init__(self) -> None:
         if not self.command or any(not part for part in self.command):
@@ -127,14 +130,18 @@ class ComposeConfigAdapter:
         # PATH locates the configured executable/plugin; no task interpolation values
         # are copied from os.environ. All other values are caller-owned.
         env = {"PATH": os.defpath, **environment, "CONTEXT_DIR": str(root)}
-        version = self._run([*self.command, "version", "--short"], root, env).strip().removeprefix("v")
-        if version != self.expected_version:
-            raise ValueError(f"Compose {self.expected_version} required; found {version!r}")
         base: dict[str, Any] = {"command": list(KEEPALIVE)}
         if main_image is not None:
             base["image"] = main_image
         elif main_build:
             base["build"] = {"context": "."}
+        if self.resources_only and not selected:
+            # load_environment still applies native task resource overrides. Do
+            # not use this shortcut for even an empty, but present, Compose file.
+            return normalize({"services": {MAIN: base}}, {}, resolved=True)
+        version = self._run([*self.command, "version", "--short"], root, env).strip().removeprefix("v")
+        if version != self.expected_version:
+            raise ValueError(f"Compose {self.expected_version} required; found {version!r}")
         # Compose owns merging, interpolation, env_file parsing and short forms.
         with TemporaryDirectory(prefix="flotilla-compose-") as temporary:
             defaults = Path(temporary) / "defaults.yaml"

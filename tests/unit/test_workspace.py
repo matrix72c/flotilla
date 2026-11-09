@@ -150,7 +150,14 @@ def metadata_store(concurrency: int = 4) -> tuple[WorkspaceStore, Mock, list[dic
     async def download(key: str, **kwargs: Any) -> bytes:
         request = next(request for request in requests if request["workspace"] == anchor.path(key).rsplit("/", 1)[0])
         return json.dumps(
-            {key: {"instruction": key, "task_config": {"metadata": {"key": key}}} for key in request["task_keys"]}
+            {
+                key: (
+                    {"main": {"main": {"cpu": "2", "memory": "3Gi"}}}
+                    if "compose_command" in request
+                    else {"instruction": key, "task_config": {"metadata": {"key": key}}}
+                )
+                for key in request["task_keys"]
+            }
         ).encode()
 
     anchor.upload.side_effect = upload
@@ -198,6 +205,7 @@ async def test_metadata_chunks_bound_encoded_bytes(monkeypatch: pytest.MonkeyPat
 @pytest.mark.parametrize(
     "key", ["", "/tasks/a", "a/../b", "a/./b", "a//b", "a\\b", "a\nb", "a\x7fb", "share/t", "launches/L/t", None]
 )
+@pytest.mark.usefixtures("metadata_mode")
 async def test_metadata_rejects_noncanonical_and_runtime_keys_before_io(key: Any) -> None:
     workspaces, anchor, _ = metadata_store()
     with pytest.raises(ValueError):
@@ -206,6 +214,7 @@ async def test_metadata_rejects_noncanonical_and_runtime_keys_before_io(key: Any
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("metadata_mode")
 async def test_metadata_empty_input_and_string_misuse() -> None:
     workspaces, anchor, _ = metadata_store()
     assert await workspaces.describe_tasks([]) == {}
@@ -238,6 +247,7 @@ async def test_metadata_validates_exact_result_keys_and_shapes(result: Any) -> N
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", ["exit", "timeout", "transport", "size", "download-size", "malformed"])
+@pytest.mark.usefixtures("metadata_mode")
 async def test_metadata_failures_never_return_stale_or_partial_results(
     failure: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -265,6 +275,7 @@ async def test_metadata_failures_never_return_stale_or_partial_results(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("primary_failure", [False, True])
+@pytest.mark.usefixtures("metadata_mode")
 async def test_metadata_cleanup_failure_is_explicit_and_launch_owned(primary_failure: bool) -> None:
     workspaces, anchor, _ = metadata_store()
     anchor.remove.side_effect = OSError("cleanup failed")
@@ -283,6 +294,7 @@ async def test_metadata_cleanup_failure_is_explicit_and_launch_owned(primary_fai
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cleanup_failure", [False, True])
 @pytest.mark.parametrize("concurrency", [1, 2, 4])
+@pytest.mark.usefixtures("metadata_mode")
 async def test_metadata_cancellation_settles_current_window_and_cleanup_only(
     cleanup_failure: bool, concurrency: int
 ) -> None:
@@ -317,6 +329,7 @@ async def test_metadata_cancellation_settles_current_window_and_cleanup_only(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("metadata_mode")
 async def test_metadata_schedules_only_a_bounded_window(monkeypatch: pytest.MonkeyPatch) -> None:
     from flotilla.runtime import workspace
 
@@ -325,8 +338,8 @@ async def test_metadata_schedules_only_a_bounded_window(monkeypatch: pytest.Monk
     original_batches = workspaces._metadata_batches
     generated: list[str] = []
 
-    def batches(keys: list[str]) -> Any:
-        for batch in original_batches(keys):
+    def batches(keys: list[str], options: dict[str, Any] | None = None) -> Any:
+        for batch in original_batches(keys, options):
             generated.append(batch[0])
             yield batch
 
@@ -357,6 +370,7 @@ async def test_metadata_schedules_only_a_bounded_window(monkeypatch: pytest.Monk
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("metadata_mode")
 async def test_metadata_failure_settles_peers_without_scheduling_more(monkeypatch: pytest.MonkeyPatch) -> None:
     from flotilla.runtime import workspace
 
@@ -388,6 +402,7 @@ async def test_metadata_failure_settles_peers_without_scheduling_more(monkeypatc
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("metadata_mode")
 async def test_metadata_reuses_compile_slots_and_shutdown_settlement() -> None:
     workspaces, anchor, _ = metadata_store()
     workspaces.compile_slots = asyncio.Semaphore(1)
@@ -431,6 +446,122 @@ async def test_public_describe_tasks_starts_and_uses_settled_worker_call(monkeyp
     assert await fleet.describe_tasks(["dataset/t"]) == {"dataset/t": {}}
     start.assert_awaited_once()
     manager.workspaces.describe_tasks.assert_awaited_once_with(["dataset/t"])
+
+
+@pytest.fixture(params=["instructions", "resources"])
+def metadata_mode(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    if request.param == "resources":
+        monkeypatch.setattr(WorkspaceStore, "describe_tasks", WorkspaceStore.describe_task_resources)
+
+
+@pytest.mark.asyncio
+async def test_resource_batches_and_runtime_params(monkeypatch: pytest.MonkeyPatch) -> None:
+    from flotilla.runtime import workspace
+
+    workspaces, anchor, requests = metadata_store()
+    workspaces.config = workspaces.config.model_copy(update={"runtime_params": {"A": "default", "B": "base"}})
+    params = {"A": "request"}
+    keys = [f"dataset/{i}/same" for i in range(260)]
+    result = await workspaces.describe_task_resources([*keys, keys[0]], runtime_params=params)
+    assert list(result) == keys
+    assert [len(r["task_keys"]) for r in requests] == [128, 128, 4]
+    assert all(r["runtime_params"] == {"A": "request", "B": "base"} for r in requests)
+    assert params == {"A": "request"}
+    assert all(call.args[0][-2] == "--describe-task-resources" for call in anchor.execute.await_args_list)
+    anchor.copy_source_tree.assert_not_awaited()
+    assert anchor.remove.await_count == 3
+    monkeypatch.setattr(workspace, "METADATA_REQUEST_BYTES", 600)
+    before = len(requests)
+    with pytest.raises(ValueError, match="request byte limit"):
+        await workspaces.describe_task_resources(["dataset/t"], runtime_params={"A": "x" * 600})
+    assert len(requests) == before
+    # Interpolation settings count toward every batch's byte budget.
+    requests.clear()
+    anchor.upload.reset_mock()
+    keys = ["dataset/" + str(i) + 'é"' * 20 for i in range(3)]
+    assert list(await workspaces.describe_task_resources(keys)) == keys
+    assert all(len(call.args[1]) <= 600 for call in anchor.upload.await_args_list)
+    assert len(requests) > 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("params", [[], "A=B", {"A": 1}, {1: "B"}])
+async def test_resource_invalid_runtime_params_before_io(params: Any) -> None:
+    workspaces, anchor, _ = metadata_store()
+    with pytest.raises(TypeError, match="runtime_params"):
+        await workspaces.describe_task_resources(["dataset/t"], runtime_params=params)
+    anchor.mkdir.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "value",
+    [
+        {},
+        {"verifier": {}},
+        {"main": {}, "extra": {}},
+        {"main": {}},
+        {"main": {"main": []}},
+        {"main": {"main": {"gpu": "1"}}},
+        {"main": {"main": {"cpu": "bad"}}},
+        {"main": {"main": {"memory": "-1Gi"}}},
+        {"main": {"main": {"cpu": 1}}},
+    ],
+)
+async def test_resource_result_schema(value: Any) -> None:
+    workspaces, anchor, _ = metadata_store()
+    anchor.download.side_effect = None
+    anchor.download.return_value = json.dumps({"dataset/t": value}).encode()
+    with pytest.raises(ValueError):
+        await workspaces.describe_task_resources(["dataset/t"])
+    anchor.remove.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_public_resources_effective_policy_and_settled_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    from flotilla import Flotilla
+    from flotilla.config import ResourceDefaults
+    from flotilla.runtime.types import ENVIRONMENT_RESERVATION_COPIES
+
+    cfg = config().model_copy(
+        update={
+            "resources": ResourceDefaults.model_validate(
+                {
+                    "default": {"cpu": "1", "memory": "2Gi"},
+                    "services": {"db": {"cpu": "3", "memory": "4Gi"}},
+                    "tasks": {"t": {"services": {"main": {"cpu": "5", "memory": "6Gi"}}}},
+                }
+            )
+        }
+    )
+    fleet = Flotilla(deployment=cfg)
+    start = AsyncMock()
+    monkeypatch.setattr(fleet, "start", start)
+    raw = {
+        "main": {"main": {"cpu": "9"}, "db": {}, "other": {"memory": "7Gi"}},
+        "verifier": {"main": {"memory": "8Gi"}},
+    }
+    describe = AsyncMock(return_value={"dataset/t": raw, "dataset/other": raw})
+    manager = SimpleNamespace(workspaces=SimpleNamespace(describe_task_resources=describe))
+
+    async def call(action: Any, **kwargs: Any) -> Any:
+        assert kwargs == {"settle_cancel": True}
+        return await action(manager)
+
+    monkeypatch.setattr(fleet, "_call", AsyncMock(side_effect=call))
+    result = await fleet.describe_task_resources(["dataset/t", "dataset/other"], runtime_params={"X": "value"})
+    start.assert_awaited_once()
+    describe.assert_awaited_once_with(["dataset/t", "dataset/other"], runtime_params={"X": "value"})
+    main = result["dataset/t"]["main"]
+    assert main.resources == {
+        "main": {"cpu": "5", "memory": "6Gi"},
+        "db": {"cpu": "3", "memory": "4Gi"},
+        "other": {"cpu": "1", "memory": "7Gi"},
+    }
+    assert result["dataset/other"]["main"].resources["main"] == {"cpu": "9", "memory": "2Gi"}
+    assert result["dataset/t"]["verifier"].resources == {"main": {"cpu": "5", "memory": "6Gi"}}
+    assert main.copies == ENVIRONMENT_RESERVATION_COPIES
+    assert main.instances == len(main.resources) * ENVIRONMENT_RESERVATION_COPIES
 
 
 def test_workspace_mounts_do_not_relax_external_mount_guarantees() -> None:
