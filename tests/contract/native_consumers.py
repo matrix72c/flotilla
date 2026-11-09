@@ -283,6 +283,10 @@ async def run(deployment: Path, image: str, runtime_file: Path, output: Path) ->
         await assert_no_leaks("sandbox-runner", sandbox)
     except Exception as exc:
         result["error_type"] = type(exc).__name__
+        result["error_stage"] = getattr(exc, "stage", None)
+        result["error_category"] = getattr(exc, "category", None)
+        # Keep native platform failure reasons in the private log, not stdout.
+        (output / "error.private.txt").write_text(str(exc) + "\n")
         result["error_frames"] = [
             {"file": Path(frame.filename).name, "line": frame.lineno, "function": frame.name}
             for frame in traceback.extract_tb(exc.__traceback__)
