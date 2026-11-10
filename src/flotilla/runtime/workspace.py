@@ -12,8 +12,8 @@ from functools import partial
 from itertools import islice
 from typing import TYPE_CHECKING, Any
 
-from flotilla.compose.resources import cpu, memory
 from flotilla.core.anchor import Anchor
+from flotilla.resources import cpu, memory
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Iterator, Sequence
@@ -97,6 +97,27 @@ class WorkspaceStore:
         self.jobs: set[asyncio.Task[Any]] = set()
         self.compile_slots = asyncio.Semaphore(config.prepare.concurrency)
         self.closing = False
+        # Registered only after the installed native helper verifies consumed files.
+        self.native_environments: dict[str, str] = {}
+        self.native_assets: dict[tuple[str, str], set[str]] = {}
+        self.native_tasks: set[tuple[str, str, str]] = set()
+        self.native_lock = asyncio.Lock()
+
+    async def create_empty(self, task_key: str) -> WorkspaceInfo:
+        """Create private state without copying or compiling a source task."""
+        wid = uuid.uuid4().hex
+        key = f"launches/{self.anchor.launch_id}/attempts/{wid}"
+        info = WorkspaceInfo(wid, key, task_key, task_key.rsplit("/", 1)[-1], key)
+        self.records[wid] = _Owned(info)
+        try:
+            await self._settled(lambda: self.anchor.mkdir(key, stage="prepare"))
+            return info
+        except BaseException as primary:
+            try:
+                await self.remove(wid)
+            except BaseException as cleanup:
+                primary.add_note(f"workspace cleanup also failed: {cleanup!r}")
+            raise
 
     async def _settled[T](self, action: Callable[[], Coroutine[Any, Any, T]]) -> T:
         if self.closing:

@@ -12,14 +12,12 @@ import tomllib
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from flotilla.backends import BUILTIN, Backend, BackendSettings, load_backend
-from flotilla.build.images import BuildSettings
 from flotilla.capabilities import SECURITY_FIELDS, CapabilityReport, ExternalTarget, ProbeSettings
-from flotilla.compose.resources import cpu, memory
 from flotilla.core.anchor import AnchorSettings
 from flotilla.core.reaper import ReaperSettings
 from flotilla.core.runtime import MonitorSettings
@@ -37,6 +35,11 @@ from flotilla.platform.base import (
 from flotilla.platform.opensandbox import ExecdSettings, NetworkSettings, StorageSettings
 from flotilla.platform.opensandbox import build as build_opensandbox
 from flotilla.platform.opensandbox.filesystem import FilesystemProtocol, FilesystemSettings
+from flotilla.resources import cpu, memory
+
+if TYPE_CHECKING:
+    from flotilla.build.images import BuildSettings
+    from flotilla.native import ReleaseBindings
 
 #: Anchor renewal retry interval (`AnchorSettings.retry_interval_s`); the renew interval cannot be shorter.
 ANCHOR_RETRY_S = AnchorSettings(image="x").retry_interval_s
@@ -103,13 +106,19 @@ class Build(_Model):
 
     pullable_registries: tuple[str, ...] = ()
     mirror_images: bool = False
+    oci_mediatypes: bool = False
+    attestations: bool = False
     target: str = ""
     image_replacements: dict[str, str] = {}
 
     def settings(self) -> BuildSettings:
+        from flotilla.build.images import BuildSettings
+
         return BuildSettings(
             pullable_registries=self.pullable_registries,
             mirror_images=self.mirror_images,
+            oci_mediatypes=self.oci_mediatypes,
+            attestations=self.attestations,
             target=self.target,
             image_replacements=self.image_replacements,
         )
@@ -385,11 +394,21 @@ class Probe(_Model):
         return value
 
 
+class TaskRelease(_Model):
+    """Deployment locations, not immutable task identity; no I/O at load time."""
+
+    local_root: Path
+    platform_root: str = Field(min_length=1)
+
+
 class FlotillaConfig(_Model):
     backend: str = BUILTIN
     opensandbox: OpenSandbox | None = None  # built-in backend table
     backends: dict[str, dict[str, Any]] = {}  # third-party backend tables, validated by the selected backend
     storage: Storage
+    task_releases: dict[str, TaskRelease] = Field(default_factory=dict)
+    # Opaque consumer namespace: validated by Voyager, never interpreted by Flotilla.
+    voyager: dict[str, Any] = Field(default_factory=dict)
     build: Build = Build()
     prepare: Prepare = Prepare()
     probe: Probe = Probe()
@@ -481,7 +500,24 @@ class FlotillaConfig(_Model):
         data = self.model_dump(mode="json", exclude={"base_dir"})
         table = data["opensandbox"] if self.backend == BUILTIN else data["backends"][self.backend]
         table["capabilities"] = str(self.capabilities_path().resolve())
+        for name, binding in self.task_releases.items():
+            root = binding.local_root
+            if not root.is_absolute() and self.base_dir is not None:
+                root = self.base_dir / root
+            data["task_releases"][name]["local_root"] = str(root.absolute())
         return data
+
+    def release_bindings(self) -> ReleaseBindings:
+        """Open releases only for consume/train, not probe/select/prepare."""
+        from flotilla.native import ReleaseBinding, ReleaseBindings
+
+        bindings = {}
+        for name, binding in self.task_releases.items():
+            root = binding.local_root
+            if not root.is_absolute() and self.base_dir is not None:
+                root = self.base_dir / root
+            bindings[name] = ReleaseBinding(local_root=root, platform_root=binding.platform_root)
+        return ReleaseBindings(bindings, storage=self.storage.settings())
 
     def capabilities_path(self) -> Path:
         path = Path(self.backend_settings.capabilities)
@@ -535,6 +571,7 @@ class FlotillaConfig(_Model):
             # Workspace-only selection is not measured by task/probe capability checks.
             settings.pop("management_extensions", None)
         data = {
+            "protocol": "native-task-v1-missing-mount-targets",
             "backend": self.backend,
             "settings": settings,
             "storage": self.storage.model_dump(mode="json"),

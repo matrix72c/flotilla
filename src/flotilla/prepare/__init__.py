@@ -1,4 +1,4 @@
-"""Optional platform-side cache warmup; never exports a task dataset."""
+"""Public host selection/preparation API and explicitly named legacy warmup."""
 
 from __future__ import annotations
 
@@ -7,12 +7,14 @@ from pathlib import Path
 from typing import Any
 
 from flotilla.config import FlotillaConfig
+from flotilla.integrations.native_import import SelectedTask
 from flotilla.platform.base import FlotillaError
+from flotilla.prepare.release import PreparationError, PrepareResult, SelectionResult, prepare, select
 
-__all__ = ["prepare"]
+__all__ = ["PreparationError", "PrepareResult", "SelectedTask", "SelectionResult", "legacy_warmup", "prepare", "select"]
 
 
-async def prepare(tasks: Sequence[str], *, deployment: str | Path | FlotillaConfig) -> list[dict[str, Any]]:
+async def legacy_warmup(tasks: Sequence[str], *, deployment: str | Path | FlotillaConfig) -> list[dict[str, Any]]:
     """Warm original Harbor task keys in independent temporary workspaces.
 
     Preserve input order and repetitions. Returned records are diagnostics, not

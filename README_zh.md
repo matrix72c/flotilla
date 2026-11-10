@@ -6,142 +6,103 @@
 
 [English](README.md)
 
-**把 Docker Compose 任务环境跑在沙盒平台上：每个服务一个沙盒，可同时运行成千上万个环境。**
+**一次准备可搬迁的多服务任务，在沙盒平台反复执行隔离的 attempt。**
 
-智能体评测和强化学习的任务通常是一个 Compose 项目：一个智能体容器，加上数据库、Web 应用或带漏洞的服务。Docker Compose 只能在单机上运行它们；沙盒平台可以横向扩展，却只运行单个容器。Flotilla 读取 Compose 项目，为每个服务创建一个沙盒，按显式的网络策略把它们连起来，用完后把所有资源删除干净。
+Flotilla 拥有评测和 RL 消费方共用的原生任务协议。可选 Harbor importer 在 CPU 准备主机上解析 Compose、固定镜像、提取静态文件和卷 seed。用户将生成的不可变任务包发布到平台存储。执行时每个服务对应一个沙盒，按显式网络策略连接，并在结束后清理私有状态；不再次解析 Harbor/Compose、构建镜像或从镜像导出 seed。
 
-```mermaid
-flowchart LR
-    subgraph task["task/environment/docker-compose.yaml"]
-        m[main]
-        c[cache]
-    end
-    task --> F["Flotilla<br/>构建 · 发布 · 规划网络"]
-    F --> P
-    subgraph P["沙盒平台"]
-        direction LR
-        sm["沙盒：main"] <--> sc["沙盒：cache"]
-    end
-```
+## 开始使用
 
-## 示例
+支持 **Linux x86_64 + Python 3.12**。发行包、导入名和 CLI 统一为 `flotilla`。从本仓库的固定 commit 或对应 wheel 安装，**不要直接运行 `pip install flotilla`**：公共 PyPI 同名包属于其他项目。迁移时使用干净环境，不与拥有同名 Python 模块的 `flotilla-compose` 混装。
 
-一个任务是一个目录，包含 `task.toml` 和 `environment/` 目录，后者里有 Dockerfile、Compose 文件或两者都有：
+主机侧 Harbor 导入需要 `harbor` extra、固定版本的官方 Compose 工具及镜像准备工具。原生执行和 Anchor 不需要 Harbor、Compose、Docker builder 或 GPU 栈。安装后的 `flotilla anchor build` 使用包内资源构建 Anchor；必须提供固定 digest 的 Python 基础镜像，显式 `--push` 才发布。
 
-```text
-task/
-  instruction.md
-  tests/test.sh            # required Harbor verifier script
-  task.toml               # Harbor 任务配置
-  environment/
-    docker-compose.yaml
-```
-
-```yaml
-services:
-  main:
-    image: alpine:3.20
-    depends_on:
-      cache:
-        condition: service_healthy
-  cache:
-    image: redis:7-alpine
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 2s
-      retries: 15
-```
-
-将完整原始 Harbor 任务（含 `instruction.md`、`task.toml`、环境和测试目录）放到平台共享存储的 `datasets/demo/task`。以下低层 attempt API 只需相对此存储根的 `task_key`；原生 Harbor CLI 的 source 入口还需对应的本地原始任务目录来读取元数据，不会把该目录上传到沙盒。可选预热输出的是诊断，不是训练输入：
+## 四阶段流程
 
 ```sh
-flotilla prepare datasets/demo/task --deployment deployment.toml --out diagnostics.json
+flotilla probe --deployment deployment.toml --env sandbox.env
+flotilla select --host-root ./tasks --deployment deployment.toml \
+  --out selected.jsonl --report selection-report.json
+flotilla prepare selected.jsonl --deployment deployment.toml \
+  --out ./release --report prepare-report.json \
+  --image-repo registry.example.org/team/tasks
 ```
+
+1. **probe** 测量平台能力、安全属性与清理结果。不能以选择某个文件系统协议代替实测。
+2. **select** 只读取和归一化主机输入，不创建沙盒、不构建、不分词、不切分训练/评测集。
+3. **prepare** 固化原始应用身份、固定镜像和静态资产。需要时构建并发布最小 `FROM <digest>` / `USER 0:0` 适配镜像，但保留原应用 UID/GID、环境、命令和健康检查。tmpfs 与只读根文件系统仍是真实运行时能力，不因缺少空目录无条件派生镜像。
+4. 用户用现有存储工具发布完整任务包，配置显式路径绑定，再由 Harbor、Voyager 或 Python API **消费**。Flotilla 不内置任务包上传工具链。
+
+```toml
+[task_releases.example]
+local_root = "./release"
+platform_root = "/shared/releases/example"
+```
+
+本地相对路径相对 deployment 文件解析。平台路径受配置的 host/PVC 存储根限制，不猜测或随意剥离前缀。凭据保存在包外，运行时显式注入；报告、resume 目录不属于 release。
+
+```text
+release/
+  manifest.json
+  dataset.jsonl
+  tasks/<variant>/task.json
+  tasks/<variant>/instruction.md
+  assets/<content-digest>/...
+```
+
+`dataset.jsonl` 每行保留 release/task 完整身份、annotations 和非秘密参数，顺序与重复不丢失。过滤或重排选择行不改变不可变任务身份。缺少文件、平台上传不完整或摘要不一致时显式失败，不回退到原始 Harbor 目录或 builder。
+
+## Python 示例
 
 ```python
 import asyncio
 
 from flotilla import Flotilla, OpenOptions
-from flotilla.integrations.harbor_attempt import HarborAttempt
+from flotilla.config import FlotillaConfig
+from flotilla.native import NativeAttempt
 
 
 async def main():
-    async with Flotilla(deployment="deployment.toml") as fleet:
-        attempt = await HarborAttempt.create(fleet, "datasets/demo/task")
-        try:
+    config = FlotillaConfig.load("deployment.toml")
+    bindings = config.release_bindings()
+    row = bindings.read_dataset("release/dataset.jsonl")[0]
+    async with Flotilla(deployment=config) as fleet:
+        async with await NativeAttempt.create(fleet, bindings.resolve(row)) as attempt:
             env = await attempt.open("main", OpenOptions(startup_timeout=600, lifetime=300))
-            pong = await env.service("cache").exec(["redis-cli", "ping"], timeout=30)
-            print(pong.stdout.decode().strip())
-        finally:
-            await attempt.close()
+            result = await env.service("main").exec(["id"], timeout=30)
+            print(result.stdout.decode())
+            verification = await attempt.verify()
+            print(verification)
     assert fleet.cleanup_report is not None and fleet.cleanup_report.clean
 
 
 asyncio.run(main())
 ```
 
-`HarborAttempt` 在平台侧创建独立工作区，读取原任务、解析 Compose 并构建，再打开角色环境；关闭时回收角色和工作区。隐藏测试只在验证阶段提供。原生 **`harbor run --config harbor-job.yaml`** 通过显式 `FlotillaTaskSource`、`NativeFlotillaRuntime` 和 `NativeFlotillaEnvironment` 接入：本地 metadata 映射到平台原始任务 key，运行、隐藏测试及产物交接仍在平台。完整 YAML 与 patched Harbor 接口要求见 [Harbor 快速上手](docs/Harbor_Quick_Start.md#native-harbor-run)。不使用 prepared 数据集或持久 metadata cache。
+隐藏测试只在验证阶段提供；独立 verifier 与显式产物交接由同一原生生命周期处理。基础设施与清理失败是错误，不是任务分数。reward 解释由消费方负责。
 
-## 特性
+## 特性与文档
 
-- **Compose 语义，提前校验。** 支持带健康条件的 `depends_on`、健康检查、多网络和内部网络、别名、命名卷、绑定挂载、`env_file`、`.env` 变量替换、资源限制和 `user`。每个键都会被归类为支持、等价近似或拒绝；只要有一个键被拒绝，任务就会在创建任何资源之前失败，并给出字段路径。`flotilla inspect` 可以在本地查看结果。详见 [Compose 支持](docs/Compose_Support.md)。
-- **显式隔离。** 网络策略由 Compose 网络和部署的出站策略（禁止、白名单或全部放行）编译而来，任务也可以完全关闭外网。平台无法证明的安全属性，必须在部署配置中按名称显式接受。
-- **确认式清理。** 每个沙盒和目录都带有归属标签。创建请求的响应丢失时会自动对账；只有确认删除后才释放配额；进程崩溃遗留的资源可以用 `flotilla gc` 回收。
-- **绝不静默重放。** 命令永远不会被发送两次。`timed_out=True` 表示远端进程已确认停止；无法确认时会抛出 `ExecOutcomeUnknown`，该环境随即作废。
-- **面向大规模并发。** 一个客户端统一管理它打开的所有环境的准入、创建与执行限速、沙盒续期，以及按服务的资源默认值。
-- **可插拔后端。** 内置 OpenSandbox 后端；其他平台可以通过 Python entry point 接入，见[编写后端](docs/Writing_a_Backend.md)。
+- **提前检查 Compose 语义**：[支持范围](docs/Compose_Support.md)，不重新实现完整 Compose。
+- **显式隔离**：任务网络和部署出站策略共同约束通信；未被证明的安全属性须显式接受。
+- **确认式清理**：创建响应丢失时对账，确认删除后才释放配额；`flotilla gc` 处理遗留资源。
+- **不静默重放命令**：不能确认远端进程停止时报告 `ExecOutcomeUnknown`。
+- **统一并发管理**：复用现有准入、限流、资源、网络和卷调度，不另造调度器。
+- **可插拔后端**：内置 OpenSandbox，其他平台通过 entry point 接入。
 
-## 开始使用
+推荐先读 [原生任务协议与工作流](docs/Native_Tasks.md)。其他参考：
 
-Flotilla 运行在 **Linux x86_64 + Python 3.12** 上。平台管理镜像还需预装本版本 Flotilla 的 `harbor` extra、固定版本 Docker Compose（默认 2.39.4）和构建工具，并显式配置构建端点网络及凭据挂载；不会自动安装工具、启动 DinD 或开放外网。当前重设计仅完成离线验证，尚无真实平台验收或兼容发布镜像，不能直接沿用旧 anchor 镜像。
+- [运行时 API](docs/Runtime_API.md)
+- [配置参考](docs/Configuration.md)、[部署指南](docs/Deployment.md)
+- [平台要求](docs/Platform_Requirements.md)、[网络验证](docs/Network_Validation.md)
+- [OpenSandbox](docs/backends/opensandbox.md)
+- [编写后端](docs/Writing_a_Backend.md)
 
-```sh
-git clone https://github.com/matrix72c/flotilla.git
-cd flotilla
-python -m pip install .            # 或：python -m pip install '.[harbor]'
-```
+旧 task-key/`env`/`task_dir` 行需要重新 select/prepare；旧 `prepare` 预热行为只通过明确的 `legacy_warmup` 库接口保留。旧作业继续使用原 commit、镜像和快照，不机械改写历史名称。离线测试、安装包验证、真实平台验收与 GPU 训练分别记录，不能互相替代。
 
-发行包名为 `flotilla-compose`，导入名和命令行工具名为 `flotilla`。
+## 状态与贡献
 
-然后按你的情况选一条路径（文档为英文）：
-
-| 你手上有 | 从这里开始 |
-|---|---|
-| 一台装了 Docker 的 Linux 机器，想先试试 | [本机快速上手](docs/Local_Quick_Start.md)：在一台机器上运行 OpenSandbox 和 Flotilla |
-| 沙盒平台运维方提供的 `deployment.toml` | [快速上手](docs/Quick_Start.md)：编写任务并从 Python 运行 |
-| Terminal-Bench 等 Harbor 任务 | [Harbor 快速上手](docs/Harbor_Quick_Start.md) |
-| 需要为团队搭建一个沙盒平台 | [部署指南](docs/Deployment.md) |
-
-## 文档
-
-**使用 Flotilla**
-
-- [快速上手](docs/Quick_Start.md)：编写一个多服务任务并运行。
-- [运行时 API](docs/Runtime_API.md)：命令执行、文件、后台进程、超时、取消和错误。
-- [Compose 支持](docs/Compose_Support.md)：哪些 Compose 键被支持、近似处理或拒绝。
-- [Harbor 快速上手](docs/Harbor_Quick_Start.md)：在 Flotilla 上运行 Harbor 评测。
-
-**运维部署**
-
-- [部署指南](docs/Deployment.md)：一次性准备镜像、share release 和能力探测。
-- [配置参考](docs/Configuration.md)：单一 `deployment.toml` 与生成的能力报告。
-- [平台要求](docs/Platform_Requirements.md)与[网络验证](docs/Network_Validation.md)：部署必须逐项启用哪些功能，以及如何逐项验证。
-- [OpenSandbox 后端](docs/backends/opensandbox.md)，包括[只读根文件系统与 tmpfs](docs/Readonly_Rootfs_and_Tmpfs.md)。
-
-**扩展 Flotilla**
-
-- [集成指南](docs/Integration_Guide.md)：在评测框架或强化学习框架中使用 Flotilla。
-- [编写后端](docs/Writing_a_Backend.md)：支持新的沙盒平台。
-- [架构](docs/Architecture.md)：内部实现与术语。
-
-## 项目状态
-
-Flotilla 目前是 alpha 版本。支持的目标环境为 Linux x86_64、Python 3.12、OpenSandbox 的 `current` 和 `legacy` 两种 execd 协议，可选的原生 Harbor 适配器要求提供 source/runtime 接口的兼容 patched Harbor；原版 Harbor 0.24.0 不具备这些接口。1.0 之前，次版本之间的 API 和配置可能发生变化，详见[变更日志](CHANGELOG.md)。
-
-## 参与贡献
-
-欢迎贡献，请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。安全漏洞请按 [SECURITY.md](SECURITY.md) 私下报告。本项目遵循[行为准则](CODE_OF_CONDUCT.md)。
+Flotilla 是 alpha 软件，1.0 前次版本可能改变 API。可选 Harbor 消费适配器需要提供 source/runtime 接口的固定 patched Harbor，原版 Harbor 0.24.0 不具备这些接口。参见 [变更日志](CHANGELOG.md)、[贡献指南](CONTRIBUTING.md) 与[行为准则](CODE_OF_CONDUCT.md)。安全漏洞按 [SECURITY.md](SECURITY.md) 私下报告。
 
 ## 许可证
 
-Flotilla 采用 [Apache License 2.0](LICENSE) 许可。anchor 镜像包含以 GPLv2 许可的 BusyBox，详见[第三方组件](THIRD_PARTY.md)。
+Flotilla 采用 [Apache License 2.0](LICENSE)。Anchor 包含 GPLv2 许可的 BusyBox，参见[第三方组件](THIRD_PARTY.md)。

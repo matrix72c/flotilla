@@ -1,497 +1,501 @@
-"""Acceptance for Harbor's explicit source/runtime entry points, without injection.
-
-Only fixed neutral fixture commands run through the local FakePlatform transport.
-The real Task, Trial, environment/verifier factories and workspace ownership run.
-"""
+"""Native release selection and runtime contracts for Harbor extensions."""
 
 from __future__ import annotations
 
-import dataclasses
 import json
-from pathlib import Path
+import logging
+from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
-import yaml
-from typer.testing import CliRunner
 
 pytest.importorskip("harbor.models.extensions")
 import toml
-from harbor.agents.nop import NopAgent
-from harbor.cli.main import app
-from harbor.job_plan import JobPlan
 from harbor.models.job.config import JobConfig
-from harbor.models.task.task import Task
+from harbor.models.task.config import TaskConfig
+from harbor.models.task.task import Task as HarborTask
+from harbor.models.trial.config import TaskConfig as TrialTaskConfig
 from harbor.models.trial.config import TrialConfig
-from harbor.trial.trial import Trial
+from harbor.models.trial.paths import TrialPaths
+from harbor.verifier.verifier import RewardFileEmptyError, RewardFileNotFoundError, VerifierOutputParseError
 
-from flotilla.core import labels
-from flotilla.integrations.harbor_native import FlotillaTaskSource, NativeFlotillaEnvironment, NativeFlotillaRuntime
-from flotilla.integrations.harbor_source import task_environments
-from flotilla.integrations.harbor_source_reader import NativeTaskSource, SourceMapping, metadata_identity
-from flotilla.integrations.workspace import describe
-from flotilla.platform.base import ExecResult
-from flotilla.runtime.workspace import Workspace
-from flotilla.testing.build import prepared_task
-from flotilla.testing.harbor_local import attach_local_files
-from flotilla.testing.runtime import deployment as deployment
+from flotilla.integrations.harbor_native import (
+    FlotillaTaskSource,
+    NativeFlotillaRuntime,
+)
+from flotilla.manifest import Context, Manifest, Resources, Unit
+from flotilla.native import (
+    Artifact,
+    ReleaseWriter,
+    Task,
+    Verification,
+    VerificationResult,
+    read_dataset,
+)
 
+pytestmark = pytest.mark.asyncio
+LOGGER = logging.getLogger(__name__)
 
-class FailingAgent(NopAgent):
-    """Native factory-loaded neutral agent for output recovery acceptance."""
-
-    async def run(self, instruction, environment, context):
-        raise RuntimeError("neutral agent failed after producing artifacts")
-
-
-def task_files(root: Path, name: str, *, instruction: bool = True) -> Path:
-    task = root / name
-    task.mkdir(parents=True)
-    (task / "task.toml").write_text('[environment]\ndocker_image="r.io/main:1"\n')
-    if instruction:
-        (task / "instruction.md").write_text("A neutral native instruction.")
-    return task
+VERIFY_COMMAND = ("verify", "run")
+PRESENTATION = {
+    "environment": {"docker_image": "r.io/main:1"},
+    "artifacts": [{"source": "/evidence/main.txt", "destination": "main.txt"}],
+}
 
 
-def task_source(root: Path) -> FlotillaTaskSource:
-    return FlotillaTaskSource(sources=[SourceMapping(local_root=root, platform_prefix="datasets")], metadata_workers=1)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("command", ["job", "trial"])
-@pytest.mark.parametrize("replace_sources", [False, True])
-async def test_native_source_config_relative_roots_cli_layers_and_resume(
-    tmp_path, monkeypatch, command, replace_sources
-):
-    monkeypatch.setenv("HARBOR_TELEMETRY", "off")
-    first = tmp_path / "first"
-    second = tmp_path / "second"
-    first_task = task_files(first / "data", "task")
-    second_task = task_files(second / "data", "task")
-    selected = second_task if replace_sources else first_task
-    origin = second if replace_sources else first
-    base = first / "base.yaml"
-    override = second / "override.json"
-    selection = (
-        {"task": {"path": str(selected)}, "agent": {"name": "nop"}}
-        if command == "trial"
-        else {"tasks": [{"path": str(selected)}], "agents": [{"name": "nop"}], "jobs_dir": str(tmp_path / "jobs")}
+def unit() -> Unit:
+    return Unit(
+        image="image@sha256:" + "b" * 64,
+        resources=Resources(cpu="1", memory="512Mi"),
+        context=Context(env={}, uid=0, gid=0, cwd="/"),
+        command=None,
     )
-    base.write_text(
-        yaml.safe_dump(
+
+
+def role(name: str, *, services: tuple[str, ...] = ("main",)) -> Manifest:
+    return Manifest(task=name, agent_service="main", units={service: unit() for service in services})
+
+
+def build_release(
+    base: Path, *, mode: str = "separate", presentation: dict | None = None, importer: str = "harbor-v1"
+) -> Path:
+    """A real release: baked verification, agent artifact handoff, Harbor provenance."""
+    tests = base / "tests"
+    tests.mkdir(parents=True)
+    (tests / "test.sh").write_text("#!/bin/sh\nexit 0\n")
+    roles: dict[str, Manifest] = {"main": role("datasets/task")}
+    if mode == "separate":
+        roles["verifier"] = role("datasets/task#verifier")
+    with ReleaseWriter(base / "release") as writer:
+        asset = writer.add_asset(tests)
+        task = Task(
+            key="datasets/task",
+            roles=roles,
+            assets=(asset,),
+            verification=Verification(
+                role="verifier" if mode == "separate" else "main",
+                command=VERIFY_COMMAND,
+                tests=asset,
+                env={"TASK_TOKEN": "native"},
+                optional_output_paths={"reward.txt": "/logs/verifier/reward.txt"},
+                require_output=True,
+                timeout_s=600.0,
+            ),
+            artifacts=(Artifact(name="agent", role="main", target="/logs/agent", verifier_target="/handoff/agent"),),
+            provenance={
+                "importer": importer,
+                "harbor": {"config": PRESENTATION if presentation is None else presentation},
+            },
+        )
+        record = writer.add_task(task, "A neutral native instruction.\n")
+        writer.publish([{"task_ref": record.task_ref, "task_digest": record.task_digest, "annotations": {}}])
+    return base / "release"
+
+
+def write_deployment(path: Path, root: Path, *, name: str = "fixture") -> Path:
+    path.write_text(
+        toml.dumps(
             {
-                **selection,
-                "task_source": {
-                    "import_path": "flotilla.integrations.harbor_native:FlotillaTaskSource",
-                    "kwargs": {
-                        "sources": [{"local_root": "data", "platform_prefix": "datasets"}],
-                        "metadata_workers": 8,
-                    },
+                "opensandbox": {
+                    "endpoint": "http://os.test/",
+                    "credential_env": "FLOTILLA_CRED",
+                    "capabilities": "caps.json",
+                    "network": {"sandbox_cidrs": ["10.0.0.0/8"], "platform_cidrs": ["169.254.169.254/32"]},
                 },
+                "storage": {"host_path": "/mnt/shared"},
+                "share": {"release": "test", "release_sha256": "a" * 64},
+                "task_releases": {name: {"local_root": str(root), "platform_root": f"/mnt/shared/releases/{name}"}},
             }
         )
     )
-    patch = {"metadata_workers": 1}
-    if replace_sources:
-        patch["sources"] = [{"local_root": "data", "platform_prefix": "datasets"}]
-    override.write_text(json.dumps({"task_source": {"kwargs": patch}}))
-    elsewhere = tmp_path / "elsewhere"
-    elsewhere.mkdir()
-    monkeypatch.chdir(elsewhere)
-    snapshot = elsewhere / "snapshot.yaml"
-    result = CliRunner().invoke(app, [command, "init", str(snapshot), "-c", str(base), "-c", str(override)])
-    assert result.exit_code == 0, result.exception
-    model = TrialConfig if command == "trial" else JobConfig
-    config = model.model_validate(yaml.safe_load(snapshot.read_text()))
-    # A snapshot taken before source resolution must retain the defining layer.
-    config = model.model_validate_json(config.model_dump_json())
-    assert config.task_source.kwargs_base_dirs["sources"] == origin
-    source = config.task_source.resolve()
-    assert source._reader is None
-    monkeypatch.chdir(second)
-    if command == "job":
-        plan = await JobPlan.from_config(config)
-        trial_config = plan.trial_configs[0]
-        assert trial_config.task_source is config.task_source
-        assert trial_config.task_source.resolve() is source
-    else:
-        trial_config = config
-    task, _ = await Trial._load_task(trial_config)
-    assert task.task_dir == selected
-    assert source.reader.sources[0].local_root == origin / "data"
-    assert config.task_source.kwargs["sources"][0]["local_root"] == str(origin / "data")
-    reader = source.reader
-    kwargs = config.task_source.kwargs["sources"]
-    await Trial._load_task(trial_config)
-    assert source.reader is reader
-    assert config.task_source.kwargs["sources"] is kwargs  # no repeated rewriting
-    # Post-resolution Job and Trial snapshots carry absolute external roots.
-    saved = TrialConfig.model_validate_json(trial_config.model_dump_json())
-    restored_job_or_trial = model.model_validate_json(config.model_dump_json())
-    monkeypatch.chdir(elsewhere)
-    if command == "job":
-        restored_plan = await JobPlan.from_config(restored_job_or_trial)
-        assert restored_plan.task_configs[0].path == selected
-    restored_task, _ = await Trial._load_task(saved)
-    assert restored_task.task_dir == selected
-    assert saved.task_source.resolve() is not source
+    return path
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("root", ["data", "~/data"])
-async def test_native_source_programmatic_and_home_roots(tmp_path, monkeypatch, root):
-    task = task_files(tmp_path / "data", "task")
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("HOME", str(tmp_path))
-    config = TrialConfig.model_validate(
+@pytest.fixture
+def selection(tmp_path: Path) -> tuple[FlotillaTaskSource, Path, Path, dict]:
+    root = build_release(tmp_path)
+    deployment_file = write_deployment(tmp_path / "deployment.toml", root)
+    source = FlotillaTaskSource(dataset=root / "dataset.jsonl", deployment=deployment_file, metadata_workers=2)
+    return source, root, deployment_file, read_dataset(root / "dataset.jsonl")[0].model_dump()
+
+
+# --------------------------------------------------------------------------- #
+# Task source: dataset rows become Harbor trial tasks verbatim.
+# --------------------------------------------------------------------------- #
+
+
+def job_config(source: FlotillaTaskSource) -> JobConfig:
+    return JobConfig.model_validate(
         {
-            "task": {"path": task},
-            "task_source": {
-                "import_path": "flotilla.integrations.harbor_native:FlotillaTaskSource",
-                "kwargs": {"sources": [{"local_root": root, "platform_prefix": "datasets"}]},
-            },
-        }
-    )
-    loaded, _ = await Trial._load_task(config)
-    assert loaded.task_dir == task
-    assert config.task_source.kwargs["sources"][0]["local_root"] == str(task.parent)
-
-
-@pytest.mark.asyncio
-async def test_native_source_rejects_relative_roots_in_remote_config(tmp_path):
-    task = task_files(tmp_path, "task")
-    config = TrialConfig.model_validate(
-        {
-            "task": {"path": task},
-            "task_source": {
-                "import_path": "flotilla.integrations.harbor_native:FlotillaTaskSource",
-                "kwargs": {"sources": [{"local_root": ".", "platform_prefix": "datasets"}]},
-                "kwargs_base_dirs": {"sources": None},
-            },
-        }
-    )
-    with pytest.raises(ValueError, match="relative local_root requires a local config file"):
-        await Trial._load_task(config)
-    config.task_source.kwargs["sources"][0]["local_root"] = str(tmp_path)
-    restored = TrialConfig.model_validate_json(config.model_dump_json())
-    loaded, _ = await Trial._load_task(restored)
-    assert loaded.task_dir == task
-
-
-@pytest.mark.asyncio
-async def test_source_discovers_shallow_candidates_and_filters_before_config_reads(tmp_path, monkeypatch):
-    root = tmp_path / "dataset"
-    first = task_files(root, "keep-a", instruction=False)
-    task_files(root, "keep-b", instruction=False)
-    bad = task_files(root, "excluded", instruction=False)
-    (bad / "task.toml").write_text("invalid TOML = [")
-    task_files(root, "container/nested", instruction=False)
-    (root / "ordinary-file").write_text("not a task")
-    source = task_source(root)
-    original = Path.read_text
-    reads = []
-
-    def read(path, *args, **kwargs):
-        reads.append(path)
-        assert path.name == "task.toml", "discovery must not hydrate instructions or scan task payloads"
-        return original(path, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "read_text", read)
-    config = JobConfig.model_validate(
-        {"datasets": [{"path": root, "task_names": ["keep-*"], "exclude_task_names": ["keep-b"], "n_tasks": 1}]}
-    )
-    selected = await source.resolve_task_configs(config)
-    assert [task.path for task in selected] == [first]
-    assert [task.source for task in selected] == ["dataset"]
-    assert reads == [first / "task.toml"]
-    assert source.identities == {}
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("explicit", [False, True])
-async def test_source_selected_bad_config_is_not_silently_dropped(tmp_path, explicit):
-    bad = task_files(tmp_path, "broken")
-    (bad / "task.toml").write_text("not = [valid")
-    config = JobConfig.model_validate({"tasks": [{"path": bad}]} if explicit else {"datasets": [{"path": tmp_path}]})
-    with pytest.raises(ValueError):
-        await task_source(tmp_path).resolve_task_configs(config)
-
-
-@pytest.mark.asyncio
-async def test_explicit_task_without_config_fails(tmp_path):
-    missing = tmp_path / "missing"
-    missing.mkdir()
-    with pytest.raises(FileNotFoundError):
-        await task_source(tmp_path).resolve_task_configs(JobConfig.model_validate({"tasks": [{"path": missing}]}))
-
-
-@pytest.mark.asyncio
-async def test_source_uses_real_metadata_task_and_excludes_run_instructions_from_identity(tmp_path):
-    path = task_files(tmp_path, "task", instruction=False)
-    source = task_source(tmp_path)
-    selected = await source.resolve_task_configs(JobConfig.model_validate({"tasks": [{"path": path}]}))
-    # Discovery/config validation succeeds without instruction.md; trial loading does not.
-    config = TrialConfig(task=selected[0], extra_instructions=["Run-specific inline instruction."])
-    with pytest.raises(FileNotFoundError):
-        await source.load_task(config)
-    (path / "instruction.md").write_text("Original task instruction.")
-    extra = tmp_path / "extra.txt"
-    extra.write_text("Run-specific file instruction.")
-    config.extra_instruction_paths = [extra]
-    task, download = await source.load_task(config)
-    assert isinstance(task, Task)
-    assert task.task_dir == path
-    assert "Original task instruction." in task.instruction
-    assert "Run-specific inline instruction." in task.instruction
-    assert "Run-specific file instruction." in task.instruction
-    assert download.path == path and download.cached and download.download_time_sec == 0
-    original = source.reader.read_metadata("datasets/task")
-    assert source.identities["datasets/task"] == metadata_identity(original)
-    _, _ = await source.load_task(TrialConfig(task=selected[0], extra_instructions=["Different run instructions."]))
-    assert source.identities["datasets/task"] == metadata_identity(original)
-    (path / "instruction.md").write_text("Edited original task instruction.")
-    await source.load_task(config)
-    assert source.identities["datasets/task"] != metadata_identity(original)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "mode,outcome",
-    [
-        ("shared", "success"),
-        ("separate", "success"),
-        ("bundled", "success"),
-        ("sidecar", "success"),
-        ("separate", "missing_reward"),
-        ("separate", "disabled"),
-        ("separate", "agent_failure"),
-    ],
-)
-async def test_real_native_trial_uses_source_runtime_and_platform_verification(
-    tmp_path, deployment, monkeypatch, mode, outcome
-):
-    missing_reward = outcome == "missing_reward"
-    verification_runs = outcome not in {"disabled", "agent_failure"}
-    cfg, platform, tree = deployment
-    instances = tmp_path / "instances"
-    attach_local_files(platform, instances)
-    deployment_file = tmp_path / "deployment.toml"
-    deployment_file.write_text(toml.dumps(cfg.model_dump(exclude_none=True, exclude={"base_dir"})))
-    root = tmp_path / "originals"
-    task = task_files(root, "task")
-    (task / "environment").mkdir()
-    (task / "tests").mkdir()
-    separate = mode != "shared"
-    bundled = mode in {"bundled", "sidecar"}
-    artifacts = '[[artifacts]]\nsource="/evidence/main.txt"\ndestination="main.txt"\n'
-    if mode == "sidecar":
-        artifacts = (
-            '[[artifacts]]\nsource="/evidence/main.txt"\ndestination="main.txt"\n'
-            '[[artifacts]]\nsource="/evidence/db.txt"\ndestination="db.txt"\nservice="db"\n'
-        )
-        (task / "environment/docker-compose.yaml").write_text(
-            "services:\n  main:\n    image: r.io/main:1\n  db:\n    image: r.io/db:1\n"
-        )
-    content = artifacts + '[environment]\ndocker_image="r.io/main:1"\n'
-    content += f'[verifier]\nenvironment_mode="{"separate" if separate else "shared"}"\n'
-    if bundled:
-        content += '[verifier.environment]\ndocker_image="r.io/verifier:1"\n'
-    content += '[verifier.env]\nFIXTURE_REWARD_PATH="/logs/verifier/reward.txt"\n'
-    content += 'FIXTURE_MAIN_PATH="/evidence/main.txt"\nFIXTURE_DB_PATH="/evidence/db.txt"\n'
-    content += 'FIXTURE_EXTRA_PATH="/evidence/run-extra.txt"\n'
-    (task / "task.toml").write_text(content)
-    script = '#!/bin/sh\nset -e\ntest "$(cat "$FIXTURE_MAIN_PATH")" = main-owned\n'
-    script += 'test "$(cat "$FIXTURE_EXTRA_PATH")" = run-extra-owned\n'
-    if mode == "sidecar":
-        script += 'test "$(cat "$FIXTURE_DB_PATH")" = sidecar-owned\n'
-    if not missing_reward:
-        script += 'echo 1 > "$FIXTURE_REWARD_PATH"\n'
-    (task / "tests/test.sh").write_text(script)
-    row = prepared_task(task, cfg, environments=task_environments).to_row()
-    metadata_dir = tmp_path / "metadata"
-    metadata_dir.mkdir()
-    metadata = {**describe(task, metadata_dir), "environments": row["env"]}
-    tree.dirs.update({"datasets", "datasets/task"})
-    prepared = []
-
-    async def compile_workspace(workspace, runtime_params=None):
-        prepared.append((workspace.key, runtime_params))
-        tree.dirs.update({workspace.key + "/public", workspace.key + "/private-tests"})
-        for name, value, permissions in (
-            ("public/instruction.md", (task / "instruction.md").read_bytes(), "0644"),
-            ("private-tests/test.sh", script.encode(), "0755"),
-        ):
-            key = workspace.key + "/" + name
-            tree.files.add(key)
-            platform.tree_contents[key] = value
-            tree.modes[key] = permissions
-        return metadata
-
-    monkeypatch.setattr(Workspace, "prepare", compile_workspace)
-    events = []
-    units = []
-    original_delete = platform.delete
-
-    async def delete(iid):
-        if iid in units:
-            events.append(("delete", iid))
-        await original_delete(iid)
-
-    monkeypatch.setattr(platform, "delete", delete)
-
-    def initialize(iid, spec):
-        if spec.labels.get(labels.ROLE) != labels.ROLE_UNIT:
-            return
-        units.append(iid)
-        events.append(("create", iid))
-        local = instances / iid
-        evidence = local / "evidence"
-        evidence.mkdir(parents=True, exist_ok=True)
-        # Only main-role instances receive artifacts. Separate verifiers must
-        # restore the platform handoff rather than relying on fixture seeding.
-        if len(units) <= (2 if mode == "sidecar" else 1):
-            (evidence / "main.txt").write_text("main-owned\n")
-            (evidence / "run-extra.txt").write_text("run-extra-owned\n")
-            if spec.labels.get(labels.UNIT) == "db":
-                (evidence / "db.txt").write_text("sidecar-owned\n")
-        elif bundled:
-            (local / "tests").mkdir(parents=True)
-            (local / "tests/test.sh").write_text(script)
-            (local / "tests/test.sh").chmod(0o755)
-
-    platform.on_create = initialize
-    original_exec = platform.exec
-
-    async def execute(handle, proc, **kwargs):
-        spec = platform.spec_of(handle.iid)
-        argv = proc.argv
-        if spec.labels.get(labels.ROLE) == labels.ROLE_ANCHOR:
-            if argv[:3] == ("/.flotilla/bin/busybox", "stat", "-c"):
-                key = argv[-1].removeprefix(tree.mount)
-                return ExecResult(0, b"directory\n" if key in tree.dirs else b"regular file\n", b"")
-            if argv[0] == "cp" and argv[-2].endswith("/."):
-                src = argv[-2].removeprefix(tree.mount)[:-2]
-                dst = argv[-1].removeprefix(tree.mount)
-                assert src in tree.dirs and dst in tree.dirs
-                for paths in (tree.dirs, tree.files):
-                    paths.update(dst + p[len(src) :] for p in list(paths) if p.startswith(src + "/"))
-                for values in (tree.modes, tree.owners, platform.tree_contents):
-                    values.update({dst + k[len(src) :]: v for k, v in list(values.items()) if k.startswith(src + "/")})
-                return ExecResult(0, b"", b"")
-            return await original_exec(handle, proc, **kwargs)
-        mounted = [volume for volume in spec.volumes if "/attempts/" in volume.key]
-        for volume in mounted:
-            target = "/tmp" + volume.mount_path if volume.mount_path.startswith("/harbor-") else volume.mount_path
-            directory = instances / handle.iid / target.lstrip("/")
-            directory.mkdir(parents=True, exist_ok=True)
-            for key in tree.files:
-                if key.startswith(volume.key + "/"):
-                    local = directory / key[len(volume.key) + 1 :]
-                    local.parent.mkdir(parents=True, exist_ok=True)
-                    local.write_bytes(platform.tree_contents[key])
-                    local.chmod(int(tree.modes.get(key, "0644"), 8))
-        translated = tuple(
-            arg.replace("/harbor-handoff", "/tmp/harbor-handoff").replace(
-                "/harbor-instruction", "/tmp/harbor-instruction"
-            )
-            for arg in argv
-        )
-        env = dict(proc.env)
-        for name in ("FIXTURE_MAIN_PATH", "FIXTURE_DB_PATH", "FIXTURE_EXTRA_PATH"):
-            if name in env:
-                env[name] = str(instances / handle.iid / env[name].lstrip("/"))
-        result = await original_exec(handle, dataclasses.replace(proc, argv=translated, env=env), **kwargs)
-        for volume in mounted:
-            if volume.read_only:
-                continue
-            target = "/tmp" + volume.mount_path if volume.mount_path.startswith("/harbor-") else volume.mount_path
-            directory = instances / handle.iid / target.lstrip("/")
-            for path in directory.rglob("*"):
-                if path.is_file():
-                    key = volume.key + "/" + path.relative_to(directory).as_posix()
-                    tree.files.add(key)
-                    platform.tree_contents[key] = path.read_bytes()
-                    tree.modes[key] = oct(path.stat().st_mode & 0o777)
-        return result
-
-    monkeypatch.setattr(platform, "exec", execute)
-    config = TrialConfig.model_validate(
-        {
-            "task": {"path": task},
             "task_source": {
                 "import_path": "flotilla.integrations.harbor_native:FlotillaTaskSource",
                 "kwargs": {
-                    "sources": [{"local_root": root.name, "platform_prefix": "datasets"}],
-                    "metadata_workers": 1,
+                    "dataset": str(source.dataset),
+                    "deployment": str(source.deployment),
+                    "metadata_workers": source.metadata_workers,
                 },
-                "kwargs_base_dirs": {"sources": root.parent},
+            }
+        }
+    )
+
+
+async def test_resolve_preserves_row_order_and_duplicates(tmp_path, selection):
+    source, root, _deployment_file, row = selection
+    duplicates = tmp_path / "duplicates.jsonl"
+    duplicates.write_text(
+        "".join(json.dumps(payload) + "\n" for payload in (row, dict(row, annotations={"repeat": 1}), row))
+    )
+    source.dataset = duplicates
+    resolved = await source.resolve_task_configs(job_config(source))
+    assert [task.path for task in resolved] == [
+        root / PurePosixPath(row["task_ref"]).parent
+    ] * 3  # duplicates are separate trials, not deduplicated
+    assert [task.source for task in resolved] == [row["release_id"]] * 3
+    # Every row was validated against the release, not just the first.
+    assert set(source.bounds) == {(root / PurePosixPath(row["task_ref"]).parent).absolute()}
+
+
+async def test_resolve_rejects_harbor_task_selection(selection):
+    source, _, _, _ = selection
+    config = job_config(source).model_copy(update={"tasks": [TrialTaskConfig(path=Path("/somewhere/else"))]})
+    with pytest.raises(ValueError, match="replace Harbor task/dataset discovery"):
+        await source.resolve_task_configs(config)
+
+
+async def test_resolve_rejects_empty_and_unbound_selections(tmp_path, selection):
+    source, _root, _deployment_file, row = selection
+    empty = tmp_path / "empty.jsonl"
+    empty.write_text("\n")
+    source.dataset = empty
+    with pytest.raises(ValueError, match="selects no tasks"):
+        await source.resolve_task_configs(job_config(source))
+    foreign = tmp_path / "foreign.jsonl"
+    foreign.write_text(json.dumps(dict(row, release_id="0" * 64)) + "\n")
+    source.dataset = foreign
+    with pytest.raises(ValueError, match="without an explicit binding"):
+        await source.resolve_task_configs(job_config(source))
+
+
+async def test_load_rebuilds_the_harbor_task_from_provenance(selection):
+    source, _root, _, row = selection
+    resolved = await source.resolve_task_configs(job_config(source))
+    config = TrialConfig.model_validate(
+        {
+            "task": {"path": str(resolved[0].path)},
+            "extra_instructions": ["Run-specific instruction."],
+            "task_source": {
+                "import_path": "flotilla.integrations.harbor_native:FlotillaTaskSource",
+                "kwargs": {"dataset": str(source.dataset), "deployment": str(source.deployment)},
+            },
+        }
+    )
+    task, download = await source.load_task(config)
+    assert isinstance(task, HarborTask)
+    assert task.task_dir == resolved[0].path
+    assert "A neutral native instruction." in task.instruction
+    assert "Run-specific instruction." in task.instruction
+    assert task.config.environment.docker_image == "r.io/main:1"
+    assert download.cached and download.download_time_sec == 0
+    bound = source.bound_for(task)
+    assert bound.row.task_digest == row["task_digest"]
+    assert bound.task.provenance["harbor"]["config"]["environment"]["docker_image"] == "r.io/main:1"
+
+
+async def test_load_rejects_unprovenanced_unsupported_and_foreign_tasks(tmp_path, selection):
+    source, _, _deployment_file, _row = selection
+    resolved = await source.resolve_task_configs(job_config(source))
+    good = TrialConfig.model_validate(
+        {
+            "task": {"path": str(resolved[0].path)},
+            "task_source": {
+                "import_path": "flotilla.integrations.harbor_native:FlotillaTaskSource",
+                "kwargs": {"dataset": str(source.dataset), "deployment": str(source.deployment)},
+            },
+        }
+    )
+    with pytest.raises(ValueError, match="remote downloads"):
+        await source.load_task(good.model_copy(update={"task": TrialTaskConfig(name="org/task")}))
+    with pytest.raises(ValueError, match="not a task payload"):
+        await source.load_task(good.model_copy(update={"task": TrialTaskConfig(path=tmp_path / "elsewhere")}))
+
+    unprovenanced = build_release(tmp_path / "bare", importer="unknown-v9")
+    write_deployment(tmp_path / "bare.toml", unprovenanced)
+    bare = FlotillaTaskSource(dataset=unprovenanced / "dataset.jsonl", deployment=tmp_path / "bare.toml")
+    bare_resolved = await bare.resolve_task_configs(job_config(bare))
+    assert bare_resolved  # presentation validation happens at load time
+    bare_config = TrialConfig.model_validate(
+        {
+            "task": {"path": str(bare_resolved[0].path)},
+            "task_source": {
+                "import_path": "flotilla.integrations.harbor_native:FlotillaTaskSource",
+                "kwargs": {"dataset": str(bare.dataset), "deployment": str(bare.deployment)},
+            },
+        }
+    )
+    with pytest.raises(ValueError, match="presentation provenance"):
+        await bare.load_task(bare_config)
+
+    multi = build_release(
+        tmp_path / "multi", presentation={"environment": {"docker_image": "r.io/x:1"}, "steps": [{"name": "step-one"}]}
+    )
+    write_deployment(tmp_path / "multi.toml", multi)
+    many = FlotillaTaskSource(dataset=multi / "dataset.jsonl", deployment=tmp_path / "multi.toml")
+    many_resolved = await many.resolve_task_configs(job_config(many))
+    many_config = TrialConfig.model_validate(
+        {
+            "task": {"path": str(many_resolved[0].path)},
+            "task_source": {
+                "import_path": "flotilla.integrations.harbor_native:FlotillaTaskSource",
+                "kwargs": {"dataset": str(many.dataset), "deployment": str(many.deployment)},
+            },
+        }
+    )
+    with pytest.raises(ValueError, match="single-step"):
+        await many.load_task(many_config)
+
+
+async def test_relative_inputs_resolve_against_the_config_and_freeze_absolute(tmp_path, monkeypatch):
+    root = build_release(tmp_path / "data")
+    deployment_file = write_deployment(tmp_path / "data" / "deployment.toml", root)
+    origin = tmp_path / "data"
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    config = JobConfig.model_validate(
+        {
+            "task_source": {
+                "import_path": "flotilla.integrations.harbor_native:FlotillaTaskSource",
+                "kwargs": {"dataset": "release/dataset.jsonl", "deployment": "deployment.toml"},
+                "kwargs_base_dirs": {"dataset": origin, "deployment": origin},
+            }
+        }
+    )
+    source = config.task_source.resolve()
+    resolved = await source.resolve_task_configs(config)
+    assert config.task_source.kwargs["dataset"] == str(origin / "release/dataset.jsonl")
+    assert config.task_source.kwargs["deployment"] == str(deployment_file)
+    # Snapshots taken after resolution load from any working directory.
+    restored = JobConfig.model_validate_json(config.model_dump_json())
+    task, _ = await restored.task_source.resolve().load_task(
+        TrialConfig(task=TrialTaskConfig(path=resolved[0].path), task_source=restored.task_source)
+    )
+    assert "A neutral native instruction." in task.instruction
+
+
+async def test_relative_inputs_fail_without_a_local_config_file(tmp_path, monkeypatch):
+    root = build_release(tmp_path / "release")
+    write_deployment(tmp_path / "deployment.toml", root)
+    config = JobConfig.model_validate(
+        {
+            "task_source": {
+                "import_path": "flotilla.integrations.harbor_native:FlotillaTaskSource",
+                "kwargs": {"dataset": "release/dataset.jsonl", "deployment": "deployment.toml"},
+                "kwargs_base_dirs": {"dataset": None, "deployment": None},
+            }
+        }
+    )
+    with pytest.raises(ValueError, match="relative dataset requires a local config file"):
+        await config.task_source.resolve().resolve_task_configs(config)
+
+
+# --------------------------------------------------------------------------- #
+# Trial runtime: one NativeAttempt per trial, Harbor reward semantics.
+# --------------------------------------------------------------------------- #
+
+
+async def make_runtime(tmp_path, selection, *, artifacts=(), attempt=None, main=None):
+    await selection[0].resolve_task_configs(job_config(selection[0]))
+
+    source, root, deployment_file, row = selection
+    config = SimpleNamespace(
+        task_source=None,
+        verifier=SimpleNamespace(import_path=None, env={}),
+        environment=SimpleNamespace(delete=True),
+        artifacts=list(artifacts),
+    )
+    task_config = TaskConfig.model_validate(PRESENTATION)
+    task = HarborTask.from_metadata(root, config=task_config, instruction="A neutral native instruction.\n")
+    runtime = NativeFlotillaRuntime.__new__(NativeFlotillaRuntime)
+    runtime.bound = source.bounds[(root / PurePosixPath(row["task_ref"]).parent).absolute()]
+    runtime.config = config
+    runtime.task = task
+    runtime.paths = paths_of(tmp_path)
+    runtime.context_id = None
+    runtime.deployment = str(deployment_file)
+    runtime.run_timeout = 600.0
+    runtime.runtime_params = {"SEED": "2"}
+    runtime.fleet = SimpleNamespace(close=AsyncMock(return_value=SimpleNamespace(clean=True)))
+    runtime.attempt = attempt
+    runtime._main = main
+    runtime._creation_lock = None
+    runtime._close_task = None
+    runtime._main_ready = main is not None
+    runtime._collection_started = False
+    from harbor.trial.artifact_handler import ArtifactHandler
+
+    runtime.artifacts = [*task.config.artifacts, *config.artifacts]
+    runtime._artifact_handler = ArtifactHandler(artifacts=runtime.artifacts, logger=LOGGER)
+    runtime._artifact_handler.begin_collection()
+    return runtime
+
+
+def paths_of(tmp_path):
+    return TrialPaths(trial_dir=tmp_path / "trial")
+
+
+def fake_main(events: list | None = None):
+    main = AsyncMock()
+    main.os = __import__("harbor.models.task.config", fromlist=["TaskOS"]).TaskOS.LINUX
+    if events is not None:
+        main.service_download_dir.side_effect = lambda *a, **k: events.append("download")
+        main.service_is_dir.return_value = True
+    return main
+
+
+def fake_attempt(result: VerificationResult | None = None, events: list | None = None):
+    attempt = SimpleNamespace()
+    attempt.verify = AsyncMock(return_value=result)
+    attempt.close = AsyncMock()
+    if events is not None:
+
+        async def verify(**kwargs):
+            events.append("verify")
+            return result
+
+        attempt.verify.side_effect = verify
+    return attempt
+
+
+async def test_verify_parses_each_reward_contract(tmp_path, selection):
+    cases = [
+        ({"reward.json": b'{"accuracy": 1, "style": 0.5}'}, {"accuracy": 1, "style": 0.5}),
+        ({"reward.txt": b"0.75\n"}, {"reward": 0.75}),
+    ]
+    for outputs, expected in cases:
+        runtime = await make_runtime(
+            tmp_path, selection, attempt=fake_attempt(VerificationResult(0, "", "", outputs)), main=fake_main()
+        )
+        result = await runtime.verify(runtime._main, None, logger=LOGGER, log_context=None)
+        assert result.rewards == expected
+
+    runtime = await make_runtime(
+        tmp_path,
+        selection,
+        attempt=fake_attempt(VerificationResult(2, "out", "err", {"reward.txt": b"0"})),
+        main=fake_main(),
+    )
+    # A failing test script that still writes a reward is a graded zero, not an infrastructure error.
+    assert (await runtime.verify(runtime._main, None, logger=LOGGER, log_context=None)).rewards == {"reward": 0.0}
+
+
+async def test_verify_reward_failures_mirror_harbor(tmp_path, selection):
+    cases = [
+        ({}, RewardFileNotFoundError),
+        ({"reward.json": b""}, RewardFileEmptyError),
+        ({"reward.json": b"{nope"}, VerifierOutputParseError),
+        ({"reward.json": b"0"}, VerifierOutputParseError),
+        ({"reward.json": b"[]"}, VerifierOutputParseError),
+        ({"reward.json": b'{"r": "high"}'}, VerifierOutputParseError),
+        ({"reward.json": b'{"r": NaN}'}, VerifierOutputParseError),
+        ({"reward.txt": b""}, RewardFileEmptyError),
+        ({"reward.txt": b"high"}, VerifierOutputParseError),
+    ]
+    for outputs, error in cases:
+        runtime = await make_runtime(
+            tmp_path, selection, attempt=fake_attempt(VerificationResult(0, "", "", outputs)), main=fake_main()
+        )
+        with pytest.raises(error):
+            await runtime.verify(runtime._main, None, logger=LOGGER, log_context=None)
+
+
+async def test_verify_persists_outputs_and_collects_before_releasing_main(tmp_path, selection):
+    events: list[str] = []
+    main = fake_main(events)
+    attempt = fake_attempt(
+        VerificationResult(1, "stdout\n", "stderr\n", {"reward.txt": b"1\n", "../escape": b"x"}), events
+    )
+    runtime = await make_runtime(tmp_path, selection, attempt=attempt, main=main)
+    with pytest.raises(ValueError, match="escapes"):
+        await runtime.verify(runtime._main, 60.0, logger=LOGGER, log_context=None)
+    # Collected agent results survive a failing verification.
+    assert events == ["download", "verify"]
+    assert attempt.verify.call_args.kwargs["timeout"] == 60.0
+
+    safe = fake_attempt(VerificationResult(1, "stdout\n", "stderr\n", {"reward.txt": b"1\n"}), events)
+    runtime.attempt = safe
+    result = await runtime.verify(runtime._main, None, logger=LOGGER, log_context=None)
+    assert result.rewards == {"reward": 1.0}
+    verifier_dir = runtime.paths.verifier_dir
+    assert (verifier_dir / "reward.txt").read_bytes() == b"1\n"
+    assert (verifier_dir / "test-stdout.txt").read_text() == "stdout\n"
+    assert (verifier_dir / "test-stderr.txt").read_text() == "stderr\n"
+
+
+async def test_verify_requires_this_trials_environment(tmp_path, selection):
+    runtime = await make_runtime(tmp_path, selection, attempt=fake_attempt(), main=fake_main())
+    with pytest.raises(RuntimeError, match="this trial's started main environment"):
+        await runtime.verify(fake_main(), None, logger=LOGGER, log_context=None)
+
+
+async def test_close_collects_without_verification_and_is_idempotent(tmp_path, selection):
+    events: list[str] = []
+    main = fake_main(events)
+    attempt = fake_attempt(events=events)
+    runtime = await make_runtime(tmp_path, selection, attempt=attempt, main=main)
+    await runtime.close()
+    assert events == ["download"]
+    attempt.close.assert_awaited_once()
+    runtime.fleet.close.assert_awaited_once()
+    await runtime.close()  # idempotent
+    assert attempt.close.await_count == 1
+
+
+async def test_constructor_rejects_incompatible_trials(tmp_path, selection, monkeypatch):
+    source, _root, deployment_file, _row = selection
+    resolved = await source.resolve_task_configs(job_config(source))
+    config = TrialConfig.model_validate(
+        {
+            "task": {"path": str(resolved[0].path)},
+            "task_source": {
+                "import_path": "flotilla.integrations.harbor_native:FlotillaTaskSource",
+                "kwargs": {"dataset": str(source.dataset), "deployment": str(deployment_file)},
             },
             "runtime": {
                 "import_path": "flotilla.integrations.harbor_native:NativeFlotillaRuntime",
-                "kwargs": {"deployment": str(deployment_file), "runtime_params": {"SEED": "2"}},
+                "kwargs": {"deployment": str(deployment_file)},
             },
             "environment": {"import_path": "flotilla.integrations.harbor_native:NativeFlotillaEnvironment"},
-            "agent": {"import_path": f"{__name__}:FailingAgent"} if outcome == "agent_failure" else {"name": "nop"},
-            "verifier": {"disable": outcome == "disabled"},
-            "artifacts": [{"source": "/evidence/run-extra.txt", "destination": "run-extra.txt"}],
-            "extra_instructions": ["Run-only extra instructions must not change platform metadata identity."],
-            "trial_name": "native",
             "trials_dir": tmp_path / "trials",
+            "trial_name": "native",
         }
     )
-    config = TrialConfig.model_validate_json(config.model_dump_json())
-    source = config.task_source.resolve()
-    assert source._reader is None
-    trial = await Trial.create(config)
-    assert config.task_source.resolve() is source
-    assert source.reader.sources[0].local_root == root
-    assert trial.runtime_context.key == "datasets/task"
-    assert isinstance(trial.task, Task)
-    assert isinstance(trial.runtime_context, NativeFlotillaRuntime)
-    assert isinstance(trial.agent_environment, NativeFlotillaEnvironment)
-    assert trial.runtime_context.expected_identity == metadata_identity(
-        NativeTaskSource([SourceMapping(local_root=root, platform_prefix="datasets")]).read_metadata("datasets/task")
-    )
-    assert prepared == [] and units == []
-    result = await trial.run()
-    assert len(prepared) == 1 and prepared[0][1] == {"SEED": "2"}
-    if missing_reward:
-        assert result.exception_info is not None
-        assert "Reward" in result.exception_info.exception_type
-        assert result.verifier_result is None
-    elif outcome == "agent_failure":
-        assert result.exception_info is not None
-        assert result.exception_info.exception_type == "RuntimeError"
-        assert "neutral agent failed" in result.exception_info.exception_message
-        assert result.verifier_result is None
-    else:
-        assert result.exception_info is None, result.exception_info
-        if verification_runs:
-            assert result.verifier_result.rewards == {"reward": 1.0}
-        else:
-            assert result.verifier_result is None
-    persisted = json.loads((tmp_path / "trials/native/result.json").read_text())
-    assert (persisted["exception_info"] is not None) == (missing_reward or outcome == "agent_failure")
-    if outcome == "success":
-        assert persisted["verifier_result"]["rewards"] == {"reward": 1.0}
-    assert len(units) == (3 if mode == "sidecar" else 2 if separate and verification_runs else 1)
-    if separate and verification_runs:
-        verifier_iid = units[-1]
-        for main_iid in units[:-1]:
-            assert events.index(("delete", main_iid)) < events.index(("create", verifier_iid))
-    workspace_key = prepared[0][0]
-    assert not any(key == workspace_key or key.startswith(workspace_key + "/") for key in tree.dirs | tree.files)
-    assert not await platform.list({})
-    # Trial artifacts outlive both platform resources and scratch handoff archives,
-    # including artifacts declared only on TrialConfig rather than in task.toml.
-    artifacts_dir = tmp_path / "trials/native/artifacts"
-    assert (artifacts_dir / "main.txt").read_text() == "main-owned\n"
-    assert (artifacts_dir / "run-extra.txt").read_text() == "run-extra-owned\n"
-    manifest = json.loads((artifacts_dir / "manifest.json").read_text())
-    successful = {
-        (entry["source"], entry["destination"], entry["service"]) for entry in manifest if entry["status"] == "ok"
-    }
-    assert ("/evidence/main.txt", "artifacts/main.txt", None) in successful
-    assert ("/evidence/run-extra.txt", "artifacts/run-extra.txt", None) in successful
-    if mode == "sidecar":
-        assert (artifacts_dir / "db.txt").read_text() == "sidecar-owned\n"
-        assert ("/evidence/db.txt", "artifacts/db.txt", "db") in successful
+    task, _ = await source.load_task(config)
+
+    def build(**overrides):
+        values = {
+            "task": task,
+            "config": config,
+            "paths": paths_of(tmp_path),
+            "context_id": None,
+            "deployment": str(deployment_file),
+        }
+        values.update(overrides)
+        monkeypatch.setattr(NativeFlotillaRuntime, "__init__", NativeFlotillaRuntime.__init__)
+        return NativeFlotillaRuntime(**values)
+
+    config.task_source._instance = source
+    custom_verifier = config.model_copy(deep=True)
+    custom_verifier.verifier.import_path = "custom:Verifier"
+    with pytest.raises(ValueError, match=r"verifier\.import_path"):
+        build(config=custom_verifier)
+    custom_env = config.model_copy(deep=True)
+    custom_env.verifier.env = {"OVERRIDE": "1"}
+    with pytest.raises(ValueError, match="baked into the release"):
+        build(config=custom_env)
+    retain = config.model_copy(deep=True)
+    retain.environment.delete = False
+    with pytest.raises(ValueError, match="always releases trial resources"):
+        build(config=retain)
+    with pytest.raises(ValueError, match="configured FlotillaTaskSource"):
+        build(config=config.model_copy(update={"task_source": None}))

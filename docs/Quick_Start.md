@@ -1,188 +1,97 @@
 # Quick start
 
-This tutorial writes a two-service Harbor task, checks it locally, stages its original directory on platform storage, and runs an isolated attempt from Python. It assumes you have a working `deployment.toml` and the platform credential. If you don't, use the [local quick start](Local_Quick_Start.md) to set one up on a single machine, or the [deployment guide](Deployment.md) for a shared platform.
+This tutorial prepares existing Harbor tasks on a CPU host, publishes a native release with your storage tools, and executes it using the installed Flotilla package. It assumes a working `deployment.toml`, platform credentials, a matching native Anchor and shared tools. See [Native tasks](Native_Tasks.md) for installation, protocol and migration details, and [Compose support](Compose_Support.md) for importer support.
 
-You need Linux x86_64 and Python 3.12 with the `harbor` extra. The platform management image must contain the same Flotilla version, pinned Compose (default 2.39.4), and build tools. Configure `prepare.management_network`, read-only `management_mounts` for credentials, and nonsecret `management_env` such as `DOCKER_HOST`/`DOCKER_CONFIG` explicitly for the remote build service. No automatic DinD or unrestricted egress is enabled. This redesign has not completed real platform acceptance and has no compatible published management image yet; the old anchor image is insufficient.
+## 1. Probe and select
 
-```sh
-python -m pip install '.[harbor]'
-export FLOTILLA_OPENSANDBOX_CREDENTIAL=...   # the variable named by credential_env in deployment.toml
-```
+Install this repository's fixed commit with the `harbor` extra in a Python 3.12 Linux x86_64 environment. Host preparation also needs the pinned official Compose tool and image tools. The execution Anchor does **not** need those optional dependencies. Do not install the unrelated public PyPI `flotilla` project.
 
-## 1. Write a task
-
-The task is an agent container (`main`) that talks to a web server (`web`):
-
-```text
-hello-web/
-  instruction.md
-  tests/test.sh
-  task.toml
-  environment/
-    Dockerfile
-    docker-compose.yaml
-    site/
-      index.html
-```
+Place complete source tasks below `./source-tasks` on your preparation host. Each task includes its `task.toml`, instruction, environment files and tests. Keep credentials separate.
 
 ```sh
-mkdir -p hello-web/environment/site hello-web/tests
-printf '[environment]\n' > hello-web/task.toml
-printf 'Fetch the web page.\n' > hello-web/instruction.md
-printf '#!/bin/sh\nset -eu\ncurl -fsS http://web/ >/dev/null\n' > hello-web/tests/test.sh
-printf 'FROM alpine:3.20\nRUN apk add --no-cache curl\n' > hello-web/environment/Dockerfile
-printf '<h1>hello from web</h1>\n' > hello-web/environment/site/index.html
+flotilla probe --deployment deployment.toml --env sandbox.env
+flotilla select --host-root ./source-tasks --deployment deployment.toml \
+  --out selected.jsonl --report selection-report.json
 ```
 
-`hello-web/environment/docker-compose.yaml`:
+Probe records measured capabilities and requires confirmed cleanup. Selection normalizes supported task definitions but does not build or open task sandboxes. Inspect its report before preparing. `--require-prebuilt-images` rejects tasks that would need application builds; Voyager applies this constraint automatically.
 
-```yaml
-services:
-  main:
-    depends_on:
-      web:
-        condition: service_healthy
-  web:
-    image: nginx:1.27-alpine
-    volumes:
-      - ./site:/usr/share/nginx/html:ro
-    healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost/"]
-      interval: 2s
-      retries: 15
-```
-
-A few rules are worth knowing from the start (the full list is in [Compose support](Compose_Support.md)):
-
-- The agent service is always named `main`. When `environment/Dockerfile` exists, `main` is built from it, and its default command is `sleep infinity`, so it stays up for you to run commands in.
-- Bind-mount sources must be inside `environment/`. A source that is only mounted read-only, like `./site` here, is published once with the task files and mounted read-only.
-- Services on a shared network reach each other by service name. Ports don't need to be published.
-
-## 2. Inspect it
-
-`inspect` parses the task with the deployment's capabilities and reports what Flotilla would do. It builds nothing and creates no sandboxes:
+## 2. Prepare once
 
 ```sh
-flotilla inspect hello-web --deployment deployment.toml
+flotilla prepare selected.jsonl --deployment deployment.toml \
+  --out ./release --report prepare-report.json \
+  --image-repo registry.example.org/team/task-runtime
 ```
 
-The output is a JSON object with an `environments` array. `"status": "accepted"` means the task can run on this deployment. Each finding has a field path, a kind (`equivalent`, `warn`, or `reject`), and a reason. One `reject` finding rejects the task. For example, publishing a port range gives:
+This command may build and publish required images. Provide registry credentials explicitly via your tool configuration or `--env prepare.env`. The repository argument has no tag or digest. Non-root source images get a minimal USER0 adaptation after the original application identity is resolved. Runtime images are fixed by remote digest. Static bind files, hidden tests and volume seeds are captured in the release. tmpfs/readonly rootfs do not by themselves require derived images.
 
-```json
-{"path": "services.web.ports[0]", "kind": "reject", "reason": "target must be one numeric port; ranges are unsupported"}
+Preparation is atomic: failed selected rows do not silently disappear. Output must be a new directory. Keep reports and resumable work outside it. No platform task instances or static uploads are created by this command.
+
+## 3. Publish and bind
+
+Use existing storage tools to copy the **complete release**, preserving its contents and required file metadata, to a new immutable platform location. Do not copy the original Harbor task as the execution input. Grant the platform access to the fixed runtime images.
+
+```toml
+[task_releases.demo]
+local_root = "./release"
+platform_root = "/shared/releases/demo-v1"
 ```
 
-## 3. Stage the original task; optionally warm it
+The platform root must be under your configured host storage root. PVC deployments instead use an explicit PVC location or relative storage key; see [Native tasks](Native_Tasks.md#bind-local-and-platform-roots). Local relative paths resolve against the deployment file. Platform copies are integrity-checked before execution. Consumers never repair missing files by rebuilding or reimporting source tasks.
 
-Copy the complete `hello-web/` directory to `datasets/demo/hello-web` below the configured platform storage root using your deployment's storage tooling. Preserve modes, environment files, instruction and test directories. Training clients do not need that local directory. Do not put sources under reserved `share/`, `tasks/`, or `launches/` trees.
-
-```sh
-flotilla prepare datasets/demo/hello-web --deployment deployment.toml --out diagnostics.json
-```
-
-This optional command exercises platform-side preparation and emits diagnostics. It is not a prerequisite or a prepared JSONL training dataset. Every `HarborAttempt` reads the original platform task into its own owned workspace, compiles the selected roles there, and uses the configured image build/cache facilities. Do not mutate source directories during experiments; version their storage keys instead.
-
-## 4. Run it
-
-`run_hello.py`:
+## 4. Execute
 
 ```python
 import asyncio
 from pathlib import Path
 
 from flotilla import Flotilla, OpenOptions
-from flotilla.integrations.harbor_attempt import HarborAttempt
+from flotilla.config import FlotillaConfig
+from flotilla.native import NativeAttempt
 
 
 async def main():
-    async with Flotilla(deployment="deployment.toml") as fleet:
-        options = OpenOptions(startup_timeout=900, lifetime=600)
-        attempt = await HarborAttempt.create(fleet, "datasets/demo/hello-web")
-        try:
-            env = await attempt.open("main", options)
-            page = await env.agent.exec(["curl", "-fsS", "http://web/"], timeout=30)
-            print(page.stdout.decode().strip())
-
-            await env.agent.write_file("/tmp/notes.txt", b"web answered\n")
-            print((await env.agent.read_file("/tmp/notes.txt")).decode().strip())
-
-            await env.service("web").download_file("/etc/nginx/nginx.conf", Path("nginx.conf"))
-        finally:
-            await attempt.close()
-    print("cleanup clean:", fleet.cleanup_report.clean)
+    config = FlotillaConfig.load("deployment.toml")
+    bindings = config.release_bindings()
+    rows = bindings.read_dataset("release/dataset.jsonl")
+    async with Flotilla(deployment=config) as fleet:
+        for row in rows:
+            bound = bindings.resolve(row)
+            async with await NativeAttempt.create(fleet, bound) as attempt:
+                env = await attempt.open("main", OpenOptions(startup_timeout=900, lifetime=600))
+                result = await env.agent.exec(["id"], timeout=30)
+                print(result.stdout.decode())
+                verification = await attempt.verify()
+                print(verification)
+    assert fleet.cleanup_report is not None and fleet.cleanup_report.clean
 
 
 asyncio.run(main())
 ```
 
-```sh
-python run_hello.py
-```
+A dataset row identifies its release, relative task reference and digest. Preserve the complete row, including annotations and parameters, in snapshots. Duplicate rows remain duplicate attempts. Filtering/reordering rows does not alter release identity.
 
-What happens:
+The attempt starts services according to prepared dependency and healthcheck rules, using resolved application UID/GID/env/cwd. Writable state is attempt-private. Hidden tests are staged only for verification; separate verifier roles and declared handoffs use the same lifecycle. Closing waits for confirmed cleanup. Infrastructure and cleanup failures are not task scores.
 
-1. **Startup.** Flotilla creates one sandbox per service, applies the network policy, writes `/etc/hosts` entries so `web` resolves from `main`, starts `web`, waits for its healthcheck, then starts `main`.
-2. **Your code runs.** `env.agent` is the `main` service; `env.service("web")` selects the sidecar.
-3. **Cleanup.** `attempt.close()` deletes role sandboxes and the attempt workspace, waiting for confirmed cleanup. Leaving `Flotilla(...)` deletes the client's anchor sandbox and records the result in `fleet.cleanup_report`.
+## Commands and files
 
-`startup_timeout` bounds step 1, counted from when the open gets an admission slot; waiting for a slot is bounded by `admission_timeout`. `lifetime` starts when the environment is ready; after it passes, the environment is released even if your code is still using it.
-
-Attempt creation may compile/build on the platform; runtime service startup is a separate stage. Source, hidden tests and handoff artifacts do not round-trip through the training machine. Native Harbor CLI/Trial is not extended to accept `task_key`.
-
-## 5. Commands, files, and processes
+Once an environment is open, its regular service APIs remain available:
 
 ```python
-# argv, no shell
 await env.agent.exec(["ls", "-l", "/"], timeout=10)
-# an explicit shell, with a working directory and extra environment variables
-await env.agent.shell("echo $GREETING > out.txt", cwd="/tmp", env={"GREETING": "hi"}, timeout=10)
-# run as another user
+await env.agent.shell("printf '%s' hello > out.txt", cwd="/tmp", timeout=10)
 await env.agent.exec(["id"], uid=1000, gid=1000, timeout=10)
-
-# move local files and directories in and out
-await env.agent.upload_dir(Path("fixtures"), "/srv/fixtures")
-await env.agent.download_dir("/srv/fixtures", Path("fixtures-copy"))
-
-# background processes
-worker = await env.agent.start_process(["sh", "-c", "while sleep 1; do date >> /tmp/ticks; done"])
-status = await worker.wait(timeout=2)  # stops waiting; the process keeps running
-await worker.stop()                    # returns once termination is confirmed
+await env.agent.download_file("/tmp/out.txt", Path("out.txt"))
 ```
 
-`exec` returns `ExecResult(exit_code, stdout, stderr, timed_out)` with bytes output. A nonzero exit code is a normal result, not an exception.
+Only use writable paths declared by the task: readonly-rootfs tasks do not implicitly gain a writable `/tmp`. Runtime options may override modeled resources, timeouts and execution settings; they cannot re-run Compose interpolation or change prepared images/topology. Prepare a new variant for compilation changes.
 
-## 6. Options
-
-```python
-OpenOptions(
-    startup_timeout=900,
-    lifetime=600,
-    disable_internet=True,                           # no outbound access for any service
-    resources={"main": {"cpu": "2", "memory": "4Gi"}},
-    exec_env={"main": {"API_BASE": "http://proxy"}}, # added to every command in main
-    runtime_params={"DB_PASSWORD": "example"},       # values for variables .env leaves undefined
-)
-```
-
-Deployment-wide defaults for resources, timeouts, and limits live in `deployment.toml`; see the [configuration reference](Configuration.md).
-
-## 7. Long-lived handles
-
-If an environment must outlive a `with` block, open it and release it yourself:
-
-```python
-attempt = await HarborAttempt.create(fleet, "datasets/demo/hello-web")
-env = await attempt.open("main", OpenOptions(startup_timeout=900, lifetime=600))
-try:
-    ...
-finally:
-    await attempt.close()
-```
-
-`release()` raises `CleanupError` with a structured report if deletion cannot be confirmed.
+`exec` returns bytes stdout/stderr and an exit code. A command is not silently replayed after an uncertain response. See [Runtime API](Runtime_API.md) for timeout, cancellation, background process and `ExecOutcomeUnknown` behavior.
 
 ## Next steps
 
-- [Runtime API](Runtime_API.md): timeouts, cancellation, `ExecOutcomeUnknown`, and cleanup reports.
-- [Compose support](Compose_Support.md): every supported and rejected key, volumes, networking, and interpolation.
-- [Integration guide](Integration_Guide.md): running many environments from an evaluation or RL framework.
+- [Native tasks](Native_Tasks.md): protocol, installed Anchor builder, path binding and migration.
+- [Harbor quick start](Harbor_Quick_Start.md): the optional Harbor evaluation consumer.
+- [Configuration](Configuration.md): deployment policies, storage and admission.
+- [Compose support](Compose_Support.md): supported source semantics.

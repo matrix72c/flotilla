@@ -19,7 +19,7 @@ from flotilla.platform.filesystem import memory_bytes
 from flotilla.platform.opensandbox.filesystem import INTERNAL_LIMITS, parse_effective
 from flotilla.runtime.planning import _resolve_tmpfs, to_plan
 from flotilla.scan import scan
-from flotilla.testing.build import FakeBuilder, _ctx, _task
+from flotilla.testing.build import DIGEST, FakeBuilder, FakeExport, _ctx, _task
 from flotilla.testing.config import config_data
 from flotilla.testing.reports import ok, report
 
@@ -47,7 +47,8 @@ def test_compose_filesystem_fields_roundtrip_to_runtime(tmp_path: Path) -> None:
         )
     )
     builder = FakeBuilder()
-    ctx = _ctx(builder=builder)
+    export = FakeExport()
+    ctx = _ctx(builder=builder, image_export=export)
     ctx = replace(
         ctx, caps=replace(ctx.caps, readonly_rootfs=True, native_tmpfs=True, filesystem_limits=INTERNAL_LIMITS)
     )
@@ -60,10 +61,10 @@ def test_compose_filesystem_fields_roundtrip_to_runtime(tmp_path: Path) -> None:
         TmpfsMount("/tmp", 16 * 1024**2, 0o750, 1000, 1001),
         TmpfsMount("/cache", 8 * 1024**2, 0o700),
     )
-    dockerfile = "\n".join(r.dockerfile_text or "" for r in builder.requests)
-    assert "mkdir -p /tmp" in dockerfile and "mkdir -p /.flotilla-runtime" in dockerfile
-    assert "test ! -L /cache" in dockerfile
-    assert "rm -rf /tmp" not in dockerfile and "rm -rf /cache" not in dockerfile
+    # Mount points and the readonly runtime dir are runtime responsibilities:
+    # no derived image build, but every path is inspected in the source image.
+    assert builder.requests == []
+    assert export.inspected == [(f"r.io/app@{DIGEST}", ("/tmp", "/cache", "/.flotilla-runtime"))]
     assert not any(f.kind == "equivalent" and "tmpfs" in f.path for f in manifest.findings)
     with pytest.raises(ValueError, match="schema"):
         Manifest.load_json(manifest.dump_json().replace(f'"schema": {SCHEMA_VERSION}', '"schema": 5'))

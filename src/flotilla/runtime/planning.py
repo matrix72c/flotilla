@@ -6,7 +6,6 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 
-from flotilla.compose.interpolate import interpolate
 from flotilla.core.plan import (
     Dependency,
     ExecContext,
@@ -21,6 +20,7 @@ from flotilla.manifest import Manifest
 from flotilla.manifest import Unit as ManifestUnit
 from flotilla.platform.base import Resources, SharedVolume, TmpfsMount
 from flotilla.platform.filesystem import unsized_tmpfs_bytes
+from flotilla.runtime.values import evaluate
 
 _REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
@@ -104,13 +104,12 @@ def _apply_runtime_params(
     for p in manifest.runtime_params:
         if p.service not in env_by_unit:
             raise PlanError(f"runtime environment entry {p.var} targets unknown service {p.service}")
-        result = interpolate(p.expr, {**values, **p.variables})
-        missing = [name for name, default in result.unresolved.items() if default is None]
+        result, missing = evaluate(p.expr, {**values, **p.variables})
         if missing:
             raise PlanError(
                 f"task {manifest.task} requires runtime parameters {', '.join(missing)} ({p.service}.{p.var})"
             )
-        env_by_unit[p.service][p.var] = str(result.value)
+        env_by_unit[p.service][p.var] = result
 
 
 def _resolve_tmpfs(mounts: tuple[TmpfsMount, ...], resources: Resources) -> tuple[TmpfsMount, ...]:

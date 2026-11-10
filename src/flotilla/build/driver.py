@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -12,7 +12,6 @@ from flotilla.build.builder import (
     Builder,
     BuildRequest,
     build_contexts,
-    derive_dockerfile,
     image_tag,
 )
 from flotilla.build.files import ImageExport, export_task_files
@@ -21,7 +20,6 @@ from flotilla.build.images import (
     ImageError,
     Registry,
     ServiceImage,
-    image_changes,
     pin_images,
     plan_images,
     resolve_images,
@@ -78,6 +76,34 @@ class BuildContext:
     image_export: ImageExport | None = None
     user_lookup: UserLookup | None = None
     image_accounts: Callable[[str], ImageAccounts] | None = None
+    validate_mount_paths: Callable[[str, tuple[str, ...]], None] | None = None
+    # Operation-scoped only: shared across roles/rows, never a global build cache.
+    adaptations: dict[str, str] = field(default_factory=dict)
+
+
+def preflight_images(plans: Sequence[ServiceImage], ctx: BuildContext) -> None:
+    """Fail before any registry or builder side effect when publication requirements are missing.
+
+    A non-root image USER is adapted with a published USER0 derivation even for
+    linked and mirrored services, so it requires a builder and a target like an
+    explicit build or mirror does. Mirroring is only ever explicit configuration;
+    an unpullable source without it is rejected at planning time.
+    """
+    for plan in plans:
+        if plan.ref is not None:
+            source = plan.ref.pinned(plan.ref.digest or "")
+            nonroot = str(ctx.registry.image_config(source).get("User") or "") not in ("", "0", "0:0")
+        else:
+            nonroot = False
+        if nonroot and (not ctx.settings.target or ctx.builder is None):
+            raise ImageError(
+                f"service {plan.service} has an image USER requiring a root exec daemon image; "
+                "configure a builder and --image-repo or [build].target"
+            )
+        if plan.disposition in ("build", "mirror") and not ctx.settings.target:
+            raise ImageError("image publication requires --image-repo or [build].target")
+        if plan.disposition == "build" and ctx.builder is None:
+            raise ImageError(f"service {plan.service} needs a build, but no builder was provided")
 
 
 def build_task(task: HarborTask, out_dir: Path, ctx: BuildContext, *, identity: str | None = None) -> BuildOutcome:
@@ -110,11 +136,23 @@ def _build(
     name = identity or task.name
     tag_key = hashlib.sha256((identity or str(task.env_dir.resolve())).encode()).hexdigest()
 
+    # Reject missing publication requirements before *any* build/copy side effect.
+    preflight_images(plans, ctx)
+
     resolution = resolve_images(plans, ctx.settings, ctx.registry)
     images = dict(resolution.images)
     for plan in plans:
         if plan.disposition == "build":
             images[plan.service] = _build_one(task, name, plan, tag_key, ctx)
+
+    for service, svc in project.services.items():
+        paths = tuple(m.mount_path for m in svc.tmpfs)
+        if svc.readonly_rootfs:
+            paths += ("/.flotilla-runtime",)
+        if paths:
+            if ctx.validate_mount_paths is None:
+                raise ImageError("tmpfs/readonly preparation requires image mount-path inspection")
+            ctx.validate_mount_paths(images[service], paths)
 
     files_dir = target_dir / FILES_DIR
     exported = export_task_files(project, task.env_dir, files_dir, images=images, image_export=ctx.image_export)
@@ -153,7 +191,7 @@ def _runtime_images(name: str, images: dict[str, str], key: str, context: Path, 
     file derivations. A config-only layer requires no shell in the base image.
     """
     changed: set[str] = set()
-    derived: dict[str, str] = {}
+    derived = ctx.adaptations
     for service, image in images.items():
         user = str(ctx.registry.image_config(image).get("User") or "")
         if user in ("", "0", "0:0"):
@@ -163,22 +201,27 @@ def _runtime_images(name: str, images: dict[str, str], key: str, context: Path, 
                 f"service {service} has an image USER requiring a root exec daemon image; "
                 "configure a builder and [build].target"
             )
-        if image not in derived:
+        adaptation = hashlib.sha256(f"user0-v1|linux/amd64|{ctx.settings.target}|{image}".encode()).hexdigest()
+        if adaptation not in derived:
             context.mkdir(parents=True, exist_ok=True)
             request = BuildRequest(
                 service=service,
-                tag=image_tag(ctx.settings.target, f"{name}-runtime", service, key),
+                tag=f"{ctx.settings.target}:user0-{adaptation[:32]}",
                 context=context,
                 dockerfile_text=f"FROM {image}\nUSER 0:0\n",
             )
-            derived[image] = f"{ctx.settings.target}@{ctx.builder.build(request)}"
-        images[service] = derived[image]
+            built_digest = ctx.builder.build(request)
+            remote_digest = ctx.registry.digest(ctx.settings.target, request.tag.rsplit(":", 1)[1])
+            if remote_digest != built_digest:
+                raise ImageError("published adaptation digest differs from builder result")
+            derived[adaptation] = f"{ctx.settings.target}@{remote_digest}"
+        images[service] = derived[adaptation]
         changed.add(service)
     return changed
 
 
 def _build_one(task: HarborTask, name: str, plan: ServiceImage, key: str, ctx: BuildContext) -> str:
-    """Build or derive one service's image, returning `repo@sha256:...`."""
+    """Build one service's application image from its Dockerfile, returning `repo@sha256:...`."""
     service = plan.service
     if ctx.builder is None:
         raise ImageError(f"service {service} needs a build, but no builder was provided")
@@ -186,40 +229,18 @@ def _build_one(task: HarborTask, name: str, plan: ServiceImage, key: str, ctx: B
         raise ImageError(f"service {service} needs a build, but [build].target is not configured")
     tag = image_tag(ctx.settings.target, name, service, key)
     svc = task.project.services[service]
-    derive = service in image_changes(task.project)
-    if plan.ref is not None:
-        assert plan.ref.digest is not None
-        base = plan.ref.pinned(plan.ref.digest)
-    else:
-        assert svc.build is not None
-        dockerfile = svc.build.dockerfile or "Dockerfile"
-        text = (task.env_dir / svc.build.context / dockerfile).read_text()
-        request = BuildRequest(
-            service=service,
-            tag=image_tag(ctx.settings.target, f"{name}-base", service, key) if derive else tag,
-            context=task.env_dir / svc.build.context,
-            dockerfile=dockerfile,
-            args=svc.build.args,
-            contexts=build_contexts(text, ctx.settings),
-        )
-        base = f"{ctx.settings.target}@{ctx.builder.build(request)}"
-    if not derive:
-        return base
-    config = ctx.registry.image_config(base)
-    user = str(config.get("User") or "0:0")
+    assert svc.build is not None
+    dockerfile = svc.build.dockerfile or "Dockerfile"
+    text = (task.env_dir / svc.build.context / dockerfile).read_text()
     request = BuildRequest(
-        service=service, tag=tag, context=task.env_dir, dockerfile_text=_derive(task, service, base, user=user)
+        service=service,
+        tag=tag,
+        context=task.env_dir / svc.build.context,
+        dockerfile=dockerfile,
+        args=svc.build.args,
+        contexts=build_contexts(text, ctx.settings),
     )
     return f"{ctx.settings.target}@{ctx.builder.build(request)}"
-
-
-def _derive(task: HarborTask, service: str, base: str, *, user: str) -> str:
-    """Prepare mount-point directories without embedding bind or volume contents."""
-    svc = task.project.services[service]
-    directories = [m.mount_path for m in svc.tmpfs]
-    if svc.readonly_rootfs:
-        directories.append("/.flotilla-runtime")
-    return derive_dockerfile(base, directories=directories, user=user)
 
 
 def _metadata(project: Project, images: Mapping[str, str], ctx: BuildContext) -> dict[str, ImageMeta]:

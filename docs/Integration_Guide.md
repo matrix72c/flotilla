@@ -4,11 +4,11 @@ This guide is for authors of evaluation runners, RL rollout workers, and agent f
 
 ## Who owns what
 
-Flotilla owns environment resources: images, sandboxes, network policies, shared directories, renewal, and cleanup. Your framework owns everything about the episode: which original platform task key to select and which role to open for each phase, the order of phases, verifier selection, scoring, retries, and admission into training.
+Flotilla owns the native task protocol, preparation and environment resources: fixed images, sandboxes, network policies, shared directories, renewal and cleanup. Your framework selects complete dataset rows, drives the agent, interprets verification outputs, decides episode retries and admits results into training. Harbor source parsing is optional preparation, not an execution dependency.
 
 Two consequences follow:
 
-- One `HarborAttempt` owns the task workspace and its main/verifier roles. Your framework selects phases and scoring, stages tests only at verification, and closes the attempt. `flotilla prepare` is optional platform warmup, not a dataset-generation prerequisite.
+- One `NativeAttempt` owns its private workspace and roles. Your framework stops the agent before `attempt.verify()`, which stages hidden tests and declared artifact handoffs, then closes the attempt. Host `flotilla prepare` produces the native dataset before consumption; the user publishes its static files.
 - A score never makes a cleanup failure acceptable. Check `CleanupReport.clean` separately and treat an unclean report as an infrastructure problem.
 
 ## One client per process
@@ -35,25 +35,27 @@ finally:
 
 `on_event` receives best-effort diagnostic events: lifecycle kinds such as `queued`, `admitted`, `open_failed`, `operation_started`, `operation_finished`, `cancel_requested`, `service_terminated`, and `cleanup_finished`, plus one timing event per startup stage with `elapsed_s` set. They never contain argv, output, environment values, or credentials. Don't use them as lifecycle acknowledgements; the return values and exceptions are authoritative.
 
-## Selecting platform tasks
+## Selecting native tasks
 
-Keep complete original Harbor task directories on platform storage, with versioned relative keys such as `datasets/web-bench/task-001`. Preserve `task.toml`, `instruction.md`, environment files, and hidden tests. Training rows contain `task_key` and framework metadata only: no local `task_dir`, generated `env`, or prepared JSONL is required. For native Harbor CLI/Trial, configure the explicit task source, trial runtime and environment together as shown in [Harbor quick start](Harbor_Quick_Start.md#native-harbor-run). That source maps local original-task metadata to platform keys; the trial runtime owns the attempt. A framework with its own lifecycle can use the attempt adapter below and optionally the shared local metadata reader.
-
-```sh
-# Optional warmup/diagnostics, not a training input
-flotilla prepare datasets/web-bench/task-001 --deployment deployment.toml --out diagnostics.json
-```
+Read complete dataset rows using explicit deployment bindings. Do not reduce identities to basenames, discard duplicate rows or attach a new release root implicitly when concatenating datasets. Local metadata inspection reads prepared instructions and definitions, not hidden payloads or source Compose.
 
 ```python
-from flotilla.integrations.harbor_attempt import HarborAttempt
+from flotilla.config import FlotillaConfig
+from flotilla.native import NativeAttempt
+from flotilla.prepared import PreparedEnvironment
 
-attempt = await HarborAttempt.create(fleet, selected_task_key, runtime_params={"FLAG": flag})
-main = attempt.roles["main"].prepared  # transient metadata for admission estimates
+config = FlotillaConfig.load("deployment.toml")
+bindings = config.release_bindings()
+rows = bindings.read_dataset("dataset.jsonl")
+bound = bindings.resolve(rows[0])
+main = PreparedEnvironment(bound.task.roles["main"])
+# Inspect reservations before allocating attempts.
+attempt = await NativeAttempt.create(fleet, bound)
 ```
 
-Creation uses the trusted management image to copy the original task into an isolated platform workspace and compile/build roles there. The image needs Python, this Flotilla version with its `harbor` extra, pinned Compose (default 2.39.4), and build tools. Explicit `prepare.management_network` targets reach the remote Docker/build service and registries; `management_mounts` provides read-only credentials, and `management_env` carries nonsecret endpoint/config paths. Tools are not installed on demand, DinD is not started automatically, and credentials must not be baked into images. The current redesign has offline tests, not real platform acceptance or a compatible published management image.
+See [Native tasks](Native_Tasks.md) for the host preparation and static publication workflow. Both local and platform copies are verified. Execution needs the installed native helper, fixed runtime images and static release only; it must not import Harbor/Compose, build, push, mirror or export seed data from an image. Missing assets and unsupported protocols are explicit failures, not opportunities for fallback. The original source task directory is not an execution input.
 
-Do not change staged source directories during experiments. Per-attempt build outputs, tests and handoff data remain on the platform; only metadata and bounded runtime results return to the client. A warmup diagnostic is not reusable evidence of later environment success.
+Keep published releases immutable. Volume initialization and artifact handoffs are attempt-private. Snapshot release/task/image digests and the complete selected rows. Reusing validation within one launch does not authorize a global cross-run cache.
 
 ## Budgeting concurrent work
 
@@ -76,7 +78,6 @@ options = OpenOptions(
     admission_timeout=3600,        # waiting for a trial_concurrency / instance_budget slot
     startup_timeout=900,           # from admission until ready
     lifetime=3600,                 # starts when the environment is ready
-    runtime_params={"FLAG": flag}, # values for variables the task's .env leaves undefined
     exec_env={"main": {"OPENAI_BASE_URL": proxy_url}},  # added to every command in that service
     disable_internet=True,
 )
@@ -88,8 +89,9 @@ try:
             agent.observe_timeout()  # the remote process was confirmed stopped
         else:
             agent.observe(result.exit_code, result.stdout, result.stderr)
-    await attempt.stage_tests()  # never stage hidden tests during the agent phase
-    reward = await score(attempt, env)  # use the adapter verifier, not local task files
+    await agent.stop()  # stop writes before handing artifacts to the verifier
+    verification = await attempt.verify()
+    reward = score(verification)  # consumer-specific interpretation of declared outputs
 except ExecOutcomeUnknown:
     discard(episode_id, reason="command outcome unknown")
 except FlotillaError as exc:
@@ -131,7 +133,7 @@ A wait deadline or cancellation only stops waiting; the process stays owned by i
 
 ## Owned and borrowed handles
 
-An adapter that opens an environment owns it and must release it. An adapter that receives an existing `Environment` from elsewhere borrows it and must not release it. For platform tasks, `HarborAttempt` owns roles and workspace; `FlotillaEnvironment.view(...)` borrows an already-open role. Keep this distinction explicit in your own adapter, and make sure exactly one owner calls `release()`.
+An adapter that opens an environment owns it and must release it. An adapter that receives an existing `Environment` from elsewhere borrows it and must not release it. For native tasks, `NativeAttempt` owns roles and workspace; a consumer adapter wrapping an already-open environment only borrows that handle. Keep this distinction explicit in your own adapter, and make sure exactly one owner calls `release()`.
 
 ## After a crash
 
@@ -158,7 +160,7 @@ async def test_episode_releases_its_environment(
     cfg, platform, _ = deployment
     task = tmp_path / "task"
     (task / "environment").mkdir(parents=True)
-    (task / "task.toml").write_text('[environment]\ndocker_image = "registry.example/main:1"\n')
+    (task / "task.toml").write_text('[environment]\ndocker_image = "r.io/ns/main:1"\n')
     async with Flotilla(deployment=cfg) as fleet:
         async with fleet.environment(prepared_environment(task, cfg)) as env:
             assert (await env.agent.exec(["true"], timeout=10)).exit_code == 0

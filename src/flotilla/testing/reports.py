@@ -25,6 +25,7 @@ def report_data(**overrides: Any) -> dict[str, Any]:
         "endpoint": "http://os.test",
         "probed_at": datetime(2026, 10, 7, tzinfo=UTC).isoformat(),
         "probe_version": "0.0.0",
+        "cleanup": ok(),
         "evidence_profile": config().evidence_profile(),
         "lifecycle": {
             "create_get_delete": ok(),

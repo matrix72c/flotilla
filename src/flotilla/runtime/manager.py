@@ -142,14 +142,19 @@ class Manager:
 
     def plan(self, request: RunRequest) -> TrialPlan:
         manifest = request.task.manifest()
-        published = manifest.task_files_published
+        native_root = self.workspaces.native_environments.get(request.task.digest)
+        validated_native = native_root is not None and native_root == manifest.task_files
         workspace_root = None
         if request.workspace_id is not None:
             workspace_root = self.workspaces.owned(request.workspace_id).info.key
-            if manifest.task_files and not manifest.task_files.startswith(workspace_root + "/"):
-                raise invalid("attempt inputs must belong to its workspace")
-        elif manifest.task_files and (published is None or published.storage_root != self.cfg.storage_settings().root):
-            raise invalid("task files must be published or belong to an owned workspace")
+            if (
+                manifest.task_files
+                and not validated_native
+                and not manifest.task_files.startswith(workspace_root + "/")
+            ):
+                raise invalid("attempt inputs must belong to its workspace or a validated native release")
+        elif manifest.task_files and not validated_native:
+            raise invalid("task files require a validated native release or an owned workspace")
         if request.workspace_mounts and workspace_root is None:
             raise invalid("workspace mounts require an owned workspace")
         if set(request.exec_env) - set(manifest.units):
@@ -159,8 +164,8 @@ class Manager:
         resources = cfg.resources.for_manifest(manifest)
         if set(request.resources) - set(manifest.units):
             raise invalid("resource override names unknown service")
-        from flotilla.compose.resources import cpu, memory
         from flotilla.platform.base import Resources
+        from flotilla.resources import cpu, memory
 
         for name, override in request.resources.items():
             if set(override) - {"cpu", "memory"}:

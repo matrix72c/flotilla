@@ -1,4 +1,4 @@
-"""Public preparation returns diagnostics and preserves repeated platform keys."""
+"""Legacy warmup diagnostics preserve repeated platform keys; the public prepare is the native release API."""
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from flotilla.prepare import prepare
+from flotilla.prepare import legacy_warmup
 
 
 @pytest.mark.asyncio
@@ -32,7 +32,7 @@ async def test_prewarm_preserves_duplicates_and_releases_every_workspace(monkeyp
 
     monkeypatch.setattr("flotilla.runtime.client.Flotilla", fleet)
     keys = ["dataset/a/t", "dataset/b/t", "dataset/a/t"]
-    result = await prepare(keys, deployment="deployment.toml")
+    result = await legacy_warmup(keys, deployment="deployment.toml")
     assert entered == closed == keys
     assert [r["task_key"] for r in result] == keys
     assert all(r["id"] == "t" and r["status"] == "ready" for r in result)
@@ -50,6 +50,6 @@ async def test_prewarm_reports_failed_task_and_continues(monkeypatch: pytest.Mon
         yield SimpleNamespace(workspace=AsyncMock(side_effect=lambda key: workspace(key)))
 
     monkeypatch.setattr("flotilla.runtime.client.Flotilla", fleet)
-    result = await prepare(["data/t", "data/t"], deployment="deployment.toml")
+    result = await legacy_warmup(["data/t", "data/t"], deployment="deployment.toml")
     assert len(result) == 2
     assert all(r["status"] == "failed" and "unsupported Compose" in r["error"] for r in result)

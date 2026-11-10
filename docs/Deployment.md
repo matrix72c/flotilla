@@ -1,58 +1,61 @@
 # Deployment guide
 
-This guide is for whoever operates the sandbox platform. It is done once per deployment; afterwards every Flotilla user needs the resulting `deployment.toml`, generated `capabilities.json`, and the platform credential.
+A deployment provides a sandbox endpoint, an image registry, shared storage, native Anchor/shared tools and measured capability evidence. Users receive `deployment.toml`, its generated capability report and credentials through a separate channel. Field details are in [Configuration](Configuration.md).
 
-To try the whole procedure on one machine first, follow the [local quick start](Local_Quick_Start.md).
+## Separate preparation from execution
 
-You need a running [OpenSandbox](https://github.com/opensandbox-group/OpenSandbox) server (see its getting-started guide), an image registry that both your build machine and the platform can reach, and shared storage. Field-by-field documentation is in the [configuration reference](Configuration.md).
+Host preparation needs the optional Harbor importer, pinned official Compose and Docker/registry tools. These tools run in an operator-controlled CPU environment, not in business sandboxes. They resolve source images, capture original application identity, publish required USER0 adaptations and produce immutable native releases.
 
-Provision a dedicated shared-storage root reachable by every sandbox worker and the anchor. Stage complete original Harbor tasks under versioned relative keys there. The trusted management image needs Python 3.12, this Flotilla version with its `harbor` extra, fixed Compose (default 2.39.4), and Docker/BuildKit tooling. Use an isolated management sandbox with a local Docker Engine (for example, a supported Kata DinD deployment), or explicitly configure a remote build service. Configure management-only network targets and read-only credential mounts; never expose an unauthenticated Docker TCP endpoint or a host Docker socket to tasks. Runtime platform credentials come from the environment variable named by `opensandbox.credential_env`.
+The platform Anchor needs the matching installed Flotilla runtime and filesystem tools. It does **not** need Harbor, Compose, Docker/BuildKit, registry-push credentials or source task directories. Never expose a host Docker socket or unauthenticated build endpoint to task/verifier sandboxes. Normal pulls of the final fixed images remain a platform responsibility.
 
-`images/management/build.sh` builds the self-contained management compiler from this checkout and the frozen dependency lock. Supply digest-pinned Python 3.12, Docker Engine DinD and historical anchor images; it includes the Engine binaries, the pinned base's Buildx CLI plugin (required even to resolve prebuilt image digests), and runtime tools, verifies the fixed Compose binary checksum, and tests imports plus Compose/Buildx binary execution without network or workspace mounts. The build check does not start a daemon. For example:
+The old `images/management` compiler and workspace contracts describe the explicit legacy source-task path; they are not requirements or fallbacks for native consumption.
+
+## 1. Build the installed Anchor
+
+Install this repository's fixed commit or controlled wheel in a clean Python 3.12 Linux x86_64 environment. Do not use the unrelated public PyPI `flotilla` package. The builder snapshots the exact installed non-editable distribution and runtime dependency closure, validates RECORD hashes and uses packaged resources rather than a checkout.
 
 ```sh
-bash images/management/build.sh registry.example.com/team/management:candidate \
-  'python@sha256:<python-3.12-digest>' \
-  'docker@sha256:<docker-dind-digest>' \
-  'registry.example.com/team/anchor@sha256:<anchor-digest>'
+flotilla anchor build \
+  --image registry.example.org/team/anchor:VERSION \
+  --python-image python@sha256:FULL_PYTHON_312_DIGEST \
+  --push --authfile /private/registry-auth.json
 ```
 
-For Kata-capable OpenSandbox deployments, opt in only the workspace anchor with `prepare.management_profile = "management"` and `opensandbox.management_extensions.runtimeClassName = "kata"`. Set `prepare.management_resources` for builds (for example 2 CPU / 4Gi); ordinary task, probe and GC sandboxes keep their existing runtime. Verify automatic daemon startup with the actual anchor entrypoint, `docker info`, a build/run/export cycle and storage operations. Engine installation alone is not this evidence. Keep credentials and the Docker socket outside all task contexts and mounts.
+The Python base must be pinned, compatible with the installed binary wheels and provide Python 3.12/venv. BusyBox is downloaded from a fixed source and verified. A fresh container checks the resulting helpers without network or source mounts. Publishing uses configurable Docker/Skopeo commands and a configurable manifest format (`v2s2` by default). No `latest` tag is changed. Record the reported **remote manifest digest**, not the local Docker image ID, in `[reaper].anchor_image`.
 
-The script builds only; it does not publish or promote a deployment. A working-tree candidate is marked `.dirty` in its image version. Publish a clean committed build and record its remote manifest digest only after acceptance. The historical anchor alone supplies file-operation tools, not the complete compiler. Neither a successful image build nor replacing its digest proves build-service connectivity, credential access or real platform acceptance.
+A successful build proves image self-containment, not platform behavior. Do not promote an image as platform-tested until the following checks pass.
 
-Copy [the deployment template](../deployments/examples/opensandbox.toml) as `deployment.toml`, the sole handwritten deployment input. Replace endpoint, storage, registry, image, and network values. Keep real deployment files and capability reports out of version control; `deployments/local/` is ignored by Git for this purpose.
+## 2. Provision shared tools and storage
 
-## Provision once
+Copy the [deployment template](../deployments/examples/opensandbox.toml), replacing endpoint, image, network and storage values. Keep actual credentials and deployment evidence outside Git. The environment variable named by `opensandbox.credential_env` supplies runtime API credentials.
 
-1. Build and push the anchor with `images/anchor/build.sh registry.example.com/team/anchor --push`. Record the digest. Its controlled BusyBox build must include `stat`, shell, file-management, and networking applets. Pin that digest in `reaper.anchor_image`.
-2. Assemble a share directory containing `bin/busybox`. Use the [share layout and scripts](../deployments/examples/README.md); record component versions and their corresponding source/license material.
-3. Publish the share before the first probe; this bounded management operation needs no existing report:
+Use one shared root visible consistently to all workers and the Anchor. Assemble a share directory containing the controlled `bin/busybox` and retain its corresponding license/source information. Bootstrap does not require an existing capability report:
 
 ```sh
 flotilla share publish share-root --deployment deployment.toml \
   --release initial --component busybox=1.36.1
 ```
 
-Paste the resulting release name and `RELEASE.json` SHA256 into `[share]`. Releases are immutable. Changing bytes requires a new release name.
+Put its release name and `RELEASE.json` digest in `[share]`. Shared-tools releases are immutable. They are separate from native task releases and any Agent runtime.
 
-4. Provision an ordinary probe image with the configured execd interface and shell/Python socket tools; pin its digest in `[probe].image`. Configure `privileged_image` and `inner_image` for the actual privileged path, if used. A DinD image and an ordinary code-interpreter image serve different purposes; neither image name proves capability. Configure controlled TCP/UDP echo targets and DNS input as described in [network validation](Network_Validation.md).
+## 3. Probe the actual deployment
 
-```sh
-flotilla probe --deployment deployment.toml --out capabilities.candidate.json
-```
-
-Inspect the complete `passed`/`failed`/`skipped`/`error` summary and cleanup result. After acceptance, promote the candidate to the configured `capabilities.json` path. Then verify the immutable share:
+Configure an ordinary probe image with the required shell/Python/socket tools and pin it by digest. Configure controlled TCP/UDP targets and DNS inputs as described in [Network validation](Network_Validation.md). Privileged images/device checks are optional, explicitly configured paths, not inferred from runtime names.
 
 ```sh
+flotilla probe --deployment deployment.toml --env sandbox.env
 flotilla share verify --deployment deployment.toml
 ```
 
-No declaration file, manual success flags, old-report merging, automatic package installation or protocol/runtime fallback is supported. A missing image tool is an incomplete check, not proof that the platform lacks the feature. Ordinary and privileged evidence are separate. Unsupported filesystem dialects and unconfigured optional runtime/device checks remain skipped. KVM is not inferred from Kata; FUSE needs the actual runtime extension plus successful mount/read/write/unmount behavior.
+Probe writes to the capability path declared in this deployment. `--out`, if supplied, must resolve to that same path; use a separate deployment file with a candidate capability path when evaluating candidates. The command applies required capability and security admission and fails if cleanup is not confirmed. It persists the measured report rather than replacing failures with manual success flags.
 
-The report binds operational configuration, storage mapping, shared-tool release and runtime protocols. Relevant changes require a new report even if the endpoint is unchanged. Legacy schema-1 reports are rejected rather than converted into success. Preserve explicit security waivers, but never add a waiver merely to make a migration green. No offline test or historical deployment result supplies current platform acceptance.
+Inspect `passed`, `failed`, `skipped` and `error` independently. Selecting a filesystem protocol is not evidence of behavior. The native profile includes readonly-rootfs/tmpfs and missing/nested mount targets where supported, in addition to actual ownership/mode, non-root writes, capacity, file transfer and isolation checks. Symlink path support is not inferred from success on missing ordinary directories.
 
-## Preparation and budgets
+Relevant configuration changes invalidate evidence. Do not merge old reports, waive security gaps merely to pass migration, or treat unit mocks/historical runs as current platform acceptance. Probe, Anchor cleanup, platform client cleanup and owned-directory deletion all matter.
+
+## 4. Prepare and publish task releases
+
+Example host preparation settings:
 
 ```toml
 [prepare]
@@ -60,38 +63,33 @@ concurrency = 4
 # docker_command = ["sudo", "-n", "docker"]
 
 [build]
-pullable_registries = ["registry.example.com"]
-target = "registry.example.com/team/tasks"
+pullable_registries = ["registry.example.org"]
+target = "registry.example.org/team/task-runtime"
 ```
 
-`HarborAttempt.create` and optional `flotilla prepare <task_key>` warmup use `[prepare]` and `[build]` inside the trusted platform management environment. Warmup writes diagnostics, not prepared JSONL training input. `prepare.management_network` selects explicit remote build/registry destinations, `management_mounts` supplies read-only credential/config files, and `management_env` names nonsecret endpoints and paths. Probe, GC and share bootstrap do not inherit these extra mounts or egress. No credentials are embedded in images, no DinD is started automatically, and no unrestricted egress is inferred. Separately set `limits.trial_concurrency`, `instance_budget`, create/exec rates, and timeouts according to measured platform quotas. Startup reserves replacement capacity; the anchor also consumes an instance.
+`--image-repo` overrides `build.target`. A target does not request mirroring all images: mirroring remains explicit. Keep registry credentials outside build contexts/releases. A read-only Docker auth directory may need a separate writable `BUILDX_CONFIG` directory for tool state; do not make the credential mount writable to accommodate it.
 
-For a private registry, explicitly mount an operator-owned Docker credential directory
-read-only into management sandboxes and point `prepare.management_env.DOCKER_CONFIG`
-at it. Keep it outside task sources and build contexts; never add it to task or verifier
-mounts. Buildx also writes local state under `DOCKER_CONFIG` by default, so set
-`prepare.management_env.BUILDX_CONFIG` to a separate writable management-local directory
-(for example `/tmp/flotilla-buildx`). Do not make the credential mount writable to satisfy
-Buildx. Allow the registry's authentication service and required blob endpoints in the
-management network policy as well as the registry hostname itself.
+Use [Native tasks](Native_Tasks.md) for `select` and `prepare`. Users publish the resulting complete release with existing storage tools. Bind its local and platform locations explicitly:
 
-## Maintain
-
-Public `release()` and `close()` wait for cleanup confirmation up to their deadline. Inspect `CleanupError.report` when cleanup is incomplete; closing a caller does not prove remote deletion. TTL is a final fallback. Use an independent platform client to verify real acceptance runs leave no labeled instances or owned launch directories.
-
-The bounded workspace contract can test a candidate management image before full fleet admission:
-
-```sh
-python tests/contract/workspace.py --deployment deployment.toml \
-  --image 'registry.example.com/team/management@sha256:<candidate-digest>' \
-  --out workspace-contract.json
+```toml
+[task_releases.example]
+local_root = "./releases/example"
+platform_root = "/shared/releases/example"
 ```
 
-It checks duplicate task keys/basenames, attempt isolation, modes, hardlinks and relative symlinks, native instruction parsing, private test staging, and cleanup on real storage. Add `--runtime --runtime-image 'registry.example.com/team/python@sha256:<digest>'` on an admitted deployment to also exercise actual shared and separate verifier roles, read-only artifact handoff, reward files, and cleanup. The fixture image needs Python and a POSIX shell. The separate role inherits the main environment so its tests are staged externally; an explicit native verifier image instead declares bundled tests. These checks do **not** replace the capability probe, Docker/runtime differential testing, real Agent evaluation, or an end-to-end training run.
+For host storage, the platform root is confined under `storage.host_path`. PVC deployments require an explicit `pvc:<claim>/<configured-root-subpath>/<release-key>` binding; bare relative roots are rejected. Preserve required metadata and symlinks during publication; both local and platform consumed files are verified. Releases must remain immutable while selected by any running job. Task upload is not a Flotilla backend feature.
+
+Configure instance budgets, concurrency, creation/exec rates and timeouts from measured quotas. Admission includes replacement capacity and Anchor overhead. Private writable task state is allocated per attempt; immutable assets may be shared. Compose/build inputs cannot be changed through runtime overrides.
+
+## Acceptance and maintenance
+
+Use real native tasks covering multi-service networking, separate verifier roles, non-root applications, seeded private state, real tmpfs/readonly rootfs, hidden tests, artifact handoff and failure cleanup. Verify the native consumer works without source Harbor directories or build tools, and performs no build/push/mirror/image-seed-export during attempts. Agent evaluation and GPU training are separate checks, not consequences of an image or probe success.
+
+`release()` and `close()` wait for confirmation. Inspect `CleanupError.report`; TTL is only a fallback. Independently confirm acceptance runs leave no owned instances or launch directories.
 
 ```sh
 flotilla gc --deployment deployment.toml
 flotilla share gc --deployment deployment.toml --keep previous --dry-run
 ```
 
-GC is an explicit operator command, not a background schedule. It also removes `tasks/.staging`, `tasks/.trash` and `share/staging` entries older than `--staging-age` (default 24 h), judged by the timestamp in their names; entries without one are listed, not removed. When its anchor cannot start, GC deletes sandboxes by label only, reports the directories it left, and exits 1. `gc --launch ID` skips the two-observation wait and is appropriate only after confirming that owner has exited. Shared task publications and previous storage formats are never automatically migrated or deleted. Review share GC's dry-run before running it without `--dry-run`.
+GC is explicit, not a background schedule. Use `gc --launch ID` only after confirming that owner has exited. Review share GC's dry-run before deleting. Native releases and historical runs are not automatically migrated or deleted; old jobs retain their original code, images and evidence.

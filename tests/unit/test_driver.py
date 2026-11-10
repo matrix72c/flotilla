@@ -500,7 +500,8 @@ def test_effective_build_configuration_applies_to_next_open(tmp_path: Path, chan
 
 @pytest.mark.parametrize("source", ["build", "image", "prebuilt"])
 @pytest.mark.parametrize("mount", ["bind", "nocopy"])
-def test_all_image_sources_apply_compose_derivation(tmp_path: Path, source: str, mount: str) -> None:
+def test_all_image_sources_adapt_user0_and_keep_real_mounts(tmp_path: Path, source: str, mount: str) -> None:
+    """Mounts never derive images; the only builds are the app Dockerfile and USER0 adaptation."""
     origin = "image: r.io/base:1" if source == "image" else "build: {context: .}"
     volume = (
         "{type: bind, source: ./payload, target: /data}"
@@ -509,7 +510,7 @@ def test_all_image_sources_apply_compose_derivation(tmp_path: Path, source: str,
     )
     path = _task(
         tmp_path,
-        "derive",
+        "adapt",
         compose=f"services:\n  main:\n    {origin}\n    volumes:\n      - {volume}\nvolumes:\n  cache: {{}}\n",
         Dockerfile="FROM r.io/base:1\n",
         payload__value="payload",
@@ -519,7 +520,7 @@ def test_all_image_sources_apply_compose_derivation(tmp_path: Path, source: str,
         (path / "environment/Dockerfile").unlink()
     runtime_digest = "sha256:" + "ef" * 32
     builder = FakeBuilder(digests=[DIGEST, runtime_digest] if source == "build" else [runtime_digest])
-    ctx = _ctx(builder=builder, registry=FakeRegistry(user="1000:1001"))
+    ctx = _ctx(builder=builder, registry=FakeRegistry(user="1000:1001", published=builder.published))
     if source == "prebuilt":
         (path / "task.toml").write_text('[environment]\ndocker_image="r.io/base:1"\n')
     outcome = build_task(load_task(path), tmp_path / "out", ctx)
@@ -535,6 +536,11 @@ def test_all_image_sources_apply_compose_derivation(tmp_path: Path, source: str,
     assert manifest.units["main"].context.uid == 1000
     assert manifest.units["main"].command == ["sh", "-c", "sleep infinity"]
     assert "CMD " not in text and "ENTRYPOINT " not in text
+    # The app build (source=build) publishes to the target repo; the USER0 layer is
+    # derived from that published digest, not from the unpinned source tag.
+    if source == "build":
+        assert builder.requests[0].dockerfile == "Dockerfile"
+        assert text is not None and text.splitlines()[0] == f"FROM r.io/ns/out@{DIGEST}"
 
 
 @pytest.mark.parametrize("mirror", [False, True])

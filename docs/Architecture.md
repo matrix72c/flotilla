@@ -4,15 +4,17 @@
 
 | Term | Meaning |
 |---|---|
-| Task | A directory with `task.toml` and an `environment/` directory containing a Dockerfile or Compose file |
+| Native task | A versioned definition with instruction, role manifests, immutable assets, verification and artifact contracts |
+| Source task | A Harbor directory imported on the preparation host; not a runtime input |
 | Environment | One running instance of a task: a group of sandboxes, one per service |
 | Service | One Compose service; the main service is `env.agent`, others are sidecars |
 | Trial | Flotilla's internal unit for one environment's sandboxes, labels, and lifecycle |
 | Launch | One running Flotilla client process; every resource it creates carries its launch ID |
 | Anchor | A small, renewable sandbox per launch that mounts the shared-storage root and performs file operations on it |
 | Share release | An immutable directory of helper binaries (BusyBox) mounted into every sandbox at `/.flotilla` |
-| Task key | Relative storage key of a complete original Harbor task |
-| Attempt workspace | Launch-owned private source, compiled role files, hidden tests, and handoff directories |
+| Dataset row | Release ID, task reference and digest, plus annotations and parameters |
+| Task release | Immutable manifest, native definitions and content-addressed static assets, explicitly bound to local/platform roots |
+| Attempt workspace | Launch-owned private role state, verification staging and artifact handoff directories |
 | Capability report | `capabilities.json`, written by `flotilla probe`: what the deployment supports, each item `passed`, `failed`, `skipped`, or `error` |
 | Security gap / waiver | A security capability the deployment lacks; startup refuses unless it is listed in `security.accept_insecure` |
 | execd | The OpenSandbox daemon inside each sandbox that runs commands and transfers files |
@@ -22,11 +24,12 @@
 
 ```mermaid
 flowchart LR
-    Source[Original platform Harbor task] --> Attempt[HarborAttempt]
-    Prepare[Optional warmup] --> Attempt
+    Source[Host Harbor source] --> Prepare[Host select and prepare]
+    Prepare --> Release[Immutable native release]
+    Release --> Binding[Explicit local and platform bindings]
+    Binding --> Attempt[NativeAttempt]
     Attempt --> Workspace[Private platform workspace]
-    Workspace --> Build[Trusted Compose and build helper]
-    Build --> API[Transient role environments]
+    Workspace --> API[Role environments]
     API --> Manager[Runtime manager]
     Manager --> Core[Lifecycle core]
     Core --> Platform[Platform protocol]
@@ -35,7 +38,7 @@ flowchart LR
     Harbor[Harbor adapter] --> API
 ```
 
-`compose` validates source semantics into a project. `build` resolves images and exports files in the trusted platform management environment. `HarborAttempt` owns a workspace for each episode and prepares roles from the original task there. The training host receives task metadata and handles, not source/test trees. Optional `flotilla prepare` exercises this flow and emits diagnostics; there is no prepared-JSONL production handoff. Project, manifest, and runtime plan remain distinct transient boundaries.
+`compose` validates source semantics on the preparation host. `build` resolves images, captures original execution identity, exports volume seeds and publishes required USER0 adaptations there. `flotilla prepare` atomically produces a native release and dataset. Users publish static files using their existing tools. `NativeAttempt` consumes verified native definitions and assets without Harbor parsing, Compose, build/push/mirror or image-seed export. Native roles reuse existing manifest, plan and scheduler boundaries rather than introducing a second runtime. See [Native tasks](Native_Tasks.md) for the protocol and immutable-publication trust boundary.
 
 `runtime` owns admission, environment handles, monitoring, and cleanup. Each client has one maintenance loop in a separate thread. Diagnostic callbacks use a bounded dispatcher thread; local file reads use owned thread work that must settle before their directory is removed.
 
@@ -45,10 +48,10 @@ flowchart LR
 
 A ready environment has a finite lifetime. Operations verify ownership and service health. Cancellation tracks remote execution attempts, interrupts identified commands, and confirms their status. If stopping cannot be proved, the environment becomes unusable and deletion takes over. Background-result delivery has the same responsibility. Commands are never replayed automatically.
 
-Shared storage separates immutable share releases, operator-staged original task keys, and launch-owned workspaces at `launches/<launch>/attempts/<attempt>`. Source and hidden tests remain private to the trusted management plane; agent roles receive only their selected mounts, public instruction, and writable handoff areas. Verification stages tests separately and mounts handoff artifacts read-only for a separate verifier. Role instances must be deleted before their workspace. Share releases retain checksum manifests.
+Shared storage separates immutable shared-tools releases, native task releases and launch-owned workspaces at `launches/<launch>/attempts/<attempt>`. Hidden tests remain private to the trusted Anchor; agent roles receive only selected mounts, public instruction and writable state. Verification stages tests after the agent stops. A separately declared verifier role receives declared handoff artifacts read-only; otherwise verification uses the main role. Role instances must be deleted before their workspace. Local and platform release files are verified, not just their manifest IDs.
 
-The management image must explicitly include Python, this Flotilla version with its `harbor` extra, pinned Compose and build tooling. `prepare.management_network`, `management_mounts` (read-only credentials), and `management_env` (nonsecret endpoints/paths) configure access to the remote build service. Probe/GC/share anchors retain their separate restricted bootstrap. No automatic DinD, protocol fallback, or credential baking is performed. Offline tests do not establish real platform acceptance or a compatible published image.
+The native Anchor contains installed Flotilla and filesystem helpers, not Harbor/Compose/build tooling or push credentials. Host preparation owns those optional dependencies. The old `HarborAttempt` and management workspace helper remain explicitly legacy APIs, not native fallbacks. No automatic DinD, protocol fallback or credential baking is performed. Offline tests do not establish real platform acceptance or a compatible published image.
 
 The anchor stops admitting new work after its renewal grace period. GC uses two observations and list-visibility bounds to avoid collecting a live owner. Explicit GC handles abandoned resources after crashes; it is not a scheduler inside the runtime.
 
-Reading entry points: `runtime/client.py`, `runtime/workspace.py`, `integrations/harbor_attempt.py`, `core/trial.py`, `core/reaper.py`, and `platform/base.py`. The public `flotilla.testing` package provides clocks, fake registries, and a deliberately limited fake platform for downstream contract tests; it ships in the wheel, and runtime packages never import it. See [the API](Runtime_API.md) for user contracts, [OpenSandbox](backends/opensandbox.md) for protocol details, and [integration guide](Integration_Guide.md) for the testing surface.
+Reading entry points: `runtime/client.py`, `runtime/workspace.py`, `native/runtime.py`, `native/release.py`, `core/trial.py`, `core/reaper.py`, and `platform/base.py`. The public `flotilla.testing` package provides clocks, fake registries, and a deliberately limited fake platform for downstream contract tests; it ships in the wheel, and runtime packages never import it. See [the API](Runtime_API.md) for user contracts, [OpenSandbox](backends/opensandbox.md) for protocol details, and [integration guide](Integration_Guide.md) for the testing surface.

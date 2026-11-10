@@ -9,13 +9,13 @@ from flotilla.build.images import (
     ImageError,
     ImageRef,
     Registry,
-    image_changes,
     pin_images,
     plan_image,
     plan_images,
     resolve_images,
 )
 from flotilla.compose.model import MAIN, Build, Project, Service, VolumeMount
+from flotilla.platform.filesystem import TmpfsMount
 
 DIGEST = "sha256:" + "ab" * 32
 DIGEST2 = "sha256:" + "cd" * 32
@@ -67,29 +67,29 @@ def test_pullable_matches_on_segment_boundary() -> None:
 
 def test_plan_image_dispositions() -> None:
     s = BuildSettings(pullable_registries=PULLABLE, target="t.io/ns/repo")
-    link = plan_image("db", _svc("db", image="registry.example.com/ns/pg:16"), s, needs_change=False)
+    link = plan_image("db", _svc("db", image="registry.example.com/ns/pg:16"), s)
     assert link.disposition == "link"
-    pub = plan_image("x", _svc("x", image="docker.io/library/redis:7"), s, needs_change=False)
-    assert pub.disposition == "mirror"  # not under a pullable prefix
-    built = plan_image(MAIN, _svc(MAIN, build=Build(context=".")), s, needs_change=False)
+    built = plan_image(MAIN, _svc(MAIN, build=Build(context=".")), s)
     assert built.disposition == "build" and built.ref is None
-    changed = plan_image("db", _svc("db", image="registry.example.com/ns/pg:16"), s, needs_change=True)
-    assert changed.disposition == "build"  # image must be modified -> build/derive, even if pullable
 
 
-def test_mirror_images_forces_mirror() -> None:
-    s = BuildSettings(pullable_registries=PULLABLE, mirror_images=True, target="t.io/ns/repo")
-    assert plan_image("db", _svc("db", image="registry.example.com/ns/pg:16"), s, needs_change=False).disposition == (
-        "mirror"
-    )
+def test_mirror_requires_explicit_configuration() -> None:
+    # Mirroring publishes into the user's registry; it is never an implicit
+    # fallback for a source the platform cannot pull.
+    s = BuildSettings(pullable_registries=PULLABLE, target="t.io/ns/repo")
+    with pytest.raises(ImageError, match="mirror_images"):
+        plan_image("x", _svc("x", image="docker.io/library/redis:7"), s)
+    explicit = BuildSettings(pullable_registries=PULLABLE, mirror_images=True, target="t.io/ns/repo")
+    assert plan_image("x", _svc("x", image="docker.io/library/redis:7"), explicit).disposition == "mirror"
 
 
 def test_plan_image_requires_image_or_build() -> None:
     with pytest.raises(ImageError):
-        plan_image("x", _svc("x"), BuildSettings(), needs_change=False)
+        plan_image("x", _svc("x"), BuildSettings())
 
 
-def test_image_changes_from_bind_and_nocopy() -> None:
+def test_mounts_never_plan_image_builds() -> None:
+    """Writable binds, nocopy volumes, tmpfs and readonly roots are runtime mounts, not image changes."""
     project = Project(
         services={
             "writes_bind": _svc(
@@ -102,12 +102,24 @@ def test_image_changes_from_bind_and_nocopy() -> None:
                 image="r.io/b:1",
                 volumes=(VolumeMount(kind="volume", source="cache", target="/var/cache", nocopy=True),),
             ),
-            "plain": _svc("plain", image="r.io/c:1"),
+            "tmpfs": _svc(
+                "tmpfs",
+                image="r.io/c:1",
+                tmpfs=(TmpfsMount(mount_path="/scratch"),),
+                readonly_rootfs=True,
+            ),
+            "plain": _svc("plain", image="r.io/d:1"),
         },
         networks={},
         volumes=frozenset({"cache"}),
     )
-    assert image_changes(project) == frozenset()
+    plans = plan_images(project, BuildSettings(pullable_registries=("r.io",)))
+    assert {p.service: p.disposition for p in plans} == {
+        "writes_bind": "link",
+        "nocopy": "link",
+        "tmpfs": "link",
+        "plain": "link",
+    }
 
 
 # ───────────────────────────── Resolution and mirror ─────────────────────────────
@@ -116,10 +128,15 @@ def test_image_changes_from_bind_and_nocopy() -> None:
 class FakeRegistry(Registry):
     def __init__(self, digests: dict[str, str]) -> None:
         self._digests = digests  # name:tag → digest
+        self._published: dict[str, str] = {}  # name:tag or name@digest → digest served after a copy
         self.resolved: list[tuple[str, str]] = []
         self.copied: list[tuple[str, str]] = []
 
     def digest(self, name: str, reference: str) -> str:
+        key = f"{name}@{reference}" if reference.startswith("sha256:") else f"{name}:{reference}"
+        pushed = self._published.get(key)
+        if pushed is not None:
+            return pushed
         self.resolved.append((name, reference))
         return self._digests[f"{name}:{reference}"]
 
@@ -128,6 +145,7 @@ class FakeRegistry(Registry):
 
     def copy(self, source: str, target: str) -> None:
         self.copied.append((source, target))
+        self._published[target] = source.rpartition("@")[2]
 
 
 def _project(**services: Service) -> Project:
@@ -137,19 +155,20 @@ def _project(**services: Service) -> Project:
 def test_link_references_source_digest_without_copy() -> None:
     s = BuildSettings(pullable_registries=PULLABLE, target="t.io/ns/repo")
     reg = FakeRegistry({"registry.example.com/ns/pg:16": DIGEST})
-    plans = [plan_image("db", _svc("db", image="registry.example.com/ns/pg:16"), s, needs_change=False)]
+    plans = [plan_image("db", _svc("db", image="registry.example.com/ns/pg:16"), s)]
     res = resolve_images(plans, s, reg)
     assert res.images == {"db": f"registry.example.com/ns/pg@{DIGEST}"}
     assert reg.copied == [] and res.to_build == ()
 
 
 def test_mirror_copies_once_and_references_target() -> None:
-    s = BuildSettings(pullable_registries=PULLABLE, target="t.io/ns/repo")
+    s = BuildSettings(pullable_registries=PULLABLE, mirror_images=True, target="t.io/ns/repo")
     reg = FakeRegistry({"docker.io/library/redis:7": DIGEST})
-    # Two services reference the same public image: resolved once, copied once.
+    # Two services reference the same public image: resolved once, copied once,
+    # and the recorded reference is the remote digest read after the copy.
     plans = [
-        plan_image("a", _svc("a", image="docker.io/library/redis:7"), s, needs_change=False),
-        plan_image("b", _svc("b", image="docker.io/library/redis:7"), s, needs_change=False),
+        plan_image("a", _svc("a", image="docker.io/library/redis:7"), s),
+        plan_image("b", _svc("b", image="docker.io/library/redis:7"), s),
     ]
     res = resolve_images(plans, s, reg)
     assert res.images == {"a": f"t.io/ns/repo@{DIGEST}", "b": f"t.io/ns/repo@{DIGEST}"}
@@ -160,15 +179,15 @@ def test_mirror_copies_once_and_references_target() -> None:
 def test_pinned_image_is_not_re_resolved() -> None:
     s = BuildSettings(pullable_registries=PULLABLE)
     reg = FakeRegistry({})
-    plans = [plan_image("db", _svc("db", image=f"registry.example.com/ns/pg@{DIGEST}"), s, needs_change=False)]
+    plans = [plan_image("db", _svc("db", image=f"registry.example.com/ns/pg@{DIGEST}"), s)]
     res = resolve_images(plans, s, reg)
     assert res.images == {"db": f"registry.example.com/ns/pg@{DIGEST}"} and reg.resolved == []
 
 
 def test_mirror_without_target_rejected() -> None:
-    s = BuildSettings(pullable_registries=PULLABLE)  # no target
+    s = BuildSettings(mirror_images=True)  # no target
     reg = FakeRegistry({"docker.io/library/redis:7": DIGEST})
-    plans = [plan_image("a", _svc("a", image="docker.io/library/redis:7"), s, needs_change=False)]
+    plans = [plan_image("a", _svc("a", image="docker.io/library/redis:7"), s)]
     with pytest.raises(ImageError, match="target"):
         resolve_images(plans, s, reg)
 
@@ -189,7 +208,7 @@ def test_build_services_go_to_to_build() -> None:
 def test_resolver_rejects_bad_digest_from_registry() -> None:
     s = BuildSettings(pullable_registries=PULLABLE)
     reg = FakeRegistry({"registry.example.com/ns/pg:16": "not-a-digest"})
-    plans = [plan_image("db", _svc("db", image="registry.example.com/ns/pg:16"), s, needs_change=False)]
+    plans = [plan_image("db", _svc("db", image="registry.example.com/ns/pg:16"), s)]
     with pytest.raises(ImageError):
         resolve_images(plans, s, reg)
 
@@ -198,7 +217,7 @@ def test_different_tags_in_same_repository_resolve_independently() -> None:
     settings = BuildSettings(pullable_registries=("r.io",))
     registry = FakeRegistry({"r.io/app:1": DIGEST, "r.io/app:2": DIGEST2})
     plans = [
-        plan_image(name, _svc(name, image=f"r.io/app:{tag}"), settings, needs_change=False)
+        plan_image(name, _svc(name, image=f"r.io/app:{tag}"), settings)
         for name, tag in (("a", "1"), ("b", "2"), ("c", "1"))
     ]
     result = resolve_images(plans, settings, registry)
@@ -211,18 +230,18 @@ def test_explicit_digest_does_not_replace_tag_resolution(pinned_first: bool) -> 
     settings = BuildSettings(pullable_registries=("r.io",))
     registry = FakeRegistry({"r.io/app:latest": DIGEST2})
     refs = {"pinned": f"r.io/app@{DIGEST}", "tagged": "r.io/app"}
-    plans = [plan_image(name, _svc(name, image=ref), settings, needs_change=False) for name, ref in refs.items()]
+    plans = [plan_image(name, _svc(name, image=ref), settings) for name, ref in refs.items()]
     result = resolve_images(plans if pinned_first else plans[::-1], settings, registry)
     assert result.images == {"pinned": f"r.io/app@{DIGEST}", "tagged": f"r.io/app@{DIGEST2}"}
     assert registry.resolved == [("r.io/app", "latest")]
 
 
-def test_pinning_does_not_copy_and_also_pins_derive_bases() -> None:
-    settings = BuildSettings(target="t.io/out")
+def test_pinning_does_not_copy_and_pins_every_mirrored_source() -> None:
+    settings = BuildSettings(pullable_registries=("r.io",), target="t.io/out", mirror_images=True)
     registry = FakeRegistry({"r.io/app:1": DIGEST})
     plans = [
-        plan_image("a", _svc("a", image="r.io/app:1"), settings, needs_change=False),
-        plan_image("b", _svc("b", image="r.io/app:1"), settings, needs_change=True),
+        plan_image("a", _svc("a", image="r.io/app:1"), settings),
+        plan_image("b", _svc("b", image="r.io/app:1"), settings),
     ]
     pinned = pin_images(plans, registry)
     assert all(p.ref is not None and p.ref.digest == DIGEST for p in pinned)
@@ -230,3 +249,10 @@ def test_pinning_does_not_copy_and_also_pins_derive_bases() -> None:
     resolve_images(pinned, settings, registry)
     assert registry.resolved == [("r.io/app", "1")]
     assert len(registry.copied) == 1
+
+
+def test_attestations_require_oci_mediatypes() -> None:
+    # Schema2 publications are the default; attestations are an explicit OCI opt-in.
+    with pytest.raises(ValueError, match="oci_mediatypes"):
+        BuildSettings(attestations=True)
+    assert BuildSettings(oci_mediatypes=True, attestations=True).attestations

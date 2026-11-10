@@ -46,6 +46,17 @@ release_sha256 = "{SHA}"
     assert cfg.network.policy() == ExternalPolicy(mode="none")  # no external given: only none
 
 
+def test_build_publication_settings() -> None:
+    defaults = config().build.settings()
+    assert defaults.oci_mediatypes is False
+    assert defaults.attestations is False
+    explicit = config(build={"oci_mediatypes": True, "attestations": True}).build.settings()
+    assert explicit.oci_mediatypes is True
+    assert explicit.attestations is True
+    with pytest.raises(ValueError, match="oci_mediatypes"):
+        config(build={"attestations": True}).build.settings()
+
+
 def test_group_extension_is_optional() -> None:
     assert config().opensandbox_settings().group_extension is None
     data = config_data()

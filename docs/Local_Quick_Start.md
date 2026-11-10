@@ -1,8 +1,8 @@
 # Local quick start
 
-This is a local infrastructure setup reference for OpenSandbox's Docker runtime, not a validated end-to-end recipe for the new platform-owned Harbor flow. The redesign has **not** completed real platform acceptance, and no compatible management image has been published. Old BusyBox-only anchor images cannot run the workspace compiler. Do not interpret the example security waivers as measurements or a no-network guarantee.
+This is a local infrastructure reference for OpenSandbox's Docker runtime, not evidence that your deployment passes isolation or filesystem contracts. Do not interpret example security waivers as measurements or a no-network guarantee.
 
-The management image must additionally contain Python 3.12, the current Flotilla `harbor` extra, pinned Docker Compose (default 2.39.4), and build tooling. Configure the remote Docker/build endpoint and registry reachability explicitly through `prepare.management_network`; provide credentials only as read-only `management_mounts` and refer to them using nonsecret `management_env` values (for example `DOCKER_HOST` and `DOCKER_CONFIG`). Container `localhost` is not the host registry. No automatic DinD or egress opening is provided. Until these paths and the schema-2 probe pass on your actual deployment, stop before running tasks.
+Native tasks are prepared on the CPU host and published as static releases. The Anchor runs the installed native helper; Harbor, Compose and image build tools stay on the preparation host. No remote compiler or Docker socket is needed in task sandboxes. Container `localhost` is not the host registry. Until the capability probe and cleanup pass on your actual deployment, stop before running tasks. See [Deployment](Deployment.md) for installed-package provisioning.
 
 ## Prerequisites
 
@@ -90,14 +90,16 @@ export FLOTILLA_OPENSANDBOX_CREDENTIAL="$(cat "$LOCAL/api_key")"
 
 ## 3. Build the anchor and probe images
 
-The historical anchor is a small file-operation sandbox. These scripts build the existing images, not a validated platform-build management image; extend and test the management image requirements above before assigning its digest to `reaper.anchor_image`. The probe image also needs Python socket/DNS tooling for schema-2 checks. Both scripts print the pushed digest on their last line:
+Build the native Anchor from the installed Flotilla wheel and a fixed Python 3.12 base. For this local HTTP registry, build locally and push through the locally configured Docker daemon:
 
 ```sh
-"$FLOTILLA_REPO/images/anchor/build.sh" localhost:5000/flotilla/anchor:local --push
+flotilla anchor build --image localhost:5000/flotilla/anchor:local \
+  --python-image python@sha256:FULL_PYTHON_312_DIGEST
+docker push localhost:5000/flotilla/anchor:local
 "$FLOTILLA_REPO/images/probe/build.sh" localhost:5000/flotilla/probe:local --push
 ```
 
-Note both `localhost:5000/...@sha256:...` references.
+The separate probe-image script is an optional operator example; a pre-provisioned compatible probe image also works. It needs Python socket/DNS tooling. Record each pushed remote manifest digest, not a local image ID. The native Anchor build and self-test need no framework checkout.
 
 ## 4. Write the deployment
 
@@ -155,7 +157,7 @@ target = "localhost:5000/flotilla/tasks"
 pullable_registries = ["localhost:5000", "docker.io"]
 ```
 
-`[build].pullable_registries` lists registries the sandboxes can pull from directly. Images from anywhere else are copied to `[build].target` first.
+`[build].pullable_registries` lists registries the sandboxes can pull from directly. Other sources are rejected unless image mirroring is explicitly enabled; setting a build target alone does not request mirroring.
 
 Add probe inputs to the same `deployment.toml`:
 
@@ -202,7 +204,7 @@ The probe creates real sandboxes and checks lifecycle, execution, authentication
 
 ## 7. Run a task
 
-Only after management connectivity, capability checks and cleanup have been validated, create the [README example](../README.md#example), a two-service task with Redis:
+Only after capability checks and cleanup pass, create the [README example](../README.md#example), a two-service task with Redis:
 
 ```sh
 mkdir -p task/environment
@@ -224,7 +226,9 @@ services:
 EOF
 ```
 
-Stage this complete original task at `datasets/demo/task` below `$LOCAL/shared` using storage tooling that preserves modes. Save the README's Python example as `example.py` in `$LOCAL`; the client passes only that relative key. Once acceptance is complete, run it:
+Add a verifier script under `task/tests/test.sh` for the task's verification contract, then select and prepare it on this host. Publish the complete generated release under a new path in `$LOCAL/shared`, preserving its required metadata. Configure `[task_releases.example]` with the local release and its platform root. Follow [Quick start](Quick_Start.md) for exact preparation/binding commands. Do not stage the original Harbor directory as an execution input.
+
+Save the README's Python example as `example.py` in `$LOCAL`, with its native dataset path, then run:
 
 ```sh
 python example.py

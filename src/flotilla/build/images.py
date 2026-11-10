@@ -64,6 +64,11 @@ class BuildSettings:
     #: service `image` and Dockerfile `FROM` are substituted. Points to internal copies when public registries are
     #: unreachable; a substituted ref under a pullable prefix makes the service link. Keys match exactly (with tag).
     image_replacements: Mapping[str, str] = field(default_factory=dict)
+    #: Publications default to Docker schema2 manifests without attestations: OCI image
+    #: indexes are rejected by some internal registries. Registries that require OCI
+    #: mediatypes opt in explicitly; attestations additionally require OCI mediatypes.
+    oci_mediatypes: bool = False
+    attestations: bool = False
 
     def __post_init__(self) -> None:
         for prefix in self.pullable_registries:
@@ -74,6 +79,8 @@ class BuildSettings:
                 raise ValueError(
                     f"image_replacements entries must be non-empty on both sides: {source!r} -> {target!r}"
                 )
+        if self.attestations and not self.oci_mediatypes:
+            raise ValueError("attestations require oci_mediatypes; a schema2 manifest cannot reference them")
 
     def replace(self, ref: str) -> str:
         """Map an image reference through the substitution table; unchanged if absent."""
@@ -88,36 +95,29 @@ class BuildSettings:
 class ServiceImage:
     service: str
     disposition: Disposition
-    ref: ImageRef | None  # None: build from Dockerfile; build + ref: derive from that base image
-
-
-def image_changes(project: Project) -> frozenset[str]:
-    """Prepare framework/tmpfs mount points only; binds and volumes are always real mounts."""
-    return frozenset(name for name, svc in project.services.items() if svc.tmpfs or svc.readonly_rootfs)
+    ref: ImageRef | None  # None: build from the service Dockerfile; set for link / mirror
 
 
 def plan_images(project: Project, settings: BuildSettings) -> list[ServiceImage]:
-    """Decide image dispositions per service for a whole task (pure function)."""
-    changed = image_changes(project)
-    return [
-        plan_image(name, svc, settings, needs_change=name in changed) for name, svc in sorted(project.services.items())
-    ]
+    """Decide image dispositions per service for a whole task (pure function).
 
-
-def plan_image(service: str, svc: Service, settings: BuildSettings, *, needs_change: bool) -> ServiceImage:
-    """Decide one service's image disposition (pure function, no network).
-
-    `needs_change`: prepare framework/tmpfs mount points; such services must build/derive.
+    Mount directories (tmpfs, readonly roots, binds, volumes) are runtime
+    responsibilities: no service is derived or built for them here.
     """
+    return [plan_image(name, svc, settings) for name, svc in sorted(project.services.items())]
+
+
+def plan_image(service: str, svc: Service, settings: BuildSettings) -> ServiceImage:
+    """Decide one service's image disposition (pure function, no network)."""
     if svc.build is not None:
         return ServiceImage(service, "build", None)
     if svc.image is None:
         raise ImageError(f"service {service} has neither image nor build")
     ref = ImageRef.parse(settings.replace(svc.image))
-    if needs_change:
-        return ServiceImage(service, "build", ref)
-    if settings.mirror_images or not settings.pullable(ref):
+    if settings.mirror_images:
         return ServiceImage(service, "mirror", ref)
+    if not settings.pullable(ref):
+        raise ImageError(f"service {service}: source registry is not pullable; explicitly enable mirror_images")
     return ServiceImage(service, "link", ref)
 
 
@@ -203,7 +203,10 @@ def resolve_images(
         if pinned is None:
             target_tag = f"{settings.target}:mirror-{digest.removeprefix('sha256:')[:12]}"
             registry.copy(source, target_tag)
-            pinned = f"{settings.target}@{digest}"
+            remote_digest = registry.digest(settings.target, target_tag.rsplit(":", 1)[1])
+            if not _DIGEST.fullmatch(remote_digest):
+                raise ImageError("mirror returned an invalid remote digest")
+            pinned = f"{settings.target}@{remote_digest}"
             mirrored[source] = pinned
         images[plan.service] = pinned
     return ImageResolution(images=images, dispositions=dispositions, to_build=tuple(to_build))

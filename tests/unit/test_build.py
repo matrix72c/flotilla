@@ -167,9 +167,12 @@ def test_build_contexts_only_maps_replaced() -> None:
 def test_replacement_applies_before_disposition() -> None:
     # Under a pullable prefix after replacement -> mirror becomes link (the disposition is decided after replacement).
     svc = Service(name="cache", image="docker.io/library/redis:7")
-    assert plan_image("cache", svc, SETTINGS, needs_change=False).disposition == "link"
+    assert plan_image("cache", svc, SETTINGS).disposition == "link"
     plain = BuildSettings(pullable_registries=("registry.example.com",), target="t.io/ns/r")
-    assert plan_image("cache", svc, plain, needs_change=False).disposition == "mirror"
+    with pytest.raises(ImageError, match="mirror_images"):  # mirroring stays explicit
+        plan_image("cache", svc, plain)
+    explicit = BuildSettings(pullable_registries=("registry.example.com",), target="t.io/ns/r", mirror_images=True)
+    assert plan_image("cache", svc, explicit).disposition == "mirror"
 
 
 def test_named_root_uses_the_image_database() -> None:

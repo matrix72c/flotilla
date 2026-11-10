@@ -12,7 +12,8 @@ import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from threading import Timer
 from typing import Any
 
 from flotilla.build.builder import BuildRequest
@@ -99,14 +100,23 @@ class DockerRegistry:
 
 @dataclass(frozen=True)
 class DockerBuilder:
-    """`Builder` implemented with `docker buildx build --push`.
+    """`Builder` implemented with `docker buildx build` pushing through the image exporter.
 
-    Pushes on build; the digest is read from `--metadata-file` (`containerimage.digest`), not parsed from logs.
+    Publications default to Docker schema2 manifests without attestations (`oci-mediatypes=false`,
+    `--provenance=false --sbom=false`): buildx's own defaults push an OCI image index, which some
+    internal registries reject. Registries that require OCI mediatypes opt in explicitly; the
+    pushed digest is read from `--metadata-file` (`containerimage.digest`), not parsed from logs.
     """
 
     docker_cmd: Sequence[str] = field(default_factory=lambda: ("docker",))
     timeout_s: float = 1800.0
     platform: str = "linux/amd64"
+    oci_mediatypes: bool = False
+    attestations: bool = False
+
+    def __post_init__(self) -> None:
+        if self.attestations and not self.oci_mediatypes:
+            raise ImageError("build attestations require OCI mediatypes; enable oci_mediatypes or disable attestations")
 
     def build(self, request: BuildRequest) -> str:
         with tempfile.TemporaryDirectory(prefix="flotilla-build-") as tmp:
@@ -114,7 +124,14 @@ class DockerBuilder:
             args = [
                 "buildx",
                 "build",
-                "--push",
+                # An explicit image exporter replaces `--push` shorthand so the manifest
+                # format is pinned instead of inheriting buildx's OCI defaults.
+                "--output",
+                f"type=image,push=true,oci-mediatypes={str(self.oci_mediatypes).lower()}",
+                "--provenance",
+                str(self.attestations).lower(),
+                "--sbom",
+                str(self.attestations).lower(),
                 "--platform",
                 self.platform,
                 "--metadata-file",
@@ -191,6 +208,53 @@ class DockerImageExport:
                     removed = False
             if record is not None and removed:
                 record.unlink(missing_ok=True)
+
+    def validate_mount_paths(self, image: str, paths: tuple[str, ...]) -> None:
+        """Inspect only archive headers in a stopped container, never run image code.
+
+        Docker cp without -L preserves a source symlink. Inspect every existing
+        component separately, stopping the stream after its first header rather
+        than exporting a root filesystem or executing a shell inside the image.
+        """
+        with self._container(image) as container:
+            checked: set[str] = set()
+            for value in paths:
+                path = PurePosixPath(value)
+                if not path.is_absolute() or ".." in path.parts or path == PurePosixPath("/"):
+                    raise ImageError(f"unsafe mount target: {value!r}")
+                for part in (*reversed(path.parents), path):
+                    text = str(part)
+                    if text == "/" or text in checked:
+                        continue
+                    with tempfile.TemporaryFile() as errors:
+                        process = subprocess.Popen(
+                            [*self.docker_cmd, "cp", f"{container}:{text}", "-"],
+                            stdout=subprocess.PIPE,
+                            stderr=errors,
+                        )
+                        timer = Timer(self.timeout_s, process.kill)
+                        timer.start()
+                        try:
+                            assert process.stdout is not None
+                            with tarfile.open(fileobj=process.stdout, mode="r|*") as archive:
+                                entry = archive.next()
+                                if entry is None or not entry.isdir():
+                                    raise ImageError(f"image mount path is a symlink or non-directory: {text}")
+                        except tarfile.TarError as exc:
+                            process.wait(timeout=self.timeout_s)
+                            errors.seek(0)
+                            diagnostic = errors.read().decode(errors="replace")
+                            if "Could not find the file" in diagnostic or "No such file or directory" in diagnostic:
+                                break
+                            raise ImageError(f"cannot inspect image mount path {text}: {diagnostic}") from exc
+                        finally:
+                            timer.cancel()
+                            if process.poll() is None:
+                                process.kill()
+                            process.wait()
+                            if process.stdout is not None:
+                                process.stdout.close()
+                    checked.add(text)
 
     def accounts(self, image: str) -> ImageAccounts:
         with self._container(image) as container, tempfile.TemporaryDirectory(prefix="flotilla-identity-") as temporary:

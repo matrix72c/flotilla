@@ -8,11 +8,9 @@ import json
 import sys
 import uuid
 from collections.abc import Sequence
-from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from flotilla.compose.task import find_tasks
 from flotilla.config import ConfigError, FlotillaConfig
 from flotilla.core.anchor import Anchor
 from flotilla.core.deletion import Deleter
@@ -20,23 +18,47 @@ from flotilla.core.gc import Gc, GcReport
 from flotilla.core.volumes import LAUNCHES
 from flotilla.platform.base import FlotillaError
 from flotilla.platform.clock import SystemClock
-from flotilla.probe import probe
+from flotilla.probe import probe_deployment
 from flotilla.share.release import ReleaseError, VerifyReport, gc_releases, publish_release, verify_release
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="flotilla", description="orchestrate Compose environments as groups of sandboxes"
+        prog="flotilla", description="prepare portable native tasks and orchestrate sandbox environments"
     )
     sub = parser.add_subparsers(dest="command", required=True)
     command = sub.add_parser("inspect", help="inspect task environments and resources")
     command.add_argument("tasks", nargs="+", type=Path)
     command.add_argument("--deployment", required=True, type=Path)
     command.add_argument("--out", type=Path)
-    pr = sub.add_parser("prepare", help="validate and warm images from platform-side Harbor tasks; no dataset export")
-    pr.add_argument("tasks", nargs="+", help="original Harbor task keys relative to deployment storage")
-    pr.add_argument("--deployment", required=True, type=Path, help="deployment configuration (TOML)")
-    pr.add_argument("--out", type=Path, help="optional diagnostics JSON, not a training dataset")
+    sel = sub.add_parser("select", help="select host-side Harbor tasks without building or creating sandboxes")
+    sel.add_argument("--host-root", required=True, type=Path)
+    sel.add_argument("--deployment", required=True, type=Path)
+    sel.add_argument("--out", required=True, type=Path)
+    sel.add_argument("--report", required=True, type=Path)
+    sel.add_argument("--require-prebuilt-images", action="store_true")
+    pr = sub.add_parser("prepare", help="prepare a native task release; build and publish necessary USER0 images")
+    pr.add_argument(
+        "selected", type=Path, help="host-side selected.jsonl; old warmup task-key arguments are unsupported"
+    )
+    pr.add_argument("--deployment", required=True, type=Path)
+    pr.add_argument("--env", type=Path, help="explicit preparation credentials; platform credentials are not needed")
+    pr.add_argument("--image-repo", help="output repository without tag/digest; overrides deployment build.target")
+    pr.add_argument("--out", required=True, type=Path, help="new native release directory (not uploaded automatically)")
+    pr.add_argument("--report", required=True, type=Path)
+    pr.add_argument("--resume", action="store_true")
+    pr.add_argument("--work-dir", type=Path)
+    pr.add_argument("--require-prebuilt-images", action="store_true")
+    anc = sub.add_parser("anchor", help="installed-package Anchor tools")
+    anchor_sub = anc.add_subparsers(dest="anchor_command", required=True)
+    ab = anchor_sub.add_parser("build", help="build and verify an Anchor; publication requires --push")
+    ab.add_argument("--image", required=True)
+    ab.add_argument("--python-image", required=True, help="Python 3.12 linux/amd64 base pinned by digest")
+    ab.add_argument("--push", action="store_true")
+    ab.add_argument("--authfile", type=Path)
+    ab.add_argument("--docker", default="docker", help="Docker command, parsed as argv")
+    ab.add_argument("--skopeo", default="skopeo", help="Skopeo command, parsed as argv")
+    ab.add_argument("--manifest-format", choices=("v2s2", "oci"), default="v2s2")
     g = sub.add_parser("gc", help="clean up leftover launches via a temporary anchor")
     g.add_argument("--deployment", required=True, type=Path, help="deployment configuration (TOML)")
     g.add_argument(
@@ -50,6 +72,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p = sub.add_parser("probe", help="run contract tests against a deployment and write a capability report")
     p.add_argument("--deployment", required=True, type=Path, help="deployment configuration (TOML)")
+    p.add_argument("--env", type=Path, help="explicit platform credential environment file")
     p.add_argument("--image", help="explicit override of [probe].image (digest-pinned)")
     p.add_argument(
         "--out",
@@ -87,38 +110,15 @@ def _build_parser() -> argparse.ArgumentParser:
 
 async def _probe(args: argparse.Namespace) -> int:
     cfg = FlotillaConfig.load(args.deployment)
-    settings = cfg.probe_settings()
-    if args.image is not None:
-        settings = replace(settings, image=args.image)
-    if args.hosts_recheck is not None:
-        settings = replace(settings, hosts_recheck_s=args.hosts_recheck)
-    clock = SystemClock()
-    platform = cfg.build_platform(clock=clock, caps=cfg.management_capabilities())
-    # Temporary anchor with its own launch_id; mounts the shared root, removed on exit; only creates launches/<id>.
-    anchor = Anchor(platform, clock, f"probe-{uuid.uuid4().hex[:12]}", cfg.anchor_settings())
-    try:
-        await anchor.start()
-        await anchor.mkdir(f"launches/{anchor.launch_id}", stage="prepare")
-        try:
-            report = await probe(platform, clock, anchor, settings)
-        finally:
-            await anchor.remove(f"launches/{anchor.launch_id}", stage="run")
-    finally:
-        await anchor.close()
-        await platform.aclose()
-
-    out = args.out or cfg.capabilities_path()
-    report.write_json(out)
-    missing = report.missing_required()
-    print(f"capability report written: {out}")
-    print("required: " + ("all satisfied" if not missing else "unmet " + ", ".join(missing)))
-    print("security gaps: " + ("none" if not report.security_gaps() else ", ".join(report.security_gaps())))
-    return 1 if missing else 0
+    await probe_deployment(cfg, out=args.out, image=args.image, hosts_recheck=args.hosts_recheck)
+    print(f"capability report written and admission passed: {cfg.capabilities_path()}")
+    return 0
 
 
 async def _tasks(args: argparse.Namespace) -> int:
     from dataclasses import asdict
 
+    from flotilla.compose.task import find_tasks
     from flotilla.prepare.inspect import inspect
 
     cfg = FlotillaConfig.load(args.deployment)
@@ -141,16 +141,56 @@ async def _tasks(args: argparse.Namespace) -> int:
     return int(failed)
 
 
-async def _prepare(args: argparse.Namespace) -> int:
+def _prepare(args: argparse.Namespace) -> int:
     from flotilla.prepare import prepare
 
-    results = await prepare(args.tasks, deployment=args.deployment)
-    document = json.dumps(results, ensure_ascii=False, indent=2)
-    if args.out is not None:
-        args.out.parent.mkdir(parents=True, exist_ok=True)
-        args.out.write_text(document + "\n")
-    print(document)
-    return int(any(row["status"] == "failed" for row in results))
+    prepare(
+        args.selected,
+        deployment=args.deployment,
+        out=args.out,
+        report=args.report,
+        image_repo=args.image_repo,
+        resume=args.resume,
+        work_dir=args.work_dir,
+        require_prebuilt_images=args.require_prebuilt_images,
+    )
+    print(f"native release prepared: {args.out}; publish it using your storage tools before consuming")
+    return 0
+
+
+def _select(args: argparse.Namespace) -> int:
+    from flotilla.prepare import select
+
+    cfg = FlotillaConfig.load(args.deployment)
+    select(
+        args.host_root,
+        caps=cfg.platform_capabilities(),
+        out=args.out,
+        report=args.report,
+        require_prebuilt_images=args.require_prebuilt_images,
+    )
+    print(f"selected tasks: {args.out}")
+    return 0
+
+
+def _anchor(args: argparse.Namespace) -> int:
+    import shlex
+
+    from flotilla.anchor_build import AnchorBuildOptions, build_anchor
+
+    result = build_anchor(
+        AnchorBuildOptions(
+            image=args.image,
+            python_image=args.python_image,
+            push=args.push,
+            authfile=args.authfile,
+            docker=tuple(shlex.split(args.docker)),
+            skopeo=tuple(shlex.split(args.skopeo)),
+            manifest_format=args.manifest_format,
+        )
+    )
+    print(result.deployment_toml or f"Anchor built and verified locally: {result.image_id} (not published)")
+    return 0
 
 
 async def _gc(args: argparse.Namespace) -> int:
@@ -310,6 +350,14 @@ def _print_verify(report: VerifyReport) -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
+    if getattr(args, "env", None) is not None:
+        from flotilla.environment import load_env_file
+
+        try:
+            load_env_file(args.env)
+        except (OSError, ValueError) as exc:
+            print(exc, file=sys.stderr)
+            return 2
     if args.command == "probe":
         try:
             return asyncio.run(_probe(args))
@@ -322,9 +370,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         except (ConfigError, ValueError, OSError, FlotillaError) as exc:
             print(exc, file=sys.stderr)
             return 2
-    if args.command == "prepare":
+    if args.command in ("prepare", "select", "anchor"):
         try:
-            return asyncio.run(_prepare(args))
+            return {"prepare": _prepare, "select": _select, "anchor": _anchor}[args.command](args)
         except (ConfigError, ValueError, RuntimeError, OSError, FlotillaError) as exc:
             print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
             return 2

@@ -6,9 +6,9 @@
 
 [中文](README_zh.md)
 
-**Run Docker Compose task environments on a sandbox platform, one sandbox per service, thousands at a time.**
+**Prepare portable multi-service tasks once; execute isolated attempts on a sandbox platform.**
 
-Agent evaluation and RL tasks are often Compose projects: an agent container plus a database, a web app, or a vulnerable service. Docker Compose runs them on one host. Sandbox platforms scale out, but they run single containers. Flotilla takes the Compose project, gives each service its own sandbox, connects them under an explicit network policy, and deletes everything when you're done.
+Flotilla owns a native task protocol shared by evaluation and RL consumers. Its optional Harbor importer normalizes Compose on a preparation host, pins images and captures static assets. Users publish that immutable release to platform storage. Attempts then open one sandbox per service, connect them under an explicit network policy, and clean up their private state—without parsing Compose, building images or exporting image seeds again.
 
 ```mermaid
 flowchart LR
@@ -16,8 +16,9 @@ flowchart LR
         m[main]
         c[cache]
     end
-    task --> F["Flotilla<br/>build · publish · plan network"]
-    F --> P
+    task --> F["Host prepare<br/>pin images · capture assets"]
+    F --> R["Native release<br/>user publishes static files"]
+    R --> P
     subgraph P["Sandbox platform"]
         direction LR
         sm["sandbox: main"] <--> sc["sandbox: cache"]
@@ -52,22 +53,32 @@ services:
       retries: 15
 ```
 
-Stage the complete original Harbor task (including `instruction.md`, `task.toml`, environments and tests) at `datasets/demo/task` under platform storage. The attempt API below uses this relative `task_key`, without needing a local task copy. Optional warmup emits diagnostics, not training inputs:
+Prepare on a CPU host, then publish the output with your existing storage tools:
 
 ```sh
-flotilla prepare datasets/demo/task --deployment deployment.toml --out diagnostics.json
+flotilla probe --deployment deployment.toml --env sandbox.env
+flotilla select --host-root ./tasks --deployment deployment.toml \
+  --out selected.jsonl --report selection-report.json
+flotilla prepare selected.jsonl --deployment deployment.toml \
+  --out ./release --report prepare-report.json --image-repo registry.example.org/team/tasks
 ```
+
+`prepare` may build and publish required USER0 adaptations. It does not upload the static release. Bind the local release and its published platform location in `[task_releases.example]` before executing. See [Native tasks](docs/Native_Tasks.md) for path binding, installation, credentials and migration.
 
 ```python
 import asyncio
 
 from flotilla import Flotilla, OpenOptions
-from flotilla.integrations.harbor_attempt import HarborAttempt
+from flotilla.config import FlotillaConfig
+from flotilla.native import NativeAttempt
 
 
 async def main():
-    async with Flotilla(deployment="deployment.toml") as fleet:
-        attempt = await HarborAttempt.create(fleet, "datasets/demo/task")
+    config = FlotillaConfig.load("deployment.toml")
+    bindings = config.release_bindings()
+    row = bindings.read_dataset("release/dataset.jsonl")[0]
+    async with Flotilla(deployment=config) as fleet:
+        attempt = await NativeAttempt.create(fleet, bindings.resolve(row))
         try:
             env = await attempt.open("main", OpenOptions(startup_timeout=600, lifetime=300))
             pong = await env.service("cache").exec(["redis-cli", "ping"], timeout=30)
@@ -80,11 +91,9 @@ async def main():
 asyncio.run(main())
 ```
 
-`HarborAttempt` creates a private platform workspace, reads the original task, compiles Compose/build inputs there, and opens role environments. Closing releases roles and workspace; hidden tests are staged only for verification. Native **`harbor run --config harbor-job.yaml`** uses an explicit `FlotillaTaskSource` + `NativeFlotillaRuntime` + `NativeFlotillaEnvironment` configuration: local original-task metadata maps to platform keys, while execution and test/artifact staging remain platform-owned. See the [Harbor quick start](docs/Harbor_Quick_Start.md#native-harbor-run) for the complete YAML and patched-Harbor requirement. No prepared dataset or persistent metadata cache is used.
+`NativeAttempt` consumes the bound task definition and assets, creates attempt-private writable state and opens its roles. Hidden tests are staged only for verification. Local and platform integrity checks reject missing or altered files; no source-task or builder fallback is permitted. Dataset rows retain full release/task identities, order and duplicates. Metadata and capacity inspection use the prepared definitions rather than recompiling source tasks.
 
-For dataset initialization, `await fleet.describe_tasks(task_keys)` reads native instruction/config metadata in bounded platform-side batches without creating attempts or copying task trees. It returns `{full_task_key: {"instruction": ..., "task_config": ...}}`; only metadata reads are deduplicated, not dataset rows or basename IDs. Keep source tasks immutable during a run. Each batch is limited to 128 tasks, a 1 MiB request and a 64 MiB result; invalid tasks or exceeded limits fail the call rather than returning partial metadata. Batches run in bounded windows of at most `prepare.concurrency`, sharing the workspace compile slots. Failure or cancellation settles the current window and its cleanup without scheduling the remaining dataset or replaying commands. Temporary metadata files are launch-owned and cleaned up. The management image must contain the matching installed workspace entrypoint; this API does not change the independent workspace created for actual execution.
-
-For capacity checks, `await fleet.describe_task_resources(task_keys, runtime_params={...})` uses the same bounded transport and returns `{full_task_key: {role: ResourceReservation}}`. Reservations include deployment-effective service resources and retry copies, matching `fleet.reservation`. It resolves Harbor's main/separate-verifier definitions without building or exporting images or starting task instances. Compose inputs use the official normalizer in temporary private copies; Dockerfile/image-only roles reuse the native resource rules without copying payloads. This checks resource declarations, not image buildability; actual execution still prepares its own workspace. The management image must support `--describe-task-resources`.
+Harbor and Voyager share this lifecycle. Harbor remains optional, using a pinned patched build for its source/runtime interfaces. The old source-workspace APIs are legacy interfaces, not the native consumption path.
 
 ## Features
 
@@ -97,7 +106,7 @@ For capacity checks, `await fleet.describe_task_resources(task_keys, runtime_par
 
 ## Get started
 
-Flotilla runs on **Linux x86_64 with Python 3.12**. The platform management image additionally needs this Flotilla version with the `harbor` extra, pinned Docker Compose (default 2.39.4), and build tooling. Build-endpoint networking and credential mounts must be explicit; there is no automatic installation, DinD, or unrestricted egress. This redesign has offline tests only: no real platform acceptance or compatible published management image yet. The old anchor image is not sufficient.
+Flotilla runs on **Linux x86_64 with Python 3.12**. Host import needs the optional `harbor` extra, pinned Docker Compose and preparation tools. Native execution and its Anchor do not need Harbor, Compose, Docker or a GPU stack. Build the Anchor from the installed package with `flotilla anchor build`, using a pinned Python base; publication requires explicit `--push`. Platform capabilities and cleanup must pass `flotilla probe` before consumption. See [Native tasks](docs/Native_Tasks.md) for the complete workflow and migration boundaries.
 
 ```sh
 git clone https://github.com/matrix72c/flotilla.git
@@ -105,7 +114,7 @@ cd flotilla
 python -m pip install .            # or: python -m pip install '.[harbor]'
 ```
 
-The distribution is named `flotilla-compose`; the import name and CLI are `flotilla`.
+The distribution, import name and CLI are `flotilla`. Install from this repository or a wheel built from a fixed commit; **do not run bare `pip install flotilla`**, which selects an unrelated public PyPI project. Use a fresh environment when migrating from `flotilla-compose`; the two distributions must not share an environment because they own the same Python module.
 
 Then pick a path:
 

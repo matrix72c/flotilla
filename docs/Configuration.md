@@ -60,6 +60,21 @@ Filesystem checks run when the explicitly selected backend protocol can express 
 | `claim_name` | `""` | Volume claim for `volumes = "pvc"` |
 | `root_subpath` | `""` | Subdirectory of the claim used as the shared root |
 
+### `[task_releases.<name>]`
+
+Explicit bindings for native task consumption. Probe/select/prepare can load a deployment before these future paths exist; consumption opens and verifies them.
+
+| Key | Meaning |
+|---|---|
+| `local_root` | Local native release directory; relative to deployment.toml |
+| `platform_root` | Published host root confined beneath `storage.host_path`, or explicit `pvc:<claim>/<root_subpath>/<release-key>` / relative storage key for PVC |
+
+The binding name is a configuration label, not a guessed task identity. Dataset rows carry release ID, task reference and digest; every selected release must be bound. Do not upload partial releases or mutate an active release. See [Native tasks](Native_Tasks.md).
+
+### `[voyager]`
+
+Optional consumer-owned namespace, retained opaquely by Flotilla. Voyager validates its Agent choice and Agent runtime location; Flotilla does not interpret GPU, training or reward settings. Secrets must not be embedded in this namespace or task definitions.
+
 ### `[share]` (required)
 
 | Key | Meaning |
@@ -83,7 +98,7 @@ Filesystem checks run when the explicitly selected backend protocol can express 
 
 | Key | Default | Meaning |
 |---|---|---|
-| `anchor_image` | required for use | Anchor image by digest (`repo@sha256:...`), built with `images/anchor/build.sh` |
+| `anchor_image` | required for use | Anchor image by remote digest (`repo@sha256:...`), built with installed `flotilla anchor build` |
 | `anchor_ttl` | `600` | Actual anchor TTL request tested by probe; no platform maximum is inferred |
 | `renew_interval` | `30` | Anchor renewal interval |
 | `grace` | `90` | After this long without a successful renewal, the launch stops admitting work. Must be at least `2 * renew_interval` and less than `anchor_ttl` |
@@ -158,7 +173,7 @@ Precedence, lowest first: `[resources.default]`, resources declared in the Compo
 
 ### `[prepare]` and `[build]`
 
-Used by platform workspace preparation for every `HarborAttempt` and by optional `flotilla prepare` warmup. The latter emits diagnostics, not reusable training rows. The trusted management image must include this Flotilla version with its `harbor` extra, fixed Compose and build tools; it does not install tools or start DinD automatically.
+Host `flotilla prepare` uses these settings to create immutable native releases. The host requires the optional Harbor importer, fixed Compose and build tools. Native attempts do not use preparation tools or management build settings. The `workspace_*` and `management_*` fields below apply only to the explicit legacy `HarborAttempt` source-task path, not native preparation/consumption.
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -174,12 +189,14 @@ Used by platform workspace preparation for every `HarborAttempt` and by optional
 | `prepare.compose_command` | `["docker", "compose"]` | Official Compose argv used for normalization |
 | `prepare.compose_version` | `"2.39.4"` | Required official Compose version |
 | `prepare.export_timeout` | `600` | Seconds allowed for each `docker cp` that exports an image volume's initial content. Raise it for tasks with large volumes |
-| `build.target` | `""` | Repository that built and mirrored images are pushed to, e.g. `registry.example.com/team/tasks`. `flotilla prepare` pushes each dataset to `<target>/<dataset>` |
-| `build.pullable_registries` | `[]` | Registries or prefixes the platform can pull from directly; other images are mirrored to `build.target` |
-| `build.mirror_images` | `false` | Mirror every `image:` service, even from pullable registries |
+| `build.target` | `""` | Repository for built/adapted and explicitly mirrored images, e.g. `registry.example.com/team/tasks`; `--image-repo` overrides it |
+| `build.pullable_registries` | `[]` | Registries or prefixes the platform can pull from directly; other sources fail unless mirroring is explicitly requested |
+| `build.mirror_images` | `false` | Explicitly mirror `image:` services, including pullable sources |
+| `build.oci_mediatypes` | `false` | Publish OCI rather than Docker schema2 image manifests |
+| `build.attestations` | `false` | Enable provenance/SBOM attestations; requires `oci_mediatypes=true` |
 | `build.image_replacements` | `{}` | Map of image references to substitutes, e.g. to use an internal mirror |
 
-For a deployment whose management runtime supports Kata and local Docker, opt in without changing the ordinary task runtime:
+For the **legacy source-task path only**, a deployment whose management runtime supports Kata and local Docker can opt in without changing the ordinary task runtime:
 
 ```toml
 [prepare]

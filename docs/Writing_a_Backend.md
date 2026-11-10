@@ -34,7 +34,8 @@ Register the backend in the `flotilla.backends` entry-point group. The entry-poi
 ```toml
 [project]
 name = "flotilla-mycloud"
-dependencies = ["flotilla-compose>=0.2,<0.3", "httpx"]
+# Replace FULL_COMMIT with the complete, published commit of this Flotilla project.
+dependencies = ["flotilla @ git+https://github.com/matrix72c/flotilla.git@FULL_COMMIT", "httpx"]
 
 [project.entry-points."flotilla.backends"]
 mycloud = "flotilla_mycloud.backend:MyCloudBackend"

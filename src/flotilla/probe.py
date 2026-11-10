@@ -7,7 +7,11 @@ import uuid
 from contextlib import suppress
 from dataclasses import asdict, dataclass, replace
 from datetime import timedelta
-from typing import Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from flotilla.config import FlotillaConfig
 
 from flotilla import __version__
 from flotilla.capabilities import CapabilityReport, Item, ProbeSettings
@@ -36,6 +40,65 @@ _MEMORY_BYTES = 512 * 1024 * 1024
 _SHM_PROBE_BYTES = 96 * 1024 * 1024
 _NONE = ExternalPolicy(mode="none")
 _PATH = "/usr/local/bin:/usr/bin:/bin"
+
+
+async def probe_deployment(
+    deployment: str | Path | FlotillaConfig,
+    *,
+    out: Path | None = None,
+    image: str | None = None,
+    hosts_recheck: float | None = None,
+) -> CapabilityReport:
+    """Probe, persist evidence at its configured location, and enforce admission.
+
+    Anchor and storage cleanup are part of the verdict, not best-effort work
+    after a successful report. No consumer may turn failed cleanup into admission.
+    """
+    from flotilla.config import ConfigError, FlotillaConfig
+    from flotilla.platform.clock import SystemClock
+
+    cfg = deployment if isinstance(deployment, FlotillaConfig) else FlotillaConfig.load(deployment)
+    target = cfg.capabilities_path()
+    if out is not None and out.resolve() != target.resolve():
+        raise ConfigError(["--out must match the deployment capabilities path; change the deployment explicitly"])
+    target.parent.mkdir(parents=True, exist_ok=True)
+    settings = cfg.probe_settings()
+    if image is not None:
+        settings = replace(settings, image=image)
+    if hosts_recheck is not None:
+        settings = replace(settings, hosts_recheck_s=hosts_recheck)
+    clock = SystemClock()
+    platform = cfg.build_platform(clock=clock, caps=cfg.management_capabilities())
+    anchor = Anchor(platform, clock, f"probe-{uuid.uuid4().hex[:12]}", cfg.anchor_settings())
+    report = None
+    cleanup_errors = []
+    directory = f"launches/{anchor.launch_id}"
+    try:
+        await anchor.start()
+        await anchor.mkdir(directory, stage="prepare")
+        report = await probe(platform, clock, anchor, settings)
+    finally:
+        for operation in (
+            lambda: anchor.remove(directory, stage="run"),
+            anchor.close,
+            platform.aclose,
+        ):
+            try:
+                await operation()
+            except Exception as exc:
+                cleanup_errors.append(type(exc).__name__)
+        if report is not None:
+            if cleanup_errors:
+                report = report.model_copy(
+                    update={
+                        "cleanup": Item(status="error", evidence="anchor/storage cleanup unconfirmed"),
+                        "notes": (*report.notes, "cleanup errors: " + ", ".join(cleanup_errors)),
+                    }
+                )
+            report.write_json(target)
+    assert report is not None
+    cfg.check_against(report)
+    return report
 
 
 async def probe(platform: Platform, clock: Clock, anchor: Anchor, settings: ProbeSettings) -> CapabilityReport:
@@ -173,7 +236,52 @@ class _Run:
             combined = await self._filesystem_case(True, True)
             if not combined.ok:
                 return combined, combined
+            missing = await self._missing_mount_targets()
+            if not missing.ok:
+                return missing, missing
         return ro_result, tmp_result
+
+    async def _missing_mount_targets(self) -> Item:
+        """Measure absent nested targets; choosing a protocol is not evidence."""
+        root = f"/flotilla-probe-{self.run_id}"
+        key = f"launches/{self.anchor.launch_id}/{self.run_id}/missing-target"
+        try:
+            baseline = await self._create(self._spec("missing-baseline"))
+            absent = await self.platform.exec(baseline, _sh(f"test ! -e {root} && test ! -L {root}"))
+            if absent.exit_code != 0 or absent.timed_out:
+                return _probed(False, "probe image already contains the random mount target")
+            await self.anchor.mkdir(key, stage="prepare")
+            target = root + "/nested/volume"
+            tmp = root + "/nested/tmpfs"
+            handle = await self._create(
+                replace(
+                    self._spec("missing-target", (SharedVolume(key, target, False),)),
+                    readonly_rootfs=True,
+                    tmpfs_mounts=(TmpfsMount(tmp, 1024 * 1024, 0o750, 1000, 1000),),
+                )
+            )
+            await self.platform.write_file(handle, target + "/probe", b"probe", mode=0o600, uid=1000, gid=1000)
+            if await self.platform.read_file(handle, target + "/probe") != b"probe":
+                return _probed(False, "missing-target writable volume roundtrip failed")
+            result = await self.platform.exec(
+                handle,
+                _sh(
+                    f'test "$(stat -f -c %T {tmp})" = tmpfs && '
+                    f'test "$(stat -c \'%u:%g %a\' {tmp})" = "1000:1000 750" && '
+                    f"printf x > {tmp}/probe && "
+                    "err=$(touch /tmp/flotilla-undeclared-write 2>&1); rc=$?; "
+                    'test $rc -ne 0 && printf "%s" "$err" | grep -q "Read-only file system"',
+                    uid=1000,
+                    gid=1000,
+                    LC_ALL="C",
+                ),
+            )
+            return _probed(
+                result.exit_code == 0 and not result.timed_out,
+                "absent nested volume/tmpfs targets, original user and undeclared /tmp readonly",
+            )
+        except (FlotillaError, ValueError, Expired) as exc:
+            return Item(status="error", evidence=f"missing-target probe failed ({type(exc).__name__})")
 
     async def _filesystem_case(self, readonly: bool, tmpfs: bool) -> Item:
         """Exercise actual mounts, exec, files and hosts; a JSON echo alone is insufficient evidence."""

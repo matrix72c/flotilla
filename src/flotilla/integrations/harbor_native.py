@@ -1,136 +1,194 @@
-"""Native Harbor task-source and trial-runtime extension for platform originals.
+"""Native Harbor task-source and trial-runtime extension for task releases.
 
 Requires Harbor's explicit task_source/runtime interfaces. No global registries,
-prepared datasets, local task uploads, or patches to Harbor internals are used.
+local task uploads, source task keys, or patches to Harbor internals are used.
+Selection is a portable release ``dataset.jsonl``; Harbor presentation is rebuilt
+from each task's ``provenance.harbor.config``; execution and verification follow
+the release through :class:`flotilla.native.NativeAttempt`.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
-from pathlib import Path
+import math
+from pathlib import Path, PurePosixPath
 from typing import Any
 from uuid import UUID
 
 from harbor.models.task.config import TaskOS
-from harbor.models.task.id import LocalTaskId
 from harbor.models.task.task import Task
 from harbor.models.trial.config import TaskConfig as TrialTaskConfig
 from harbor.models.trial.paths import EnvironmentPaths, TrialPaths
+from harbor.models.verifier.result import VerifierResult
 from harbor.tasks.client import TaskDownloadResult
+from harbor.verifier.verifier import RewardFileEmptyError, RewardFileNotFoundError, VerifierOutputParseError
 
 from flotilla.config import FlotillaConfig
 from flotilla.integrations.harbor import FlotillaEnvironment
-from flotilla.integrations.harbor_attempt import HarborAttempt, WorkspaceVerifier
-from flotilla.integrations.harbor_source_reader import NativeTaskSource, SourceMapping, metadata_identity
-from flotilla.integrations.harbor_verification import HarborVerification
+from flotilla.native import BoundTask, NativeAttempt, ReleaseBindings
 from flotilla.runtime.client import Flotilla
 from flotilla.runtime.types import CleanupError, OpenOptions
 
+REWARD_JSON = "reward.json"
+REWARD_TEXT = "reward.txt"
+
+
+def _supported(config: Any) -> None:
+    if config.steps:
+        raise ValueError("Flotilla currently supports single-step Harbor tasks only")
+    if config.environment.os != TaskOS.LINUX:
+        raise ValueError("Flotilla currently supports Linux Harbor tasks only")
+
 
 class FlotillaTaskSource:
-    """Original local directory selection, with lazy instruction loading per trial."""
+    """Release selection: one Harbor trial task per dataset row, in row order."""
 
-    def __init__(self, *, sources: list[SourceMapping | dict[str, Any]], metadata_workers: int = 8) -> None:
+    def __init__(self, *, dataset: str | Path, deployment: str | Path, metadata_workers: int = 8) -> None:
         if isinstance(metadata_workers, bool) or not isinstance(metadata_workers, int) or metadata_workers < 1:
             raise ValueError("metadata_workers must be a positive integer")
         if not hasattr(Task, "from_metadata"):
             raise RuntimeError("native Flotilla requires Harbor with task_source/runtime extension support")
-        self.sources = tuple(SourceMapping.model_validate(source) for source in sources)
-        self._reader: NativeTaskSource | None = None
+        self.dataset = Path(dataset).expanduser()
+        self.deployment = Path(deployment).expanduser()
         self.metadata_workers = metadata_workers
-        self.identities: dict[str, str] = {}
+        self._bindings: ReleaseBindings | None = None
+        # Absolute release task payload directories of loaded tasks.
+        self.bounds: dict[Path, BoundTask] = {}
 
-    @property
-    def reader(self) -> NativeTaskSource:
-        if self._reader is None:
-            raise RuntimeError("task source must resolve or load tasks before accessing its reader")
-        return self._reader
+    def _resolve_input(self, value: Path, name: str, base_dirs: dict[str, Path | None] | None) -> Path:
+        if value.is_absolute():
+            return value
+        base = Path.cwd() if base_dirs is None else base_dirs.get(name, Path.cwd())
+        if base is None:
+            raise ValueError(f"relative {name} requires a local config file; use absolute paths in remote configs")
+        return base / value
 
-    def _init_reader(self, config: Any) -> None:
-        if self._reader is not None:
+    def _init_bindings(self, config: Any) -> None:
+        if self._bindings is not None:
             return
         source_config = config.task_source
-        base_dir = (
-            source_config.kwargs_base_dirs.get("sources", Path.cwd()) if source_config is not None else Path.cwd()
-        )
-        sources = []
-        for source in self.sources:
-            root = source.local_root.expanduser()
-            if not root.is_absolute():
-                if base_dir is None:
-                    raise ValueError(
-                        "relative local_root requires a local config file; use absolute roots in remote configs"
-                    )
-                root = base_dir / root
-            sources.append(source.model_copy(update={"local_root": root}))
-        self._reader = NativeTaskSource(sources)
+        base_dirs = None if source_config is None else source_config.kwargs_base_dirs
+        dataset = self._resolve_input(self.dataset, "dataset", base_dirs)
+        deployment = self._resolve_input(self.deployment, "deployment", base_dirs)
+        bindings = FlotillaConfig.load(deployment).release_bindings()
+        # Snapshots carry resolved external paths, not the invocation's CWD.
+        self.dataset, self.deployment, self._bindings = dataset, deployment, bindings
         if source_config is not None:
-            # Snapshots carry resolved external roots, not the invocation's CWD.
-            source_config.kwargs["sources"] = [source.model_dump(mode="json") for source in self.reader.sources]
+            source_config.kwargs["dataset"] = str(dataset)
+            source_config.kwargs["deployment"] = str(deployment)
 
-    @staticmethod
-    def _supported(config: Any) -> None:
-        if config.steps:
-            raise ValueError("Flotilla currently supports single-step Harbor tasks only")
-        if config.environment.os != TaskOS.LINUX:
-            raise ValueError("Flotilla currently supports Linux Harbor tasks only")
-
-    def _key(self, config: Any) -> str:
-        if config.path is None or config.is_git_task() or config.is_package_task():
-            raise ValueError("Flotilla task source requires original local task paths, not remote downloads")
-        return self.reader.key_for_path(config.path)
+    @property
+    def bindings(self) -> ReleaseBindings:
+        if self._bindings is None:
+            raise RuntimeError("task source must resolve or load tasks before accessing its bindings")
+        return self._bindings
 
     async def resolve_task_configs(self, config: Any) -> list[Any]:
-        self._init_reader(config)
-        tasks = [task.model_copy(deep=True) for task in config.tasks]
-        for dataset in config.datasets:
-            if not dataset.is_local():
-                raise ValueError("Flotilla datasets must name a local original Harbor directory")
-            root = dataset.path.expanduser().resolve(strict=True)
-
-            # No Task.is_valid_dir: only shallow candidate discovery. A selected
-            # candidate with malformed config is an error, never a silently lost task.
-            def discover(directory: Path) -> list[LocalTaskId]:
-                return [
-                    LocalTaskId(path=path)
-                    for path in sorted(directory.iterdir())
-                    if path.is_dir() and (path / "task.toml").exists()
-                ]
-
-            candidates = await asyncio.to_thread(discover, root)
-            tasks.extend(
-                TrialTaskConfig(path=task.path, source=root.name) for task in dataset._filter_task_ids(candidates)
+        self._init_bindings(config)
+        if config.tasks or config.datasets:
+            raise ValueError(
+                "native releases replace Harbor task/dataset discovery; select rows in the release dataset.jsonl"
             )
-        if not tasks:
-            raise ValueError("Either datasets or tasks must select at least one task")
-        keys = [self._key(task) for task in tasks]
-        configs = await self.reader.read_configs(keys, workers=self.metadata_workers)
-        for key, parsed in configs.items():
-            try:
-                self._supported(parsed)
-            except ValueError as exc:
-                raise ValueError(f"unsupported task {key!r}: {exc}") from exc
+        return await self._resolve_selection()
+
+    async def _resolve_selection(self) -> list[TrialTaskConfig]:
+        rows = await asyncio.to_thread(self.bindings.read_dataset, self.dataset)
+        if not rows:
+            raise ValueError("the release dataset selects no tasks")
+        # Validate every selected row before the job starts: duplicates and order
+        # are preserved verbatim, and a broken row is never silently dropped.
+        semaphore = asyncio.Semaphore(self.metadata_workers)
+
+        async def resolve(row: Any) -> BoundTask:
+            async with semaphore:
+                return await asyncio.to_thread(self.bindings.resolve, row)
+
+        bound_tasks = await asyncio.gather(*(resolve(row) for row in rows))
+        tasks = []
+        for bound in bound_tasks:
+            directory = (bound.reader.root / PurePosixPath(bound.row.task_ref).parent).absolute()
+            self.bounds.setdefault(directory, bound)
+            tasks.append(TrialTaskConfig(path=directory, source=bound.row.release_id))
         return tasks
 
     async def load_task(self, config: Any) -> tuple[Task, TaskDownloadResult]:
-        self._init_reader(config)
-        key = self._key(config.task)
-        description = await asyncio.to_thread(self.reader.read_metadata, key)
+        self._init_bindings(config)
+        task_config = config.task
+        if task_config.path is None or task_config.is_git_task() or task_config.is_package_task():
+            raise ValueError("native trials point at release task payloads, not remote downloads")
+        # A restored standalone Trial has no in-memory Job selection cache.
+        if not self.bounds:
+            await self._resolve_selection()
+        bound = self._bound_for(task_config.path)
+        provenance = bound.task.provenance or {}
+        harbor = provenance.get("harbor") if isinstance(provenance, dict) else None
+        presentation = harbor.get("config") if isinstance(harbor, dict) else None
+        if provenance.get("importer") != "harbor-v1" or not isinstance(presentation, dict):
+            raise ValueError("release task lacks harbor-v1 presentation provenance")
         from harbor.models.task.config import TaskConfig
 
-        parsed = TaskConfig.model_validate(description["task_config"])
-        self._supported(parsed)
-        path = self.reader.resolve_task(key)
+        parsed = TaskConfig.model_validate(presentation)
+        _supported(parsed)
+        instruction = await asyncio.to_thread(bound.instruction)
         task = Task.from_metadata(
-            path,
+            Path(task_config.path),
             config=parsed,
-            instruction=description["instruction"],
+            instruction=instruction,
             extra_instruction_paths=config.extra_instruction_paths,
             extra_instructions=config.extra_instructions,
         )
-        self.identities[key] = metadata_identity(description)
-        return task, TaskDownloadResult(path=path, download_time_sec=0, cached=True)
+        return task, TaskDownloadResult(path=Path(task_config.path), download_time_sec=0, cached=True)
+
+    def _bound_for(self, path: Path) -> BoundTask:
+        try:
+            return self.bounds[Path(path).absolute()]
+        except KeyError:
+            raise ValueError(f"{path} is not a task payload of this release selection") from None
+
+    def bound_for(self, task: Task) -> BoundTask:
+        """The release binding a loaded task came from, for its trial runtime."""
+        return self._bound_for(Path(task.task_dir))
+
+
+def _safe_output(name: str) -> PurePosixPath:
+    relative = PurePosixPath(name)
+    if relative.is_absolute() or ".." in relative.parts or str(relative) != name:
+        raise ValueError(f"verification output name escapes the verifier directory: {name!r}")
+    return relative
+
+
+def _parse_rewards(outputs: dict[str, bytes], paths: TrialPaths) -> dict[str, float | int]:
+    """Harbor reward semantics over the release's declared verification outputs."""
+    if REWARD_JSON in outputs:
+        payload = outputs[REWARD_JSON]
+        if not payload:
+            raise RewardFileEmptyError(f"Reward file is empty at {paths.reward_json_path}")
+        try:
+            rewards = json.loads(payload)
+        except (ValueError, TypeError) as exc:
+            raise VerifierOutputParseError(f"Failed to parse rewards from JSON file {paths.reward_json_path}") from exc
+        if not isinstance(rewards, dict):
+            raise VerifierOutputParseError(f"Rewards must be a JSON object in {paths.reward_json_path}")
+        for value in rewards.values():
+            if not isinstance(value, (int, float)):
+                raise VerifierOutputParseError(f"Non-numeric reward {value!r} in JSON file {paths.reward_json_path}")
+            if isinstance(value, float) and not math.isfinite(value):
+                raise VerifierOutputParseError(f"Non-finite reward {value!r} in JSON file {paths.reward_json_path}")
+        return rewards
+    if REWARD_TEXT in outputs:
+        payload = outputs[REWARD_TEXT]
+        if not payload:
+            raise RewardFileEmptyError(f"Reward file is empty at {paths.reward_text_path}")
+        try:
+            value = float(payload.decode("utf-8"))
+        except (ValueError, TypeError) as exc:
+            raise VerifierOutputParseError(f"Failed to parse rewards from text file {paths.reward_text_path}") from exc
+        if not math.isfinite(value):
+            raise VerifierOutputParseError(f"Non-finite reward {value!r} in text file {paths.reward_text_path}")
+        return {"reward": value}
+    raise RewardFileNotFoundError(f"No reward file found at {paths.reward_text_path} or {paths.reward_json_path}")
 
 
 class NativeFlotillaRuntime:
@@ -152,12 +210,15 @@ class NativeFlotillaRuntime:
         source = config.task_source.resolve()
         if not isinstance(source, FlotillaTaskSource):
             raise ValueError("native Flotilla requires FlotillaTaskSource")
-        if config.verifier.import_path not in (None, "flotilla.integrations.harbor_native:NativeWorkspaceVerifier"):
-            raise ValueError("native Flotilla requires its platform-staged verifier adapter")
+        if config.verifier.import_path is not None:
+            raise ValueError(
+                "native releases bake verification at prepare time; verifier.import_path cannot replace it"
+            )
+        if config.verifier.env:
+            raise ValueError("verifier.env is baked into the release; prepare a new release to change it")
         if not config.environment.delete:
             raise ValueError("native Flotilla always releases trial resources; environment.delete must be true")
-        self.key = source.reader.key_for_path(task.task_dir)
-        self.expected_identity = source.identities[self.key]
+        self.bound = source.bound_for(task)
         self.config = config
         self.task = task
         self.paths = paths
@@ -169,8 +230,8 @@ class NativeFlotillaRuntime:
             raise ValueError("run_timeout must be positive and within the deployment lifetime")
         self.runtime_params = dict(runtime_params or {})
         self.fleet = Flotilla(deployment=deployment_config)
-        self.attempt: HarborAttempt | None = None
-        self.verification: HarborVerification | None = None
+        self.attempt: NativeAttempt | None = None
+        self._main: NativeFlotillaEnvironment | None = None
         self._creation_lock = asyncio.Lock()
         self._close_task: asyncio.Task[None] | None = None
         self._main_ready = False
@@ -189,12 +250,7 @@ class NativeFlotillaRuntime:
                 return
             if self.attempt is not None:
                 raise RuntimeError("native Trial already has a main environment")
-            self.attempt = await HarborAttempt.create(
-                self.fleet,
-                self.key,
-                runtime_params=self.runtime_params,
-                expected_metadata_identity=self.expected_identity,
-            )
+            self.attempt = await NativeAttempt.create(self.fleet, self.bound)
             environment._environment = await self.attempt.open(
                 "main",
                 OpenOptions(
@@ -205,60 +261,58 @@ class NativeFlotillaRuntime:
                     disable_internet=environment._network_policy.network_mode == "no-network",
                 ),
             )
-            self.verification = HarborVerification(
-                attempt=self.attempt,
-                main=environment,
-                paths=self.paths,
-                deployment=self.deployment,
-                run_timeout=self.run_timeout,
-            )
+            self._main = environment
             await environment.initialize()
             self._main_ready = True
 
-    async def _save_artifacts(self, services: set[str]) -> None:
-        if self.verification is None:
+    async def _collect_artifacts(self) -> None:
+        if self._main is None:
             raise RuntimeError("artifact collection requires a started main environment")
-        main = self.verification.main
-        # Result persistence only; verifier handoff stays entirely on the platform.
-        await self._artifact_handler.download_artifacts(
-            main,
-            self.paths.artifacts_dir,
-            source_artifacts_dir=EnvironmentPaths.for_os(main.os).artifacts_dir,
-            services=services,
-        )
+        main = self._main
+        hooks = list(self.task.config.verifier.collect)
+        sidecars = set(self._artifact_handler.sidecar_services())
+        sidecars |= {hook.service for hook in hooks if hook.service != "main"}
+
+        async def collect(services: set[str]) -> None:
+            for hook in hooks:
+                if hook.service in services:
+                    result = await main.service_exec(
+                        hook.command, service=hook.service, timeout_sec=int(hook.timeout_sec), user=hook.user
+                    )
+                    if result.return_code != 0:
+                        raise RuntimeError(f"artifact collection failed in service {hook.service!r}")
+            await self._artifact_handler.download_artifacts(
+                main,
+                self.paths.artifacts_dir,
+                source_artifacts_dir=EnvironmentPaths.for_os(main.os).artifacts_dir,
+                services=services,
+            )
+
+        await collect({"main"})
+        if sidecars:
+            await collect(sidecars)
 
     async def verify(
         self, main_environment: Any, timeout_sec: float | None, *, logger: logging.Logger, log_context: Any
-    ) -> Any:
-        if self.verification is None or self.verification.main is not main_environment:
+    ) -> VerifierResult:
+        if self.attempt is None or self._main is not main_environment:
             raise RuntimeError("verification requires this trial's started main environment")
-        from harbor.verifier.factory import VerifierFactory
-
-        verifier_config = self.config.verifier.model_copy(
-            update={"import_path": "flotilla.integrations.harbor_native:NativeWorkspaceVerifier"}
-        )
-
-        def create_verifier(**kwargs: Any) -> Any:
-            return VerifierFactory.create_verifier_from_config(
-                verifier_config,
-                task=self.task,
-                trial_paths=self.paths,
-                environment=kwargs["environment"],
-                override_env=self.config.verifier.env or None,
-                logger=logger,
-                skip_tests_upload=kwargs["bundled_tests"],
-                runtime_context=self,
-                role="verifier",
-            )
-
+        timeout = self.run_timeout if timeout_sec is None else timeout_sec
         self._collection_started = True
-        return await self.verification.verify(
-            timeout=self.run_timeout if timeout_sec is None else timeout_sec,
-            artifacts=self.artifacts,
-            on_collect=self._save_artifacts,
-            log_context=log_context,
-            verifier_factory=create_verifier,
-        )
+        # Persist agent results first: an isolated verifier releases main inside
+        # the attempt, and a failing verification must not lose them.
+        await self._collect_artifacts()
+        result = await self.attempt.verify(timeout=timeout)
+        logger.info("native verification exited with %d", result.exit_code)
+        verifier_dir = self.paths.verifier_dir
+        verifier_dir.mkdir(parents=True, exist_ok=True)
+        (verifier_dir / "test-stdout.txt").write_text(result.stdout)
+        (verifier_dir / "test-stderr.txt").write_text(result.stderr)
+        for name, payload in result.outputs.items():
+            target = verifier_dir / str(_safe_output(name))
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(payload)
+        return VerifierResult(rewards=_parse_rewards(result.outputs, self.paths))
 
     async def close(self) -> None:
         if self._close_task is None:
@@ -267,14 +321,11 @@ class NativeFlotillaRuntime:
                 primary: BaseException | None = None
                 try:
                     # Disabled verification, install-only, and agent failures still
-                    # retain results before deleting the attempt. Never replay hooks
-                    # after an interrupted verification collection.
-                    if self._main_ready and not self._collection_started and self.verification is not None:
+                    # retain results before deleting the attempt.
+                    if self._main_ready and not self._collection_started and self._main is not None:
                         self._collection_started = True
                         async with asyncio.timeout(self.run_timeout):
-                            await self.verification.collect_artifacts(
-                                artifacts=self.artifacts, on_collect=self._save_artifacts
-                            )
+                            await self._collect_artifacts()
                 except BaseException as exc:
                     primary = exc
                 try:
@@ -328,19 +379,5 @@ class NativeFlotillaEnvironment(FlotillaEnvironment):
 
     async def start(self, force_build: bool = False) -> None:
         if force_build:
-            raise ValueError("force_build is unsupported by the platform workspace compiler")
+            raise ValueError("force_build is unsupported by consume-only native releases")
         await self.runtime_context.open_main(self)
-
-
-class NativeWorkspaceVerifier(WorkspaceVerifier):
-    """Bridge Harbor's native verifier factory to its trial's platform-staged tests."""
-
-    def __init__(self, *, runtime_context: NativeFlotillaRuntime, role: str, **kwargs: Any) -> None:
-        if role != "verifier" or runtime_context.attempt is None:
-            raise ValueError("native verifier requires an active trial attempt")
-        attempt = runtime_context.attempt
-        definition = attempt.roles.get("verifier", attempt.roles["main"])
-        # The native Trial retains its real Task; only this platform file view
-        # uses script coordinates supplied by the already-prepared attempt.
-        kwargs["task"] = attempt.task
-        super().__init__(attempt=attempt, bundled_tests=definition.bundled_tests, **kwargs)

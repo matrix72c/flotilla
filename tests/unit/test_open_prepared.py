@@ -52,10 +52,13 @@ def test_removed_in_open_preparation_has_migration_errors() -> None:
     for name in ("EnvironmentDefinition", "EnvironmentInspection", "PreparationResidual"):
         assert not hasattr(flotilla, name), name
     assert "force_build" not in OpenOptions.__dataclass_fields__
-    # Optional prewarming consumes platform keys and emits diagnostics, not rows.
-    assert _build_parser().parse_args(
-        ["prepare", "ds/t", "--deployment", "d.toml", "--out", "diagnostics.json"]
-    ).tasks == ["ds/t"]
+    # Native preparation takes a selected input plus a separate release/report.
+    with pytest.raises(SystemExit):
+        _build_parser().parse_args(["prepare", "ds/t", "--deployment", "d.toml", "--out", "diagnostics.json"])
+    parsed = _build_parser().parse_args(
+        ["prepare", "selected.jsonl", "--deployment", "d.toml", "--out", "release", "--report", "report.json"]
+    )
+    assert parsed.selected == Path("selected.jsonl")
 
 
 def test_open_rejects_task_paths(deployment: tuple[FlotillaConfig, FakePlatform, SharedTree]) -> None:

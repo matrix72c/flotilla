@@ -19,7 +19,7 @@ from flotilla.config import ResourceDefaults
 from flotilla.manifest import Manifest, Resources
 from flotilla.runtime.planning import to_plan
 from flotilla.scan import scan
-from flotilla.testing.build import FakeBuilder, FakeExport, _caps, _ctx, _task
+from flotilla.testing.build import DIGEST, FakeBuilder, FakeExport, _caps, _ctx, _task
 
 
 def test_volume_name_never_controls_recursive_deletion(tmp_path: Path) -> None:
@@ -125,7 +125,7 @@ def test_invalid_nested_fields_are_visible_rejections(field: dict[str, object]) 
     assert normalize({"services": {"main": {"image": "r.io/a", **field}}, "volumes": {"data": {}}}, {}).rejected
 
 
-def test_tmpfs_is_derived_without_approximating_container_identity(tmp_path: Path) -> None:
+def test_tmpfs_is_inspected_not_derived_without_approximating_container_identity(tmp_path: Path) -> None:
     task = load_task(
         _task(
             tmp_path,
@@ -140,21 +140,41 @@ def test_tmpfs_is_derived_without_approximating_container_identity(tmp_path: Pat
         )
     )
     builder = FakeBuilder()
-    ctx = _ctx()
+    export = FakeExport()
+    ctx = _ctx(builder=builder, image_export=export)
     outcome = build_task(
         task, tmp_path / "out", replace(ctx, builder=builder, caps=replace(ctx.caps, native_tmpfs=True))
     )
     assert outcome.status == "built", outcome.reason
-    assert builder.requests and "/cache" in str(builder.requests[-1].dockerfile_text)
-    assert "/scratch" in str(builder.requests[-1].dockerfile_text)
+    # Mount-point directories are runtime responsibilities: no derivation build,
+    # but every tmpfs target path is inspected in the source image for links.
+    assert builder.requests == []
+    assert export.inspected == [(f"r.io/a@{DIGEST}", ("/cache", "/scratch"))]
     assert outcome.manifest_path
-    assert Manifest.load_json(outcome.manifest_path.read_bytes()).networks["default"].names == {"main": ["main"]}
+    manifest = Manifest.load_json(outcome.manifest_path.read_bytes())
+    assert [m.mount_path for m in manifest.units["main"].tmpfs_mounts] == ["/cache", "/scratch"]
+    assert manifest.networks["default"].names == {"main": ["main"]}
     compose = task.env_dir / "docker-compose.yaml"
     compose.write_text(compose.read_text().replace("image: r.io/a", "image: r.io/a\n    container_name: agent-alias"))
     rejected_builder = FakeBuilder()
     rejected = build_task(load_task(task.path), tmp_path / "rejected", replace(ctx, builder=rejected_builder))
     assert rejected.status == "rejected" and "identity" in rejected.reason
     assert not rejected_builder.requests
+
+
+def test_mount_path_inspection_rejects_image_symlink(tmp_path: Path) -> None:
+    task = load_task(
+        _task(
+            tmp_path,
+            "linked",
+            compose="services:\n  main:\n    image: r.io/a\n    tmpfs: /cache/scratch\n",
+        )
+    )
+    export = FakeExport(links={"/cache"})
+    ctx = _ctx(image_export=export)
+    outcome = build_task(task, tmp_path / "out", replace(ctx, caps=replace(ctx.caps, native_tmpfs=True)))
+    assert outcome.status == "failed" and "symlink" in outcome.reason
+    assert export.inspected  # the rejection came from real path inspection, not a silent skip
 
 
 @pytest.mark.parametrize("different_path", [False, True])

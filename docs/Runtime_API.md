@@ -16,19 +16,19 @@ Import public types from `flotilla`. Configuration is loaded locally at construc
 | `await fleet.drain(timeout=None)` | Waits for pending cleanup; does not release active environments |
 | `await fleet.close(timeout=None)` | Releases owned environments and closes the runtime; returns a cleanup report |
 
-For production Harbor tasks use `HarborAttempt.create(fleet, task_key)` from `flotilla.integrations.harbor_attempt`, then `await attempt.open("main", options)` and `await attempt.close()` in `finally`. `task_key` is a relative key of an original Harbor task below platform storage, not a local path. Attempt creation allocates a private workspace and runs the trusted platform compiler/build helper; it returns metadata, not task files. `await attempt.stage_tests()` makes hidden tests available only for verification; a separate verifier role can then be opened when defined. Close roles before deleting their workspace (the attempt owner does this).
+For production native tasks use `NativeAttempt.create(fleet, bound_task)` from `flotilla.native`, where `bound_task = config.release_bindings().resolve(row)`. Local release validation and actual platform file validation precede opening roles. Call `await attempt.open("main", options)`, stop the agent, then `await attempt.verify()`. Verification stages hidden tests and declared artifact handoffs; a separate verifier is used only when the task defines one. Always `await attempt.close()` in `finally`; it closes roles before deleting their private workspace.
 
-`PreparedEnvironment` remains a low-level transient compiler/testing boundary for `fleet.open`, not a persistent dataset interchange format. Do not use old `prepared.jsonl` or `load_prepared` as production inputs. `flotilla prepare` is optional platform warmup with diagnostic output. Native Harbor CLI/Trial uses the explicit source/runtime/environment adapters in [Harbor quick start](Harbor_Quick_Start.md#native-harbor-run), not an environment-only `task_key` option. That entrypoint requires the compatible patched Harbor interfaces.
+`PreparedEnvironment` is the low-level in-memory boundary for `fleet.open`, not the persistent dataset interchange. The native release/dataset is that interchange. Do not use old `prepared.jsonl`, task-key rows or `load_prepared` as native inputs. `flotilla prepare` creates the release on the host. [Native tasks](Native_Tasks.md) documents models, bindings and integrity; [Harbor quick start](Harbor_Quick_Start.md) documents the optional consumer adapter.
 
-`HarborAttempt.create(..., expected_metadata_identity=...)` optionally compares platform metadata with the caller's local config/instruction identity before any task environment opens. A mismatch closes the workspace and fails. `HarborVerification` supplies shared/separate verifier transitions and platform-only artifact handoff for both native Harbor and training integrations; it releases the main role before staging hidden tests for a separate verifier, and releases the verifier on success, failure or cancellation. The enclosing attempt retains workspace ownership.
-
-The management image requires Python, Flotilla with its `harbor` extra, pinned Compose and build tooling. Remote build network targets, read-only credential mounts and nonsecret endpoint settings are explicit deployment inputs. No compatible release image or real platform acceptance is provided by the current offline implementation.
+The native Anchor requires installed Flotilla and filesystem helpers, not Harbor, Compose, Docker or push credentials. Actual platform acceptance remains separate from package/unit checks. The old `HarborAttempt`, `HarborVerification` and workspace compiler remain explicit legacy source-task APIs; native consumers never fall back to them.
 
 `OpenOptions` accepts `request_id`, `admission_timeout`, `startup_timeout`, `lifetime`, `runtime_params`, per-service `exec_env` and `resources`, and `disable_internet`. Resource overrides support CPU and memory.
 
 Each phase of an open has its own budget. Client start (once per client) is bounded by `timeouts.client_start`. Waiting for a `trial_concurrency` / `instance_budget` slot is bounded by `admission_timeout` (default `limits.admission_timeout`) and raises `AdmissionTimeout` with the current counts. `startup_timeout` (default `runtime.startup_timeout_s`) starts at admission and ends when the environment is ready. `lifetime` starts at readiness and cannot exceed `runtime.run_timeout_s`. Runtime parameters are literal substitution values; only explicit network-policy targets are interpreted as network destinations.
 
-## Local native metadata
+## Legacy source metadata
+
+For native releases, `ReleaseReader` and `ReleaseBindings` own metadata and full dataset identity. The following source-reader API is retained only for explicit legacy integrations and importer tooling; it does not read native releases.
 
 `flotilla.integrations.harbor_source_reader` provides `SourceMapping(local_root=..., platform_prefix=...)` and `NativeTaskSource(sources)`. Prefixes match whole path components; overlapping mappings and metadata files escaping their task/source roots are rejected.
 

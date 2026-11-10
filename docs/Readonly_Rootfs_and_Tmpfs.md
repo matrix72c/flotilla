@@ -79,7 +79,7 @@ With the selected `sandbox-system-v1` protocol the probe requests 96 MiB, then c
 
 ## Preparation and runtime storage
 
-The platform requires tmpfs directories to exist in the image. Preparation produces a derived image that creates missing directories, preserves existing image contents, and rejects symlink components. The actual mount hides existing content. A builder, shell-capable source image and configured build target are required for this preparation.
+The current measured internal container backend supports missing mount directories, including nested targets with readonly rootfs. The native probe profile checks this behavior rather than assuming it from protocol selection. Preparation inspects image paths and rejects unsafe symlink components or non-directory targets, but does not build an image merely to create empty tmpfs/runtime directories. This is not a guarantee for arbitrary backends or symlink paths. A non-root image may still require the independent minimal USER0 adaptation; its original application UID/GID is resolved before adaptation. The real tmpfs mount hides existing image content.
 
 For read-only services, single-service writable named volumes and bind mounts become real environment-owned storage mounts rather than writable image directories. Seeding, `nocopy`, and shared-reference relationships are retained.
 
@@ -99,7 +99,7 @@ HTTP 400 and 501 are non-retryable configuration/capability failures. No filesys
 
 The previous build-time empty-directory approximation of tmpfs has been removed. Existing tasks declaring tmpfs now require native support; remove the declaration only if the task intentionally no longer requires tmpfs semantics. Ordinary upstream tasks require no new configuration.
 
-Prepared manifests preserve both requirements. Current writes use schema 7, and schema 6 rows are converted when read. Older schemas are rejected; prepare tasks again instead of editing their schema number.
+Native task releases preserve both requirements in their role manifests. The native release protocol is separately versioned; old prepared JSONL or task-key rows are not native datasets and must be selected/prepared again. Do not edit schema numbers to bypass compatibility checks. Internal legacy manifest conversion does not authorize legacy dataset consumption.
 
 After probing, run the opt-in public API contract to cover image preparation, service logs, directory transfers, actual mount behavior and confirmed cleanup:
 

@@ -241,6 +241,7 @@ class CapabilityReport(_Model):
             "directory management": st.dir_management,
             "memory limit equals requested value": rt.memory_limit,
             "pull by digest": rt.image_digest,
+            "confirmed cleanup": self.cleanup,
         }
         missing = [name for name, item in required.items() if not item.ok]
         if not ({"any", "allowlist"} & net.external_forms):
