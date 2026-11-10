@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import math
+from dataclasses import asdict
 from pathlib import Path, PurePosixPath
 from typing import Any
 from uuid import UUID
@@ -376,6 +377,13 @@ class NativeFlotillaEnvironment(FlotillaEnvironment):
         super().__init__(deployment=runtime_context.deployment, fleet=runtime_context.fleet, **kwargs)
         self._owns_environment = False
         self._owns_fleet = False
+
+    async def initialize(self) -> None:
+        # NativeAttempt owns declared artifact/output directories and their modes.
+        # The legacy adapter creates every Harbor log directory in main, including
+        # an isolated verifier's output. That both bypasses the role contract and
+        # fails when main has a readonly rootfs. Do not mutate undeclared paths.
+        self._save_metadata("environment", asdict(await self._env().info()))
 
     async def start(self, force_build: bool = False) -> None:
         if force_build:

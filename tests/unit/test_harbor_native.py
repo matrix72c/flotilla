@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -22,6 +23,7 @@ from harbor.verifier.verifier import RewardFileEmptyError, RewardFileNotFoundErr
 
 from flotilla.integrations.harbor_native import (
     FlotillaTaskSource,
+    NativeFlotillaEnvironment,
     NativeFlotillaRuntime,
 )
 from flotilla.manifest import Context, Manifest, Resources, Unit
@@ -449,6 +451,23 @@ async def test_close_collects_without_verification_and_is_idempotent(tmp_path, s
     runtime.fleet.close.assert_awaited_once()
     await runtime.close()  # idempotent
     assert attempt.close.await_count == 1
+
+
+async def test_native_initialization_preserves_declared_readonly_filesystem():
+    @dataclass
+    class Info:
+        environment_id: str = "native-readonly"
+
+    environment = NativeFlotillaEnvironment.__new__(NativeFlotillaEnvironment)
+    handle = SimpleNamespace(info=AsyncMock(return_value=Info()), agent=SimpleNamespace(exec=AsyncMock()))
+    environment._environment = handle
+    environment._save_metadata = Mock()
+    await environment.initialize()
+    environment._save_metadata.assert_called_once_with("environment", {"environment_id": "native-readonly"})
+    # NativeAttempt already owns output/artifact creation and numeric permissions.
+    # In particular, don't create an isolated verifier's /logs/verifier in main,
+    # or chmod the user's declared artifact directories to world-writable.
+    handle.agent.exec.assert_not_called()
 
 
 async def test_constructor_rejects_incompatible_trials(tmp_path, selection, monkeypatch):
