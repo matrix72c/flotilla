@@ -5,7 +5,7 @@ Harbor is a **host-side import source** and an optional evaluation consumer. Flo
 Install the controlled Flotilla wheel with its `harbor` extra, or use the full Git SHA in your delivery manifest:
 
 ```sh
-python -m pip install 'flotilla[harbor] @ git+https://github.com/matrix72c/flotilla.git@<FULL_FLOTILLA_COMMIT>'
+python -m pip install 'flotilla[harbor] @ git+https://github.com/matrix72c/flotilla.git@bd28834c0685d9002ab85b1903d3c6f291d61d7b'
 ```
 
 The extra pins [Harbor d78eb9c262e7074944106d16bff0ba6426bb2d34](https://github.com/matrix72c/harbor/commit/d78eb9c262e7074944106d16bff0ba6426bb2d34), which supplies `task_source`, trial `runtime`, and `Task.from_metadata`. Stock Harbor 0.24.0 lacks these extension interfaces. The public PyPI package named `flotilla` is unrelated; do not install it by bare name.
