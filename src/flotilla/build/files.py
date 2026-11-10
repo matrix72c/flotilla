@@ -147,6 +147,9 @@ def _export_seeds(
             ) -> tarfile.TarInfo:
                 info.uid, info.gid, info.mode = owners.get(info.name, (info.uid, info.gid, info.mode))
                 info.uname = info.gname = ""
+                # Extraction creates fresh host timestamps, not image metadata.
+                # Keep those incidental times out of content-addressed seed bytes.
+                info.mtime = 0
                 return info
 
             with tarfile.open(tar_path, "w") as tar:

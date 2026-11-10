@@ -129,6 +129,59 @@ def test_export_writes_seed_tar_for_shared_volume(tmp_path: Path) -> None:
     assert not any(files.glob(".seed-*"))  # staging directory cleaned up
 
 
+def test_seed_bytes_ignore_extraction_times_preserving_identity_and_links(tmp_path: Path) -> None:
+    task = load_task(
+        _task(
+            tmp_path,
+            "stable-seed",
+            compose="services:\n  main:\n    image: r.io/a:1\n    volumes: ['data:/data']\nvolumes:\n  data: {}\n",
+        )
+    )
+
+    class TimedExport:
+        def __init__(self, timestamp: float) -> None:
+            self.timestamp = timestamp
+
+        def extract(self, image, path, dest, *, identities=None):
+            directory = dest / "nested"
+            directory.mkdir()
+            (directory / "first").write_bytes(b"from-image")
+            os.link(directory / "first", directory / "second")
+            (directory / "link").symlink_to("first")
+            metadata = {".": (101, 202, 0o750), "nested": (101, 202, 0o700)}
+            metadata.update({f"nested/{name}": (103, 204, 0o640) for name in ("first", "second")})
+            metadata["nested/link"] = (103, 204, 0o777)
+            identities.update(metadata)
+            for entry in [dest, *dest.rglob("*")]:
+                os.utime(entry, (self.timestamp, self.timestamp), follow_symlinks=False)
+            return True
+
+    archives = []
+    for index, timestamp in enumerate((1234567890.123, 1794309451.485)):
+        files = tmp_path / str(index) / "files"
+        exported = export_task_files(
+            task.project,
+            task.env_dir,
+            files,
+            images={"main": "r.io/a@" + DIGEST},
+            image_export=TimedExport(timestamp),
+        )
+        archives.append((files / exported.seeds["data"]).read_bytes())
+    assert archives[0] == archives[1]
+    with tarfile.open(fileobj=io.BytesIO(archives[0])) as tar:
+        assert all(member.mtime == 0 and not member.pax_headers for member in tar.getmembers())
+        assert all(member.uname == member.gname == "" for member in tar.getmembers())
+        assert (tar.getmember(".").uid, tar.getmember(".").gid, tar.getmember(".").mode) == (101, 202, 0o750)
+        assert tar.getmember("nested").mode == 0o700
+        first = tar.getmember("nested/first")
+        assert (first.uid, first.gid, first.mode) == (103, 204, 0o640)
+        assert tar.extractfile(first).read() == b"from-image"
+        assert tar.getmember("nested/second").islnk()
+        assert tar.getmember("nested/second").linkname == "nested/first"
+        assert tar.getmember("nested/link").issym()
+        assert tar.getmember("nested/link").linkname == "first"
+
+
 def test_export_no_seed_when_image_path_is_absent(tmp_path: Path) -> None:
     task = load_task(
         _task(
