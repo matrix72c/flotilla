@@ -97,6 +97,8 @@ except CleanupError as exc:
 
 `CleanupReport.clean` requires no remaining instances, directories, or uncertain creates. Each unclean `CleanupRecord` in `report.remaining` has a `reason` (`create_in_flight`, `create_outcome_unknown`, `delete_unconfirmed`, `directory_remove_failed`, `anchor_deactivated`, or `in_progress`) and, when one was seen, the last related `error`. `CleanupError` exposes that report. Context managers preserve a primary application error and attach cleanup failure information. A timed-out waiter does not cancel an owned deletion.
 
+Before retiring its Anchor, `Flotilla.close()` retries previously failed owned cleanup once, within the same close timeout. This allows a directory removal that failed while NFS file handles were still open to recover after those handles close. The retry uses retained ownership records, not a scan of unrelated resources. Persistent failures and exhausted deadlines still produce an unclean report; successful final cleanup does not retroactively accept an episode whose release failed.
+
 ## Diagnostic events
 
 `on_event` receives `RuntimeEvent` on a separate dispatcher thread. Callbacks must be thread-safe. The queue holds 1024 diagnostic events; when full, new events are dropped and counted internally. Events are best-effort observations, never lifecycle acknowledgements. Slow callbacks cannot delay renewal or cleanup. No argv, output, environment values, or credentials are included in event fields.

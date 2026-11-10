@@ -603,6 +603,14 @@ class Manager:
             async with asyncio.timeout(timeout):
                 await self.workspaces.settle()
                 await self.drain(timeout)
+                # A release may have failed while NFS handles were still open.
+                # Retry retained ownership once before retiring the anchor, within
+                # the same close deadline. Persistent failures remain in the report.
+                for eid, run in tuple(self.failed_runs.items()):
+                    if eid not in self.reaping:
+                        self.reaper.retry(eid)
+                        self.reaping[eid] = asyncio.create_task(self._finish_release(eid, run))
+                await self.drain(timeout)
                 if self.launch_directory_attempted:
                     clean = await self.reaper.close()
                 else:
