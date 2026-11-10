@@ -6,11 +6,14 @@ import hashlib
 import json
 import shutil
 import stat
-from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass, replace
+import time
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import asdict, dataclass, field, replace
+from functools import partial
 from pathlib import Path
 from typing import Any
 
+from flotilla.build.builder import Builder, BuildRequest
 from flotilla.build.driver import BuildContext, build_task, preflight_images
 from flotilla.build.images import ImageRef, pin_images, plan_images
 from flotilla.compose.adapter import ComposeConfigAdapter
@@ -32,6 +35,69 @@ class PrepareResult:
     release_id: str
     report: tuple[dict[str, Any], ...]
     images: tuple[str, ...]
+    metrics: dict[str, Any] = field(default_factory=dict)
+
+
+class _Metrics:
+    """Invocation-local observations; nested phase times must not be summed.
+
+    Calls count attempts (including failures), not distinct images or Docker
+    containers. A builder call includes build and push: that interface does not
+    expose separate timings. Cache hits never count as underlying tool calls.
+    """
+
+    def __init__(self) -> None:
+        self.started = time.monotonic()
+        self.phases = {
+            name: {"calls": 0, "failed": 0, "seconds": 0.0}
+            for name in (
+                "import_normalize",
+                "fingerprint",
+                "image_preflight",
+                "registry_digest",
+                "image_config",
+                "image_accounts",
+                "mount_path_inspection",
+                "registry_copy",
+                "user0_build_push",
+                "application_build_push",
+                "image_extract",
+                "seed_cache_copy",
+                "role_prepare",
+                "package",
+            )
+        }
+        self.counts = {"registry_cache_hits": 0, "seed_cache_hits": 0, "adaptations_resumed": 0}
+
+    def call(self, phase: str, function: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        observation = self.phases[phase]
+        observation["calls"] += 1
+        started = time.monotonic()
+        try:
+            return function(*args, **kwargs)
+        except BaseException:
+            observation["failed"] += 1
+            raise
+        finally:
+            observation["seconds"] += time.monotonic() - started
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "elapsed_s": time.monotonic() - self.started,
+            "phases": {name: dict(values) for name, values in self.phases.items()},
+            "counts": dict(self.counts),
+        }
+
+
+class _MeasuredBuilder:
+    def __init__(self, builder: Builder, metrics: _Metrics) -> None:
+        self.builder, self.metrics = builder, metrics
+
+    def build(self, request: BuildRequest) -> str:
+        # The driver supplies inline Dockerfile text only for its USER0 adapter;
+        # source application builds refer to their on-disk Dockerfile instead.
+        phase = "user0_build_push" if request.dockerfile_text is not None else "application_build_push"
+        return self.metrics.call(phase, self.builder.build, request)
 
 
 class PreparationError(ValueError):
@@ -199,8 +265,8 @@ def _fingerprint(imported: ImportedTask, context: BuildContext) -> str:
 
 
 class _RegistryCache:
-    def __init__(self, registry: Any) -> None:
-        self.registry = registry
+    def __init__(self, registry: Any, metrics: _Metrics) -> None:
+        self.registry, self.metrics = registry, metrics
         self.digests: dict[tuple[str, str], str] = {}
         self.configs: dict[str, Any] = {}
         self.copies: set[tuple[str, str]] = set()
@@ -208,25 +274,31 @@ class _RegistryCache:
     def digest(self, name: str, reference: str) -> str:
         key = (name, reference)
         if key not in self.digests:
-            self.digests[key] = self.registry.digest(name, reference)
+            self.digests[key] = self.metrics.call("registry_digest", self.registry.digest, name, reference)
+        else:
+            self.metrics.counts["registry_cache_hits"] += 1
         return self.digests[key]
 
     def image_config(self, pinned: str) -> Any:
         if pinned not in self.configs:
-            self.configs[pinned] = self.registry.image_config(pinned)
+            self.configs[pinned] = self.metrics.call("image_config", self.registry.image_config, pinned)
+        else:
+            self.metrics.counts["registry_cache_hits"] += 1
         return self.configs[pinned]
 
     def copy(self, source: str, target: str) -> None:
         if (source, target) not in self.copies:
-            self.registry.copy(source, target)
+            self.metrics.call("registry_copy", self.registry.copy, source, target)
             self.copies.add((source, target))
             name, _, tag = target.rpartition(":")
             self.digests.pop((name, tag), None)
+        else:
+            self.metrics.counts["registry_cache_hits"] += 1
 
 
 class _Exports:
-    def __init__(self, exporter: Any, root: Path) -> None:
-        self.exporter, self.root = exporter, root
+    def __init__(self, exporter: Any, root: Path, metrics: _Metrics) -> None:
+        self.exporter, self.root, self.metrics = exporter, root, metrics
         self.cached: dict[tuple[str, str], tuple[Path, bool, dict[str, Any]]] = {}
 
     def extract(self, image: str, path: str, dest: Path, *, identities: dict[str, Any] | None = None) -> bool:
@@ -235,10 +307,14 @@ class _Exports:
             directory = self.root / hashlib.sha256(_json(key).encode()).hexdigest()
             directory.mkdir(parents=True)
             owners: dict[str, Any] = {}
-            populated = self.exporter.extract(image, path, directory, identities=owners)
+            populated = self.metrics.call(
+                "image_extract", self.exporter.extract, image, path, directory, identities=owners
+            )
             self.cached[key] = directory, populated, owners
+        else:
+            self.metrics.counts["seed_cache_hits"] += 1
         directory, populated, owners = self.cached[key]
-        shutil.copytree(directory, dest, dirs_exist_ok=True)
+        self.metrics.call("seed_cache_copy", shutil.copytree, directory, dest, dirs_exist_ok=True)
         if identities is not None:
             identities.update(owners)
         return populated
@@ -271,9 +347,15 @@ def prepare(
     It never uploads files, creates remote sandboxes, or requires Anchor. Resume
     is explicit and checks source content/pinned inputs plus every saved remote
     adaptation. Reports/work evidence stay outside the executable release.
+
+    Report/result metrics describe this invocation only, including failed calls;
+    resume does not carry forward old durations. Phase times are inclusive and
+    may overlap (for example role_prepare includes image extraction). Tool call
+    counts exclude cache hits; build and push share one backend call/timer.
     """
     from flotilla.native import Artifact, ReleaseWriter, Task, Verification
 
+    metrics = _Metrics()
     output = Path(out).expanduser().absolute()
     if output.exists():
         raise FileExistsError(f"release output already exists: {output}")
@@ -307,15 +389,27 @@ def prepare(
     if settings.target:
         _repo(settings.target)
     # Each invocation owns fresh memoization; caller BuildContexts do not become global caches.
-    registry = _RegistryCache(context.registry)
-    context = replace(context, settings=settings, registry=registry, adaptations={})
+    registry = _RegistryCache(context.registry, metrics)
+    context = replace(
+        context,
+        settings=settings,
+        registry=registry,
+        adaptations={},
+        builder=_MeasuredBuilder(context.builder, metrics) if context.builder is not None else None,
+        image_accounts=partial(metrics.call, "image_accounts", context.image_accounts)
+        if context.image_accounts is not None
+        else None,
+        validate_mount_paths=partial(metrics.call, "mount_path_inspection", context.validate_mount_paths)
+        if context.validate_mount_paths is not None
+        else None,
+    )
     if context.image_export is not None:
         # Seed extraction deduplicates within this invocation; resume re-extracts
         # rather than trusting unverified partial local seed caches.
         from tempfile import mkdtemp
 
         context = replace(
-            context, image_export=_Exports(context.image_export, Path(mkdtemp(prefix="seeds-", dir=work)))
+            context, image_export=_Exports(context.image_export, Path(mkdtemp(prefix="seeds-", dir=work)), metrics)
         )
     adapter = compose_adapter or ComposeConfigAdapter()
     rows = _rows(selected)
@@ -329,19 +423,26 @@ def prepare(
     fingerprints = []
     for i, row in enumerate(rows):
         try:
-            imported = import_task(
+            imported = metrics.call(
+                "import_normalize",
+                import_task,
                 row,
                 caps=context.caps,
                 compose_adapter=adapter,
                 require_prebuilt_images=require_prebuilt_images,
                 single_step_only=single_step_only,
             )
-            fingerprint = _fingerprint(imported, context)
+            fingerprint = metrics.call("fingerprint", _fingerprint, imported, context)
             imported_rows.append(imported)
             fingerprints.append(fingerprint)
             # Preflight every selected role before the first image publication.
             for task in imported.roles.values():
-                preflight_images(pin_images(plan_images(task.project, settings), registry), context)
+                metrics.call(
+                    "image_preflight",
+                    preflight_images,
+                    pin_images(plan_images(task.project, settings), registry),
+                    context,
+                )
             reports[i].update(stage="prepare", code="validated")
         except (OSError, ValueError, RuntimeError) as exc:
             if len(imported_rows) <= i:
@@ -365,13 +466,14 @@ def prepare(
         for row in reports:
             if row["status"] == "pending":
                 row.update(status="not_run", code="preflight_failed")
-        _write(report, {"rows": reports, "images": []})
+        _write(report, {"rows": reports, "images": [], "metrics": metrics.snapshot()})
         raise PreparationError("prepare preflight failed; no release published", reports)
     for key, pinned in state.get("adaptations", {}).items():
         ref = ImageRef.parse(pinned)
         if ref.digest is None or registry.digest(ref.name, ref.digest) != ref.digest:
             raise PreparationError("resume adaptation is not available at its recorded remote digest", reports)
         context.adaptations[key] = pinned
+        metrics.counts["adaptations_resumed"] += 1
     state = {"input_id": operation, "adaptations": context.adaptations}
     _write(state_path, state)
     records: dict[str, Any] = {}
@@ -393,7 +495,9 @@ def prepare(
                                 for p in pin_images(plan_images(task.project, settings), registry)
                                 if p.ref
                             }
-                            outcome = build_task(task, work / "builds", context, identity=fingerprint)
+                            outcome = metrics.call(
+                                "role_prepare", build_task, task, work / "builds", context, identity=fingerprint
+                            )
                             _write(state_path, state)
                             published_images.update(context.adaptations.values())
                             if outcome.status != "built" or outcome.manifest_path is None:
@@ -403,7 +507,9 @@ def prepare(
                             if outcome.needs_publish:
                                 directory = outcome.manifest_path.parent
                                 identities = json.loads((directory / "file-identities.json").read_text())
-                                asset = writer.add_asset(directory / "files", identities=identities)
+                                asset = metrics.call(
+                                    "package", writer.add_asset, directory / "files", identities=identities
+                                )
                                 if asset not in assets:  # roles publish identical files: one asset entry
                                     assets.append(asset)
                                 manifest = _asset_paths(manifest, asset)
@@ -413,7 +519,7 @@ def prepare(
                         if imported.tests is not None:
                             if not (imported.tests / "test.sh").is_file():
                                 raise ValueError("Harbor tests directory has no test.sh")
-                            tests = writer.add_asset(imported.tests)
+                            tests = metrics.call("package", writer.add_asset, imported.tests)
                             assets.append(tests)
                             verification = Verification(
                                 role="verifier" if "verifier" in roles else "main",
@@ -445,7 +551,7 @@ def prepare(
                             artifacts=artifacts,
                             provenance=provenance,
                         )
-                        records[fingerprint] = writer.add_task(native, imported.instruction)
+                        records[fingerprint] = metrics.call("package", writer.add_task, native, imported.instruction)
                     record = records[fingerprint]
                     dataset.append(
                         {
@@ -469,10 +575,18 @@ def prepare(
                     _write(state_path, state)
             if any(row["status"] == "failed" for row in reports):
                 raise PreparationError("one or more selected rows failed; no release published", reports)
-            release = writer.publish(dataset)
+            release = metrics.call("package", writer.publish, dataset)
     finally:
-        _write(report, {"rows": reports, "images": sorted(published_images | set(context.adaptations.values()))})
-    return PrepareResult(output, release.release_id, tuple(reports), tuple(sorted(published_images)))
+        measurements = metrics.snapshot()
+        _write(
+            report,
+            {
+                "rows": reports,
+                "images": sorted(published_images | set(context.adaptations.values())),
+                "metrics": measurements,
+            },
+        )
+    return PrepareResult(output, release.release_id, tuple(reports), tuple(sorted(published_images)), measurements)
 
 
 def _asset_paths(manifest: Manifest, asset: str) -> Manifest:

@@ -29,9 +29,13 @@ flotilla prepare selected.jsonl --deployment deployment.toml --env prepare.env \
 
 A failed selected row fails the release: no partial successful dataset is silently published. The output directory must not exist. Reports and resume work are separate from the release; use explicit `--resume` after correcting a failed attempt. Previously published images are recorded, not automatically deleted. Never mutate a release used by running jobs.
 
+The prepare report includes invocation-local `metrics`: total `elapsed_s`, per-phase `calls`/`failed`/`seconds`, and cache-hit/resumed-adaptation counts. `import_normalize` combines importing and official Compose normalization; `user0_build_push` and `application_build_push` each measure the builder's combined build/publication call. Phase times are inclusive and may overlap, so do not sum them. Tool calls exclude cache hits, failures remain counted, and resume starts fresh measurements rather than adding old durations. Metrics do not change release identity.
+
 ## Static publication belongs to the user
 
-Publish the complete output with your existing rsync, shared storage or object-storage tools. Flotilla does not upload a task dataset for you. Publish shared-tools and the Agent runtime separately, and grant the platform read access to the fixed runtime images. Do not place credentials, source checkout paths or image archives inside the task release.
+Publish the complete output with your existing rsync, shared storage or object-storage tools. Flotilla does not upload a task dataset for you. Preserve bytes, modes and symlinks, and apply the numeric UID/GID recorded in each asset inventory at the destination. The preparation host need not have those owners locally: blindly copying its actual owners can fail platform integrity validation. Existing tar tools can carry inventory ownership for extraction by a trusted storage administrator. Validate the delivered copy with `ReleaseReader(root, ownership=True)` and read the selected tasks before using it. A gateway PUT acknowledgement may precede visibility through a separate NFS client; wait for visibility before consuming.
+
+Publish shared-tools and the Agent runtime separately, and grant the platform read access to the fixed runtime images. Do not place credentials, source checkout paths or image archives inside the task release.
 
 ```text
 release/

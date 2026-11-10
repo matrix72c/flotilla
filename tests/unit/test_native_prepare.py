@@ -168,6 +168,16 @@ volumes:
     assert all(row.release_id == result.release_id for row in rows)
     assert all(r["status"] == "prepared" for r in result.report)
     assert json.loads(report.read_text())["rows"] == [dict(r) for r in result.report]
+    assert json.loads(report.read_text())["metrics"] == result.metrics
+    phases = result.metrics["phases"]
+    assert phases["import_normalize"]["calls"] == 2
+    assert phases["image_config"]["calls"] == 2  # two distinct images, not three services
+    assert phases["image_extract"]["calls"] == 1
+    assert phases["user0_build_push"]["calls"] == phases["application_build_push"]["calls"] == 0
+    assert phases["registry_copy"]["calls"] == 0
+    assert phases["package"]["calls"] == 5  # two tasks, two assets, final publication
+    assert all(phase["seconds"] >= 0 and phase["failed"] == 0 for phase in phases.values())
+    assert result.metrics["elapsed_s"] >= phases["package"]["seconds"]
 
     reader = ReleaseReader(out)
     tasks = {task.key: task for task in (reader.read_task(row) for row in rows)}
@@ -275,6 +285,8 @@ def test_prepare_adapts_nonroot_images_once_per_digest(tmp_path: Path) -> None:
         compose_adapter=ADAPTER(),
     )
     assert len(builder.requests) == 2  # one per distinct (target, image) pair
+    assert result.metrics["phases"]["user0_build_push"]["calls"] == 2
+    assert result.metrics["phases"]["role_prepare"]["calls"] == 4  # three main, one verifier
     assert all(r.tag.startswith("r.io/ns/out:user0-") for r in builder.requests)
     assert len({r.tag for r in builder.requests}) == 2
     reader = ReleaseReader(out)
@@ -317,6 +329,9 @@ def test_prepare_requires_image_repo_before_any_publication(tmp_path: Path) -> N
     assert builder.requests == [] and registry.copied == [] and not out.exists()
     reason = next(r for r in json.loads(report.read_text())["rows"] if r["status"] == "failed")["reason"]
     assert "--image-repo" in reason
+    phases = json.loads(report.read_text())["metrics"]["phases"]
+    assert phases["image_preflight"]["failed"] == 1
+    assert phases["user0_build_push"]["calls"] == phases["package"]["calls"] == 0
 
 
 def test_prepare_image_repo_overrides_context_target(tmp_path: Path) -> None:
@@ -367,6 +382,8 @@ def test_prepare_mirrors_only_when_explicitly_configured(tmp_path: Path) -> None
     )
     assert mirror_builder.requests == []  # mirroring is a registry copy, not a build
     assert len(mirror.copied) == 1
+    assert result.metrics["phases"]["registry_copy"]["calls"] == 1
+    assert result.metrics["phases"]["user0_build_push"]["calls"] == 0
     source, target = mirror.copied[0]
     assert source == f"docker.io/library/redis@{DIGEST}" and target.startswith("r.io/ns/out:mirror-")
     reader = ReleaseReader(result.output)
@@ -444,6 +461,8 @@ def test_prepare_resume_reuses_pushed_adaptations(tmp_path: Path) -> None:
     state = json.loads((work / "state.json").read_text())
     assert len(state["adaptations"]) == 1  # alpha's adaptation was pushed before the outage
     assert json.loads(report.read_text())["images"] == [f"r.io/ns/out@{RUNTIME_A}"]
+    interrupted = json.loads(report.read_text())["metrics"]["phases"]["user0_build_push"]
+    assert interrupted["calls"] == 2 and interrupted["failed"] == 1
 
     # Interrupted work is never silently reused: resume is explicit or rejected.
     with pytest.raises(ValueError, match="explicit resume"):
@@ -496,8 +515,67 @@ def test_prepare_resume_reuses_pushed_adaptations(tmp_path: Path) -> None:
         compose_adapter=ADAPTER(),
     )
     assert len(resumed.requests) == 1 and resumed.requests[0].tag.startswith("r.io/ns/out:user0-")
+    assert result.metrics["counts"]["adaptations_resumed"] == 1
+    assert result.metrics["phases"]["user0_build_push"]["calls"] == 1
+    assert result.metrics["phases"]["user0_build_push"]["failed"] == 0
     reader = ReleaseReader(out)
     tasks = {t.key: t for t in (reader.read_task(row) for row in read_dataset(out / "dataset.jsonl"))}
     assert tasks["alpha"].roles["main"].units["main"].image == f"r.io/ns/out@{RUNTIME_A}"  # reused, not rebuilt
     assert tasks["beta"].roles["main"].units["main"].image == f"r.io/ns/out@{RUNTIME_B}"
     assert set(result.images) == {f"r.io/ns/out@{RUNTIME_A}", f"r.io/ns/out@{RUNTIME_B}"}
+
+
+def test_prepare_metrics_measure_real_calls_not_seed_cache_hits(tmp_path: Path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    import flotilla.prepare.release as module
+
+    clock = [10.0]
+    monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+
+    class TimedExport(FakeExport):
+        def extract(self, *args, **kwargs):
+            clock[0] += 3.5
+            return super().extract(*args, **kwargs)
+
+    root = tmp_path / "harbor"
+    for name in ("alpha", "beta"):
+        harbor_task(
+            root,
+            name,
+            compose="""services:
+  main:
+    volumes:
+      - {type: volume, source: data, target: /data}
+volumes:
+  data: {}
+""",
+        )
+    result = prepare(
+        _selection(tmp_path),
+        out=tmp_path / "release",
+        context=_ctx(image_export=TimedExport({"/data": {"seed": "same"}})),
+        compose_adapter=ADAPTER(),
+    )
+    phases = result.metrics["phases"]
+    assert phases["image_extract"] == {"calls": 1, "failed": 0, "seconds": 3.5}
+    assert phases["seed_cache_copy"]["calls"] == 2
+    assert result.metrics["counts"]["seed_cache_hits"] == 1
+    assert result.metrics["counts"]["registry_cache_hits"] > 0
+    assert phases["role_prepare"]["seconds"] == 3.5  # inclusive, not a second 3.5 s cost
+    assert result.metrics["elapsed_s"] == 3.5
+    assert "metrics" not in (result.output / "manifest.json").read_text()
+
+
+def test_prepare_metrics_separate_application_build_from_user0(tmp_path: Path) -> None:
+    harbor_task(tmp_path / "harbor", "application", image=None, Dockerfile="FROM r.io/base:1\n")
+    builder = FakeBuilder()
+    result = prepare(
+        _selection(tmp_path),
+        out=tmp_path / "release",
+        context=_ctx(builder=builder),
+        compose_adapter=ADAPTER(),
+    )
+    assert len(builder.requests) == 1
+    assert result.metrics["phases"]["application_build_push"]["calls"] == 1
+    assert result.metrics["phases"]["user0_build_push"]["calls"] == 0
