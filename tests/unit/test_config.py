@@ -510,8 +510,44 @@ def test_named_inputs_bind_releases_and_the_anchor(tmp_path: Path, monkeypatch: 
         ({"inputs": {"work": {"host_path": "@user"}}}, "work"),
         ({"inputs": {"Bad": {"host_path": "@user"}}}, "name"),
         ({"task_releases": {"tb": {"local_root": "/r", "platform_root": "tb/r1", "input": "missing"}}}, "missing"),
+        (
+            {
+                "agent_runtime": {
+                    "input": "missing",
+                    "layers": {"lagent": {"local_root": "/r", "platform_root": "runtimes/lagent"}},
+                }
+            },
+            "missing",
+        ),
+        ({"agent_runtime": {"layers": {"Bad": {"local_root": "/r", "platform_root": "x"}}}}, "name"),
     ],
 )
 def test_input_names_are_checked(update: dict[str, Any], match: str) -> None:
     with pytest.raises(ValidationError, match=match):
         config(**update)
+
+
+def test_voyager_section_is_rejected_with_a_migration_error() -> None:
+    with pytest.raises(ValidationError, match=r"\[agent_runtime\.layers"):
+        config(voyager={"agent": "claude_code", "runtime": {}})
+
+
+def test_agent_runtime_is_typed_and_layer_agnostic(tmp_path: Path) -> None:
+    assert config().agent_runtime is None
+    data = config(
+        inputs={"runtimes": {"host_path": "@user:owner", "root_subpath": "runtimes"}},
+        agent_runtime={
+            "input": "runtimes",
+            "layers": {
+                "lagent": {"local_root": "layers/lagent", "platform_root": "runtimes/lagent"},
+                "anything": {"local_root": "/abs/layer", "platform_root": "runtimes/anything"},
+            },
+        },
+    ).model_dump(mode="json", exclude={"base_dir"})
+    cfg = FlotillaConfig.from_mapping(data, base_dir=tmp_path)
+    assert cfg.agent_runtime is not None
+    # Flotilla validates shape and roots; layer names stay consumer vocabulary.
+    assert set(cfg.agent_runtime.layers) == {"lagent", "anything"}
+    assert cfg.agent_runtime.layers["lagent"].local_root == Path("layers/lagent")
+    resolved = cfg.to_mapping()["agent_runtime"]["layers"]["lagent"]["local_root"]
+    assert resolved == str(tmp_path / "layers/lagent")
