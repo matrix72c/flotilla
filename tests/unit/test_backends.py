@@ -70,6 +70,15 @@ def fake_data(**table: Any) -> dict[str, Any]:
     return data
 
 
+def test_generated_capabilities_path_defaults_without_a_handwritten_report(tmp_path: Path) -> None:
+    data = config_data()
+    del data["opensandbox"]["capabilities"]
+    cfg = FlotillaConfig.from_mapping(data, base_dir=tmp_path)
+    assert cfg.backend_settings.capabilities == "capabilities.json"
+    assert cfg.capabilities_path() == tmp_path / "capabilities.json"
+    assert not cfg.management_capabilities().privileged_runtime
+
+
 def test_builtin_backend_is_the_default() -> None:
     cfg = FlotillaConfig.from_mapping(config_data())
     assert cfg.backend == "opensandbox"
@@ -143,8 +152,8 @@ def test_runtime_builds_the_selected_backend(
 ) -> None:
     from flotilla.runtime.manager import Manager
 
-    (tmp_path / "caps.json").write_text(report().dump_json())
     cfg = FlotillaConfig.from_mapping(fake_data(region="cn-sh"), base_dir=tmp_path)
+    (tmp_path / "caps.json").write_text(report(evidence_profile=cfg.evidence_profile()).dump_json())
     monkeypatch.setenv("FAKE_TOKEN", "test-only")
     manager = Manager(cfg, clock=SystemClock())
     assert isinstance(manager.platform, FakePlatform)

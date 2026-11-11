@@ -51,9 +51,8 @@ def test_named_volume_classification() -> None:
         volumes={"ro": {}, "solo": {}, "shared": {}, "twice": {}},
     )
     modes = {v.name: v.mode for v in classify(p.services).volumes}
-    # All read-only -> task files; one read-write -> local; >=2 references with a writer (including the
-    # same unit mounting it twice) -> trial shared volume.
-    assert modes == {"ro": "task_ro", "solo": "local", "shared": "trial", "twice": "trial"}
+    # Every named volume is attempt-owned, independent of reference count and flags.
+    assert modes == dict.fromkeys(("ro", "solo", "shared", "twice"), "trial")
 
 
 def test_bind_source_groups() -> None:
@@ -76,15 +75,13 @@ def test_bind_source_groups() -> None:
     layout = classify(p.services)
     groups = {g.root: g for g in layout.binds}
     assert set(groups) == {"conf", "data", "script.sh"}
-    assert groups["conf"].mode == "task_ro"  # no writer, includes a subpath reference
-    assert groups["data"].mode == "trial"  # writer + multiple refs (./data and data normalize to one source)
-    assert groups["script.sh"].mode == "image"  # has a writer, single reference -> baked into the image, not mounted
+    assert all(group.mode == "trial" for group in groups.values())
     b_mounts = {m.target: (m.scope, m.key, m.read_only) for m in layout.mounts["b"]}
     conf = groups["conf"].index
     data = groups["data"].index
-    assert b_mounts["/etc/sub"] == ("task", f"binds/{conf}/sub", True)
+    assert b_mounts["/etc/sub"] == ("trial", f"binds/{conf}/sub", True)
     assert b_mounts["/d"] == ("trial", f"binds/{data}", True)
-    assert "/entry.sh" not in {m.target for m in layout.mounts["a"]}
+    assert "/entry.sh" in {m.target for m in layout.mounts["a"]}
     assert any(v.copy_from == f"binds/{data}" for v in _manifest(p).trial_volumes)
 
 
@@ -276,4 +273,4 @@ def test_to_plan_requires_published_task_files_for_mounts() -> None:
         to_plan(m, runtime_params={})  # task files not yet published
     plan = to_plan(m.model_copy(update={"task_files": "tasks/bk1"}), runtime_params={})
     [mount] = plan.units["a"].mounts
-    assert (mount.scope, mount.key, mount.read_only) == ("task", "binds/0", True)
+    assert (mount.scope, mount.key, mount.read_only) == ("trial", "binds/0", True)

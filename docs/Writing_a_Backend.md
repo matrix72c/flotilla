@@ -34,7 +34,8 @@ Register the backend in the `flotilla.backends` entry-point group. The entry-poi
 ```toml
 [project]
 name = "flotilla-mycloud"
-dependencies = ["flotilla-compose>=0.2,<0.3", "httpx"]
+# Replace FULL_COMMIT with the complete, published commit of this Flotilla project.
+dependencies = ["flotilla @ git+https://github.com/matrix72c/flotilla.git@FULL_COMMIT", "httpx"]
 
 [project.entry-points."flotilla.backends"]
 mycloud = "flotilla_mycloud.backend:MyCloudBackend"
@@ -81,7 +82,7 @@ class MyCloudSettings(BackendSettings):
 
 Validation errors are reported with the TOML path (`backends.mycloud.region: Field required`) and never echo input values. Keep it that way: a pasted credential in the wrong key must not reach logs.
 
-`[storage]` is shared by all backends. `cfg.storage_settings()` returns its `volumes` (`"host"` or `"pvc"`), `host_path`, `claim_name`, and `root_subpath`. Map them to whatever your platform calls a shared mount. If your platform has a different storage model, add your own keys to the settings model and document how they relate to `[storage]`.
+`[storage]` is shared by all backends. `cfg.storage_settings()` (and `cfg.input_settings()` for the named read-only input roots) returns its `volumes` (`"host"` or `"pvc"`), `host_path`, `claim_name`, and `root_subpath`. Map them to whatever your platform calls a shared mount. If your platform has a different storage model, add your own keys to the settings model and document how they relate to `[storage]`.
 
 ## The `Backend` class
 
@@ -167,7 +168,7 @@ Never include raw response bodies, credentials, environment values, or command o
 
 **Files.** `write_file` creates the file with the given numeric `uid`, `gid`, and `mode`, and `read_file` returns raw bytes. Both are binary-safe.
 
-**Storage.** `spec.volumes` is a tuple of `SharedVolume(key, mount_path, read_only)`. `key` is a path relative to the shared root (`""` means the root itself, used only by the anchor). Mount exactly these and nothing else: anything extra is a `no_auto_mount` security gap.
+**Storage.** `spec.volumes` is a tuple of `SharedVolume(key, mount_path, read_only, root)`. `key` is a path relative to the shared root (`""` means the root itself, used only by the anchor). `root` is `"work"` (`[storage]`) or the name of an `[inputs.<name>]` root; input volumes are always read-only. Compile each volume against its root's settings and reject unknown names. Mount exactly these and nothing else: anything extra is a `no_auto_mount` security gap.
 
 **Network.**
 
@@ -179,9 +180,9 @@ Never include raw response bodies, credentials, environment values, or command o
 
 ## Capabilities and the probe
 
-You don't write capability detection yourself. `flotilla probe` runs the same behavioral checks through your `Platform` and combines them with the operator's `declared.json` into `capabilities.json`. Startup then refuses deployments that lack required capabilities or have unaccepted security gaps. See [Platform requirements](Platform_Requirements.md) for what is measured and what must be declared.
+`flotilla probe` runs shared behavioral checks through your `Platform` and writes generated schema-2 `capabilities.json`. Each outcome is `passed`, `failed`, `skipped`, or `error`, bound to relevant deployment/runtime settings. There are no manual capability assertions. Unsupported backend-specific controls must remain non-passed; implement authentic backend hooks where required rather than fabricating success. Startup refuses missing required evidence, mismatched configurations, and unaccepted security gaps. See [Platform requirements](Platform_Requirements.md).
 
-The probe follows the normal [deployment guide](Deployment.md): build and push the anchor and probe images, publish a share release, run `flotilla probe`, and review the report. Nothing in those steps is OpenSandbox-specific once your backend is installed.
+The probe follows the normal [deployment guide](Deployment.md): build and push the anchor and probe images, publish a share release, run `flotilla probe`, and review the report. Common checks use the Platform contract. Current independent ingress, execd authentication and privileged-runtime checks also use explicit OpenSandbox helpers; another backend must provide equivalent measured controls before those capabilities can be enabled. Management bootstrap uses conservative capabilities and must not bypass normal create gates.
 
 ## Testing
 

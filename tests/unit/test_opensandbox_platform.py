@@ -67,6 +67,8 @@ def _platform(
     execd: ExecdSettings | None = None,
     create_fields: dict[str, object] | None = None,
     extensions: dict[str, object] | None = None,
+    privileged_extensions: dict[str, object] | None = None,
+    management_extensions: dict[str, object] | None = None,
     group_extension: str | None = None,
     settings: NetworkSettings = SETTINGS,
     filesystem: FilesystemSettings = UPSTREAM_FILESYSTEM,
@@ -80,6 +82,8 @@ def _platform(
         caps=caps,
         execd=execd,
         extensions={"project": "p1"} if extensions is None else extensions,
+        privileged_extensions=privileged_extensions,
+        management_extensions=management_extensions,
         create_fields=create_fields,
         group_extension=group_extension,
         transport=httpx.MockTransport(handler),
@@ -161,6 +165,79 @@ async def test_create_builds_request_body(clock: ManualClock, caps: Capabilities
     # env holds only the execd access token (workload environment is passed per exec).
     assert list(body["env"]) == ["EXECD_ACCESS_TOKEN"] and len(body["env"]["EXECD_ACCESS_TOKEN"]) >= 32
     assert "ports" not in body  # only added via the deployment's create_fields
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unit", ["task", "probe", "gc"])
+@pytest.mark.parametrize("privileged", [False, True])
+async def test_management_extensions_do_not_change_other_requests(
+    clock: ManualClock, caps: Capabilities, unit: str, privileged: bool
+) -> None:
+    spec = dataclasses.replace(_spec(unit), privileged=privileged)
+    kwargs = {"privileged_extensions": {"runtimeClassName": "task-privileged", "task-only": "true"}}
+    baseline = await _create_body(clock, caps, spec, **kwargs)
+    configured = await _create_body(
+        clock, caps, spec, management_extensions={"runtimeClassName": "kata", "management-only": "true"}, **kwargs
+    )
+    for body in (baseline, configured):
+        body.pop("env")  # Per-request random access token.
+        body["metadata"].pop("flotilla/create-id")
+    assert configured == baseline
+    assert configured["extensions"] == (
+        {"project": "p1", "runtimeClassName": "task-privileged", "task-only": "true"}
+        if privileged
+        else {"project": "p1"}
+    )
+
+
+@pytest.mark.asyncio
+async def test_management_profile_uses_only_its_configured_overrides(clock: ManualClock, caps: Capabilities) -> None:
+    spec = dataclasses.replace(_spec("anchor"), profile="management")
+    body = await _create_body(
+        clock,
+        dataclasses.replace(caps, privileged_runtime=False),
+        spec,
+        extensions={"project": "p1", "runtimeClassName": "ordinary"},
+        privileged_extensions={"runtimeClassName": "task-privileged", "task-only": "true"},
+        management_extensions={"runtimeClassName": "kata"},
+    )
+    assert not spec.privileged
+    assert body["extensions"] == {"project": "p1", "runtimeClassName": "kata"}
+    assert "profile" not in body and "privileged" not in body
+
+
+@pytest.mark.asyncio
+async def test_management_profile_without_extensions_fails_before_http(clock: ManualClock, caps: Capabilities) -> None:
+    def unexpected(request: httpx.Request) -> httpx.Response:
+        pytest.fail("management profile without configuration must not send a create request")
+
+    platform = _platform(unexpected, clock, caps=caps)
+    try:
+        with pytest.raises(FlotillaError, match="management_extensions") as failure:
+            await platform.create(dataclasses.replace(_spec("anchor"), profile="management"))
+        assert failure.value.category is ErrorCategory.INVALID and not failure.value.retryable
+        assert not platform._pending
+    finally:
+        await platform.aclose()
+
+
+def test_instance_profile_is_closed_and_not_task_privileged() -> None:
+    with pytest.raises(ValueError, match="profile"):
+        dataclasses.replace(_spec("task"), profile="kata")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="privileged"):
+        dataclasses.replace(_spec("anchor"), profile="management", privileged=True)
+
+
+@pytest.mark.parametrize("key", ["sandboxGroup", SHM_SIZE_EXTENSION])
+def test_management_extensions_cannot_override_managed_keys(clock: ManualClock, caps: Capabilities, key: str) -> None:
+    with pytest.raises(ValueError, match=key):
+        _platform(
+            lambda r: httpx.Response(200),
+            clock,
+            caps=caps,
+            group_extension="sandboxGroup",
+            management_extensions={key: "not-allowed"},
+        )
 
 
 @pytest.mark.asyncio

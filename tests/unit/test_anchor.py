@@ -9,7 +9,16 @@ import pytest
 
 from flotilla.core import labels
 from flotilla.core.anchor import Anchor, AnchorSettings
-from flotilla.platform.base import ErrorCategory, ExecResult, FlotillaError, InstanceHandle, InstanceStatus, ProcessSpec
+from flotilla.platform.base import (
+    ErrorCategory,
+    ExecOutcomeUnknown,
+    ExecResult,
+    FlotillaError,
+    InstanceHandle,
+    InstanceStatus,
+    ProcessSpec,
+    SharedVolume,
+)
 from flotilla.testing.platform import FakePlatform, ManualClock, SharedTree
 
 SETTINGS = AnchorSettings(image="anchor@sha256:abc")
@@ -89,6 +98,65 @@ async def test_not_ready_before_start(platform: FakePlatform, clock: ManualClock
     anchor = Anchor(platform, clock, "L1", SETTINGS)
     with pytest.raises(RuntimeError):
         anchor.ensure_alive("create")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unknown", [False, True])
+async def test_start_waits_for_command_readiness_without_replaying_work(
+    platform: FakePlatform, clock: ManualClock, unknown: bool
+) -> None:
+    seen: list[tuple[str, ...]] = []
+
+    def execute(_iid: str, proc: ProcessSpec) -> ExecResult:
+        seen.append(proc.argv)
+        if len(seen) < 3 or proc.argv != ("true",):
+            if unknown:
+                raise ExecOutcomeUnknown("command response was lost")
+            raise _transient()
+        return ExecResult(0, b"", b"")
+
+    platform.set_exec_handler(execute)
+    anchor = await _started(platform, clock)
+    assert seen == [("true",)] * 3
+    with pytest.raises(FlotillaError):
+        await anchor.execute(("compiler",), stage="prepare", timeout_s=10)
+    assert seen == [("true",)] * 3 + [("compiler",)]
+    await anchor.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["auth", "nonretryable", "nonzero", "timed_out", "unavailable", "hung"])
+async def test_start_readiness_failure_cleans_up(platform: FakePlatform, clock: ManualClock, outcome: str) -> None:
+    seen = 0
+
+    if outcome == "hung":
+        platform.set_latency("exec", 10000)
+
+    def execute(_iid: str, proc: ProcessSpec) -> ExecResult:
+        nonlocal seen
+        seen += 1
+        assert proc.argv == ("true",)
+        if outcome == "unavailable":
+            raise _transient()
+        if outcome in ("auth", "nonretryable"):
+            raise FlotillaError(
+                "unavailable",
+                stage="run",
+                category=ErrorCategory.INVALID if outcome == "auth" else ErrorCategory.TRANSIENT,
+                retryable=False,
+            )
+        return ExecResult(1 if outcome == "nonzero" else 0, b"", b"", timed_out=outcome == "timed_out")
+
+    platform.set_exec_handler(execute)
+    anchor = Anchor(platform, clock, "L1", SETTINGS)
+    with pytest.raises(FlotillaError):
+        await clock.run(anchor.start())
+    assert not platform.instances()
+    assert not anchor._ready
+    if outcome == "hung":
+        assert seen == 0
+    elif outcome != "unavailable":
+        assert seen == 1
 
 
 # ───────────────────────────── Renewal and deactivation ─────────────────────────────
@@ -310,6 +378,268 @@ async def test_stat_reads_mode_owner_and_size(platform: FakePlatform, clock: Man
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["unknown", "transient", "rate_limited"])
+@pytest.mark.parametrize("recover", [False, True])
+async def test_stat_transport_retries_are_bounded_and_preserve_cause(
+    platform: FakePlatform, clock: ManualClock, failure: str, recover: bool
+) -> None:
+    anchor = await _started(platform, clock)
+    errors: list[FlotillaError] = []
+    sent: list[float] = []
+    start = clock.monotonic()
+
+    def execute(_iid: str, proc: ProcessSpec) -> ExecResult:
+        assert proc.argv == ("/.flotilla/bin/busybox", "stat", "-c", "%a %u %g %s", "--", "/flotilla-root/result")
+        sent.append(clock.monotonic() - start)
+        if recover and len(sent) == 5:
+            return ExecResult(0, b"6755 1001 1002 17\n", b"")
+        error = (
+            ExecOutcomeUnknown("stat response lost", command_id=f"stat-{len(sent)}")
+            if failure == "unknown"
+            else FlotillaError(
+                "stat transport unavailable",
+                stage="run",
+                category=ErrorCategory.TRANSIENT if failure == "transient" else ErrorCategory.RATE_LIMITED,
+                retryable=True,
+            )
+        )
+        errors.append(error)
+        raise error
+
+    platform.set_exec_handler(execute)
+    try:
+        if recover:
+            info = await clock.run(anchor.stat("result", stage="prepare"))
+            assert (info.mode, info.uid, info.gid, info.size) == (0o6755, 1001, 1002, 17)
+        else:
+            with pytest.raises(FlotillaError) as failure_info:
+                await clock.run(anchor.stat("result", stage="prepare"))
+            assert failure_info.value.stage == "prepare"
+            assert failure_info.value.__cause__ is errors[-1]
+            assert failure_info.value.category is errors[-1].category
+        assert sent == [0.0, 0.5, 1.5, 3.5, 7.5]
+    finally:
+        await anchor.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("category", "retryable"),
+    [
+        (ErrorCategory.INVALID, False),  # Includes authentication/authorization failures.
+        (ErrorCategory.INVALID, True),
+        (ErrorCategory.NOT_FOUND, True),
+        (ErrorCategory.LOST, True),
+        (ErrorCategory.CAPACITY, True),
+        (ErrorCategory.IMAGE, True),
+        (ErrorCategory.SERVICE, True),
+        (ErrorCategory.TRANSIENT, False),
+        (ErrorCategory.RATE_LIMITED, False),
+    ],
+)
+async def test_stat_does_not_retry_other_transport_errors(
+    platform: FakePlatform, clock: ManualClock, category: ErrorCategory, retryable: bool
+) -> None:
+    anchor = await _started(platform, clock)
+    error = FlotillaError("not recoverable by stat", stage="run", category=category, retryable=retryable)
+    platform.inject_fault("exec", error)
+    before = platform.calls["exec"]
+    try:
+        with pytest.raises(FlotillaError) as failure:
+            await clock.run(anchor.stat("result", stage="prepare"))
+        assert platform.calls["exec"] - before == 1
+        assert failure.value.stage == "prepare" and failure.value.__cause__ is error
+    finally:
+        await anchor.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "result",
+    [
+        ExecResult(1, b"", b"No such file"),
+        ExecResult(0, b"644 0 0 17", b"", timed_out=True),
+        ExecResult(0, b"bad metadata", b""),
+        ExecResult(0, b"644 0 0 -1", b""),
+        ExecResult(0, b"\xff", b""),
+    ],
+    ids=["nonzero", "timed-out", "malformed", "invalid-size", "non-ascii"],
+)
+async def test_stat_does_not_retry_command_results(
+    platform: FakePlatform, clock: ManualClock, result: ExecResult
+) -> None:
+    anchor = await _started(platform, clock)
+    platform.set_exec_handler(lambda _iid, _proc: result)
+    before = platform.calls["exec"]
+    try:
+        with pytest.raises(FlotillaError) as failure:
+            await clock.run(anchor.stat("result", stage="prepare"))
+        assert failure.value.stage == "prepare"
+        assert platform.calls["exec"] - before == 1
+    finally:
+        await anchor.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("latency", [29.75, 30.0, 35.0])
+async def test_stat_does_not_admit_retry_after_thirty_seconds(
+    platform: FakePlatform, clock: ManualClock, latency: float
+) -> None:
+    anchor = await _started(platform, clock)
+    platform.set_latency("exec", latency)
+    error = ExecOutcomeUnknown("slow stat response lost")
+    platform.inject_fault("exec", error)
+    before = platform.calls["exec"]
+    try:
+        with pytest.raises(FlotillaError) as failure:
+            await clock.run(anchor.stat("result", stage="prepare"))
+        assert platform.calls["exec"] - before == 1
+        assert failure.value.stage == "prepare" and failure.value.__cause__ is error
+    finally:
+        await anchor.close()
+
+
+@pytest.mark.asyncio
+async def test_stat_retry_window_does_not_cancel_an_admitted_attempt(
+    platform: FakePlatform, clock: ManualClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    anchor = await _started(platform, clock)
+    original_exec = platform.exec
+    calls = 0
+    started = clock.monotonic()
+
+    async def execute(handle: InstanceHandle, proc: ProcessSpec) -> ExecResult:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ExecOutcomeUnknown("first stat response lost")
+        await clock.sleep(35.0)
+        return await original_exec(handle, proc)
+
+    platform.set_exec_handler(lambda _iid, _proc: ExecResult(0, b"644 0 0 17", b""))
+    monkeypatch.setattr(platform, "exec", execute)
+    try:
+        assert (await clock.run(anchor.stat("result", stage="prepare"))).size == 17
+        assert calls == 2
+        assert clock.monotonic() - started == 35.5
+    finally:
+        await anchor.close()
+
+
+@pytest.mark.asyncio
+async def test_stat_rechecks_retry_admission_after_delayed_wakeup(platform: FakePlatform, clock: ManualClock) -> None:
+    anchor = await _started(platform, clock)
+    error = ExecOutcomeUnknown("stat response lost")
+    platform.inject_fault("exec", error)
+    before = platform.calls["exec"]
+    task = asyncio.create_task(anchor.stat("result", stage="prepare"))
+    try:
+        await clock.advance(0)
+        assert not task.done() and platform.calls["exec"] - before == 1
+        clock.jump(30.0)
+        await clock.advance(0)
+        with pytest.raises(FlotillaError) as failure:
+            await clock.run(task)
+        assert failure.value.__cause__ is error
+        assert platform.calls["exec"] - before == 1
+    finally:
+        await anchor.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stop", ["cancel", "deactivate"])
+async def test_stat_retry_wait_stops_on_cancellation_or_deactivation(
+    platform: FakePlatform, clock: ManualClock, stop: str
+) -> None:
+    anchor = await _started(platform, clock)
+    platform.inject_fault("exec", ExecOutcomeUnknown("stat response lost"))
+    before = platform.calls["exec"]
+    task = asyncio.create_task(anchor.stat("result", stage="prepare"))
+    try:
+        await clock.advance(0.25)
+        assert not task.done() and platform.calls["exec"] - before == 1
+        if stop == "cancel":
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        else:
+            anchor.deactivated.set()
+            await clock.advance(0)
+            assert task.done()  # Do not wait for the remaining backoff to expire.
+            with pytest.raises(FlotillaError) as failure:
+                await task
+            assert failure.value.category is ErrorCategory.LOST and failure.value.stage == "prepare"
+        await clock.advance(10)
+        assert platform.calls["exec"] - before == 1
+    finally:
+        await anchor.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "execute",
+        "mkdir",
+        "remove",
+        "copy_tree",
+        "copy_contents",
+        "copy_source_tree",
+        "listdir",
+        "chmod",
+        "chown",
+        "unpack",
+        "rename",
+        "exists",
+    ],
+)
+@pytest.mark.parametrize("unknown", [False, True])
+async def test_non_stat_operations_never_replay_transport_failures(
+    platform: FakePlatform, clock: ManualClock, operation: str, unknown: bool
+) -> None:
+    anchor = await _started(platform, clock)
+    error = ExecOutcomeUnknown("response lost") if unknown else _transient()
+    before = platform.calls["exec"]
+    platform.inject_fault("exec", error)
+    args = {
+        "execute": (("helper",),),
+        "mkdir": ("dest",),
+        "remove": ("dest",),
+        "copy_tree": ("source", "dest"),
+        "copy_contents": ("source", "dest"),
+        "copy_source_tree": ("source", "dest"),
+        "listdir": ("source",),
+        "chmod": ("dest", 0o755),
+        "chown": ("dest", 1, 1),
+        "unpack": ("source.tar", "dest"),
+        "rename": ("source", "dest"),
+        "exists": ("source",),
+    }[operation]
+    kwargs = {"timeout_s": 10} if operation == "execute" else {}
+    try:
+        with pytest.raises(FlotillaError):
+            await clock.run(getattr(anchor, operation)(*args, stage="prepare", **kwargs))
+        assert platform.calls["exec"] - before == 1
+    finally:
+        await anchor.close()
+
+
+@pytest.mark.asyncio
+async def test_download_does_not_add_outer_transport_retries(platform: FakePlatform, clock: ManualClock) -> None:
+    anchor = await _started(platform, clock)
+    error = _transient()  # The platform's idempotent HTTP retry budget is already exhausted.
+    platform.inject_fault("read_file", error)
+    before = platform.calls["read_file"]
+    try:
+        with pytest.raises(FlotillaError) as failure:
+            await clock.run(anchor.download("result", stage="prepare"))
+        assert failure.value.stage == "prepare" and failure.value.__cause__ is error
+        assert platform.calls["read_file"] - before == 1
+    finally:
+        await anchor.close()
+
+
+@pytest.mark.asyncio
 async def test_stat_reports_missing_as_error(platform: FakePlatform, clock: ManualClock, tree: SharedTree) -> None:
     anchor = await _started(platform, clock)
     with pytest.raises(FlotillaError):
@@ -410,3 +740,65 @@ async def test_directory_op_in_flight_is_cancelled_on_deactivation(platform: Fak
     with pytest.raises(FlotillaError) as exc:
         await op
     assert exc.value.category is ErrorCategory.LOST and exc.value.stage == "prepare"
+
+
+# ───────────────────────────── Read-only input root ─────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_named_input_roots_are_mounted_read_only_and_only_read(
+    platform: FakePlatform, clock: ManualClock
+) -> None:
+    settings = AnchorSettings(image="anchor@sha256:abc", inputs=("datasets", "runtimes"))
+    anchor = await _started(platform, clock, settings)
+    assert anchor.iid is not None
+    volumes = platform.spec_of(anchor.iid).volumes
+    assert [(v.key, v.mount_path, v.read_only, v.root) for v in volumes] == [
+        ("", "/flotilla-root", False, "work"),
+        ("", "/flotilla-inputs/datasets", True, "datasets"),
+        ("", "/flotilla-inputs/runtimes", True, "runtimes"),
+    ]
+    seen: list[tuple[str, ...]] = []
+
+    def handler(iid: str, proc: ProcessSpec) -> ExecResult:
+        seen.append(proc.argv)
+        return ExecResult(exit_code=0, stdout=b"", stderr=b"")
+
+    platform.set_exec_handler(handler)
+    assert anchor.path("releases/r", root="datasets") == "/flotilla-inputs/datasets/releases/r"
+    await anchor.unpack("releases/r/seed.tar", "launches/L1/t/v", stage="prepare", src_root="datasets")
+    await anchor.copy_tree("releases/r/src", "launches/L1/t/w", stage="prepare", src_root="datasets")
+    await anchor.copy_contents("releases/r/tests", "launches/L1/a/tests", stage="prepare", src_root="datasets")
+    assert await anchor.exists("", stage="prepare", root="runtimes")
+    assert seen == [
+        (
+            "tar",
+            "-xpf",
+            "/flotilla-inputs/datasets/releases/r/seed.tar",
+            "--numeric-owner",
+            "-C",
+            "/flotilla-root/launches/L1/t/v",
+        ),
+        ("mkdir", "-p", "--", "/flotilla-root/launches/L1/t"),
+        ("cp", "-a", "--", "/flotilla-inputs/datasets/releases/r/src", "/flotilla-root/launches/L1/t/w"),
+        ("mkdir", "-p", "--", "/flotilla-root/launches/L1/a/tests"),
+        ("cp", "-a", "--", "/flotilla-inputs/datasets/releases/r/tests/.", "/flotilla-root/launches/L1/a/tests"),
+        ("ls", "-d", "--", "/flotilla-inputs/runtimes"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_unconfigured_input_root_is_refused(platform: FakePlatform, clock: ManualClock) -> None:
+    anchor = await _started(platform, clock)
+    assert anchor.iid is not None
+    assert [v.root for v in platform.spec_of(anchor.iid).volumes] == ["work"]
+    assert anchor.path("releases/r", root="work") == "/flotilla-root/releases/r"
+    with pytest.raises(ValueError, match="datasets"):
+        anchor.path("releases/r", root="datasets")
+
+
+def test_management_mounts_must_not_overlap_the_inputs_mount() -> None:
+    mount = SharedVolume(key="creds", mount_path="/flotilla-inputs/creds", read_only=True)
+    AnchorSettings(image="x", management_mounts=(mount,))  # no input roots: path is free
+    with pytest.raises(ValueError, match="overlap"):
+        AnchorSettings(image="x", management_mounts=(mount,), inputs=("datasets",))

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import shutil
 import stat
 import tarfile
@@ -41,11 +42,10 @@ class Exported:
 
     binds: Mapping[int, str] = field(default_factory=dict)  # bind group index -> `binds/<n>`
     seeds: Mapping[str, str] = field(default_factory=dict)  # volume name -> `seeds/<volume>.tar`
-    readonly_volumes: Mapping[str, str] = field(default_factory=dict)  # volume name -> `_volumes/<volume>`
 
     @property
     def empty(self) -> bool:
-        return not (self.binds or self.seeds or self.readonly_volumes)
+        return not (self.binds or self.seeds)
 
 
 def export_task_files(
@@ -70,7 +70,6 @@ def export_task_files(
     result = Exported(
         binds=_export_binds(layout, env_dir, files_dir, identities),
         seeds=_export_seeds(layout, files_dir, images, image_export),
-        readonly_volumes=_export_readonly(layout, files_dir, images, image_export, identities),
     )
     (files_dir.parent / "file-identities.json").write_text(json.dumps(identities, sort_keys=True))
     return result
@@ -79,11 +78,24 @@ def export_task_files(
 def _export_binds(
     layout: Layout, env_dir: Path, files_dir: Path, identities: dict[str, tuple[int, int, int]]
 ) -> dict[int, str]:
-    """Copy platform-mounted bind source groups (`task_ro` / `trial`) to `binds/<n>`, keeping owner and mode."""
+    """Stage every bind source for copying into attempt storage, keeping owner and mode."""
     out: dict[int, str] = {}
+    hardlinks: dict[tuple[int, int], tuple[Path, int]] = {}
+
+    def copy_file(source: str | Path, dest: str | Path) -> str:
+        info = Path(source).stat(follow_symlinks=False)
+        inode = (info.st_dev, info.st_ino)
+        previous = hardlinks.get(inode)
+        if previous is not None:
+            if previous[1] != group.index:
+                raise ExportError("hardlinks across independent bind source roots are unsupported")
+            os.link(previous[0], dest)
+        else:
+            shutil.copy2(source, dest, follow_symlinks=False)
+            hardlinks[inode] = (Path(dest), group.index)
+        return str(dest)
+
     for group in layout.binds:
-        if group.mode == "image":  # baked into the image, not task files
-            continue
         source = confined(env_dir, group.root)
         key = f"binds/{group.index}"
         dest = confined(files_dir, key)
@@ -100,12 +112,11 @@ def _export_binds(
                     stat.S_IMODE(info.st_mode),
                 )
         if not source.exists():
-            # Unreachable for scanned tasks (scan rejects missing sources); kept for direct callers.
-            dest.mkdir(parents=True, exist_ok=True)
+            raise ExportError(f"bind source does not exist: {group.root}")
         elif source.is_dir():
-            shutil.copytree(source, dest, symlinks=True, dirs_exist_ok=True)
+            shutil.copytree(source, dest, symlinks=True, dirs_exist_ok=True, copy_function=copy_file)
         else:
-            shutil.copy2(source, dest, follow_symlinks=False)
+            copy_file(source, dest)
         out[group.index] = key
     return out
 
@@ -116,7 +127,7 @@ def _export_seeds(
     images: Mapping[str, str] | None,
     image_export: ImageExport | None,
 ) -> dict[str, str]:
-    """Pack initial content of multi-reference read-write volumes into `seeds/<volume>.tar`, keeping owner and mode."""
+    """Pack copy-enabled volume contents into transient `seeds/<volume>.tar`, keeping owner and mode."""
     out: dict[str, str] = {}
     for volume in layout.volumes:
         if volume.mode != "trial" or volume.nocopy:
@@ -136,6 +147,9 @@ def _export_seeds(
             ) -> tarfile.TarInfo:
                 info.uid, info.gid, info.mode = owners.get(info.name, (info.uid, info.gid, info.mode))
                 info.uname = info.gname = ""
+                # Extraction creates fresh host timestamps, not image metadata.
+                # Keep those incidental times out of content-addressed seed bytes.
+                info.mtime = 0
                 return info
 
             with tarfile.open(tar_path, "w") as tar:
@@ -143,28 +157,6 @@ def _export_seeds(
                     tar.add(staged, arcname=".", recursive=False, filter=numeric_owner)
                 for child in sorted(staged.iterdir()):
                     tar.add(child, arcname=child.name, filter=numeric_owner)
-        out[volume.name] = key
-    return out
-
-
-def _export_readonly(
-    layout: Layout,
-    files_dir: Path,
-    images: Mapping[str, str] | None,
-    image_export: ImageExport | None,
-    identities: dict[str, tuple[int, int, int]],
-) -> dict[str, str]:
-    """Volumes with only read-only references: content is unpacked to `_volumes/<volume>/`, shared by all trials."""
-    out: dict[str, str] = {}
-    for volume in layout.volumes:
-        if volume.mode != "task_ro":
-            continue
-        key = f"_volumes/{volume.name}"
-        dest = confined(files_dir, key)
-        _reset(dest)
-        owners: dict[str, tuple[int, int, int]] = {}
-        _populate(volume.references, dest, images, image_export, volume.name, owners)
-        identities.update({key if p == "." else f"{key}/{p}": owner for p, owner in owners.items()})
         out[volume.name] = key
     return out
 
@@ -177,8 +169,8 @@ def _populate(
     volume: str,
     identities: dict[str, tuple[int, int, int]],
 ) -> bool:
-    """Use the first populated copy-enabled reference, or retain an empty image directory's root metadata."""
-    empty_root = None
+    """Seed only when all copy-enabled references identify the same image content and path."""
+    sources: dict[tuple[str, str], tuple[str, str]] = {}
     for unit, mount, _, nocopy in references:
         if nocopy:
             continue
@@ -187,12 +179,25 @@ def _populate(
                 f"initial content of volume {volume!r} comes from the image of service {unit!r}, "
                 "but no image or exporter was provided"
             )
-        identities.clear()
-        if image_export.extract(images[unit], mount, dest, identities=identities):
-            return True
-        if empty_root is None:
-            empty_root = identities.get(".")
-        _reset(dest)
+        image = images[unit]
+        # Production images are digest-pinned. Registry aliases of one digest
+        # have identical content; unpinned lower-layer fixtures compare literally.
+        content = image.rpartition("@")[2] or image
+        sources.setdefault((content, mount), (image, mount))
+    if len(sources) > 1:
+        raise ExportError(
+            f"volume {volume!r} has multiple copy-enabled image/path sources; "
+            "identical initialization content cannot be proven (use one source or volume.nocopy)"
+        )
+    identities.clear()
+    if not sources:
+        return False
+    image, mount = next(iter(sources.values()))
+    assert image_export is not None
+    if image_export.extract(image, mount, dest, identities=identities):
+        return True
+    empty_root = identities.get(".")
+    _reset(dest)
     identities.clear()
     if empty_root is None:
         return False

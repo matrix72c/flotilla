@@ -6,9 +6,9 @@
 
 [中文](README_zh.md)
 
-**Run Docker Compose task environments on a sandbox platform, one sandbox per service, thousands at a time.**
+**Prepare portable multi-service tasks once; execute isolated attempts on a sandbox platform.**
 
-Agent evaluation and RL tasks are often Compose projects: an agent container plus a database, a web app, or a vulnerable service. Docker Compose runs them on one host. Sandbox platforms scale out, but they run single containers. Flotilla takes the Compose project, gives each service its own sandbox, connects them under an explicit network policy, and deletes everything when you're done.
+Flotilla owns a native task protocol shared by evaluation and RL consumers. Its optional Harbor importer normalizes Compose on a preparation host, pins images and captures static assets. Users publish that immutable release to platform storage. Attempts then open one sandbox per service, connect them under an explicit network policy, and clean up their private state—without parsing Compose, building images or exporting image seeds again.
 
 ```mermaid
 flowchart LR
@@ -16,8 +16,9 @@ flowchart LR
         m[main]
         c[cache]
     end
-    task --> F["Flotilla<br/>build · publish · plan network"]
-    F --> P
+    task --> F["Host prepare<br/>pin images · capture assets"]
+    F --> R["Native release<br/>user publishes static files"]
+    R --> P
     subgraph P["Sandbox platform"]
         direction LR
         sm["sandbox: main"] <--> sc["sandbox: cache"]
@@ -30,7 +31,9 @@ A task is a directory with a `task.toml` and an `environment/` directory contain
 
 ```text
 task/
-  task.toml               # [environment] table, may be empty
+  instruction.md
+  tests/test.sh            # required Harbor verifier script
+  task.toml               # Harbor task configuration
   environment/
     docker-compose.yaml
 ```
@@ -50,36 +53,47 @@ services:
       retries: 15
 ```
 
-Prepare it once. This resolves or builds the images, publishes task files, and writes one row per task:
+Prepare on a CPU host, then publish the output with your existing storage tools:
 
 ```sh
-flotilla prepare task --deployment deployment.toml --out prepared.jsonl
+flotilla probe --deployment deployment.toml --env sandbox.env
+flotilla select --host-root ./tasks --deployment deployment.toml \
+  --out selected.jsonl --report selection-report.json
+flotilla prepare selected.jsonl --deployment deployment.toml \
+  --out ./release --report prepare-report.json --image-repo registry.example.org/team/tasks
 ```
 
-Then open the row:
+`prepare` may build and publish required USER0 adaptations. It does not upload the static release. Bind the local release and its published platform location in `[task_releases.example]` before executing. See [Native tasks](docs/Native_Tasks.md) for path binding, installation, credentials and migration.
 
 ```python
 import asyncio
 
-from flotilla import Flotilla, OpenOptions, load_prepared
+from flotilla import Flotilla, OpenOptions
+from flotilla.config import FlotillaConfig
+from flotilla.native import NativeAttempt
 
 
 async def main():
-    [task] = load_prepared("prepared.jsonl")
-    async with Flotilla(deployment="deployment.toml") as fleet:
-        async with fleet.environment(task.environment(), OpenOptions(startup_timeout=600, lifetime=300)) as env:
+    config = FlotillaConfig.load("deployment.toml")
+    bindings = config.release_bindings()
+    row = bindings.read_dataset("release/dataset.jsonl")[0]
+    async with Flotilla(deployment=config) as fleet:
+        attempt = await NativeAttempt.create(fleet, bindings.resolve(row))
+        try:
+            env = await attempt.open("main", OpenOptions(startup_timeout=600, lifetime=300))
             pong = await env.service("cache").exec(["redis-cli", "ping"], timeout=30)
-            print("cache:", pong.stdout.decode().strip())
-            result = await env.agent.shell("printf 'PING\\r\\n' | nc -w 2 cache 6379", timeout=30)
-            print("main -> cache:", result.stdout.decode().strip())
-            assert result.exit_code == 0 and not result.timed_out
+            print(pong.stdout.decode().strip())
+        finally:
+            await attempt.close()
     assert fleet.cleanup_report is not None and fleet.cleanup_report.clean
 
 
 asyncio.run(main())
 ```
 
-Opening a row only creates sandboxes: images were pinned and task files published by `flotilla prepare`. Flotilla waits for `cache` to pass its healthcheck before starting `main`, makes `cache` resolvable by name from `main`, and confirms on exit that both sandboxes and their shared directories have been deleted. Harbor tasks run the same way through the [Harbor adapter](docs/Harbor_Quick_Start.md).
+`NativeAttempt` consumes the bound task definition and assets, creates attempt-private writable state and opens its roles. Hidden tests are staged only for verification. Local and platform integrity checks reject missing or altered files; no source-task or builder fallback is permitted. Dataset rows retain full release/task identities, order and duplicates. Metadata and capacity inspection use the prepared definitions rather than recompiling source tasks.
+
+Harbor and Voyager share this lifecycle. Harbor remains optional, using a pinned patched build for its source/runtime interfaces. The old source-workspace APIs are legacy interfaces, not the native consumption path.
 
 ## Features
 
@@ -92,7 +106,7 @@ Opening a row only creates sandboxes: images were pinned and task files publishe
 
 ## Get started
 
-Flotilla runs on **Linux x86_64 with Python 3.12**, and needs Docker with BuildKit on the machine that prepares images.
+Flotilla runs on **Linux x86_64 with Python 3.12**. Host import needs the optional `harbor` extra, pinned Docker Compose and preparation tools. Native execution and its Anchor do not need Harbor, Compose, Docker or a GPU stack. Build the Anchor from the installed package with `flotilla anchor build`, using a pinned Python base; publication requires explicit `--push`. Platform capabilities and cleanup must pass `flotilla probe` before consumption. See [Native tasks](docs/Native_Tasks.md) for the complete workflow and migration boundaries.
 
 ```sh
 git clone https://github.com/matrix72c/flotilla.git
@@ -100,7 +114,7 @@ cd flotilla
 python -m pip install .            # or: python -m pip install '.[harbor]'
 ```
 
-The distribution is named `flotilla-compose`; the import name and CLI are `flotilla`.
+The distribution, import name and CLI are `flotilla`. Install from this repository or a wheel built from a fixed commit; **do not run bare `pip install flotilla`**, which selects an unrelated public PyPI project. Use a fresh environment when migrating from `flotilla-compose`; the two distributions must not share an environment because they own the same Python module.
 
 Then pick a path:
 
@@ -123,7 +137,7 @@ Then pick a path:
 **Operating a deployment**
 
 - [Deployment guide](docs/Deployment.md): one-time setup of images, the share release, and the capability probe.
-- [Configuration reference](docs/Configuration.md): every `deployment.toml` and `declared.json` field.
+- [Configuration reference](docs/Configuration.md): the single `deployment.toml` and generated capability evidence.
 - [Platform requirements](docs/Platform_Requirements.md) and [network validation](docs/Network_Validation.md): what a deployment must enable, feature by feature, and how to verify each.
 - [OpenSandbox backend](docs/backends/opensandbox.md), including [read-only root filesystems and tmpfs](docs/Readonly_Rootfs_and_Tmpfs.md).
 
@@ -135,7 +149,7 @@ Then pick a path:
 
 ## Status
 
-Flotilla is alpha software. The supported targets are Linux x86_64, Python 3.12, the OpenSandbox `current` and `legacy` execd protocols, and Harbor 0.24.0 for the optional adapter. APIs and configuration may change between minor versions before 1.0; see the [changelog](CHANGELOG.md).
+Flotilla is alpha software. The supported targets are Linux x86_64, Python 3.12, the OpenSandbox `current` and `legacy` execd protocols, and a compatible patched Harbor build for the optional native source/runtime adapter (stock Harbor 0.24.0 lacks those interfaces). APIs and configuration may change between minor versions before 1.0; see the [changelog](CHANGELOG.md).
 
 ## Contributing
 

@@ -1,31 +1,24 @@
-"""Measure implemented deployment contracts; preserve unmeasured items as declarations."""
+"""Bounded deployment probe orchestration and common behavioral checks."""
 
 from __future__ import annotations
 
+import asyncio
 import uuid
-from dataclasses import dataclass, replace
+from contextlib import suppress
+from dataclasses import asdict, dataclass, replace
 from datetime import timedelta
-from typing import Annotated
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+if TYPE_CHECKING:
+    from flotilla.config import FlotillaConfig
 
 from flotilla import __version__
-from flotilla.capabilities import (
-    CapabilityReport,
-    Device,
-    Exec,
-    ExternalForm,
-    Item,
-    Lifecycle,
-    Network,
-    Runtime,
-    Storage,
-)
+from flotilla.capabilities import CapabilityReport, Item, ProbeSettings
 from flotilla.core import labels
 from flotilla.core.anchor import Anchor
 from flotilla.core.waiting import Expired, wait_running, within
 from flotilla.platform.base import (
-    Capabilities,
     Clock,
     ErrorCategory,
     ExternalPolicy,
@@ -38,7 +31,6 @@ from flotilla.platform.base import (
     SharedVolume,
     TmpfsMount,
 )
-from flotilla.platform.network import cluster_dns_address
 
 PROBE_LABEL = "flotilla/probe"  # run id; with the launch and unit labels it identifies a probed instance
 _EXEC_TIMEOUT_S = 30.0
@@ -46,205 +38,113 @@ _MEMORY = "512Mi"
 _MEMORY_BYTES = 512 * 1024 * 1024
 #: Differs from Docker's 64 MiB and from a memory-sized default, so a passing check reflects the request.
 _SHM_PROBE_BYTES = 96 * 1024 * 1024
-_PUBLIC_IP = "1.1.1.1"  # egress none: a public address outside any deployment
 _NONE = ExternalPolicy(mode="none")
-_INBOUND_PORT = 48080  # port the member listens on
-_INBOUND_TOKEN = "__flotilla_inbound__"  # listener's reply; also what the connector sends
 _PATH = "/usr/local/bin:/usr/bin:/bin"
 
 
-class Declared(BaseModel):
-    """Deployer declarations: items that probe does not measure."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    deployment: str
-    max_ttl_seconds: Annotated[int, Field(gt=0)] | None = None
-    list_visibility_s: Annotated[float, Field(gt=0)]  # declared deadline; measured visibility delay must not exceed it
-    link: Item
-    link_udp: Item
-    link_max_members: Annotated[int, Field(ge=1)] = 1
-    inbound_isolation: Item
-    external_forms: frozenset[ExternalForm]
-    implicit_egress: tuple[str, ...]
-    implicit_egress_declared: Item
-    cluster_dns: tuple[str, ...] = ()
-    shared_volume: Item
-    missing_subpath: Item
-    no_auto_mount: Item
-    volume_file: Item
-    exec_auth: Item
-    diagnostics: Item
-    privileged_runtime: Item
-    devices: frozenset[Device] = frozenset()
-    multi_container: Item
-    notes: tuple[str, ...] = ()
-    probe_readonly_rootfs: bool = False
-    probe_native_tmpfs: bool = False
-    probe_shm_size: bool = False
-
-    @field_validator("cluster_dns")
-    @classmethod
-    def _cluster_dns(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        return tuple(cluster_dns_address(ip) for ip in value)
-
-    @model_validator(mode="after")
-    def _consistent(self) -> Declared:
-        """Check report consistency before probing, so a bad declaration is not found after a 10+ minute run."""
-        if "none" not in self.external_forms:
-            raise ValueError("external_forms must include none: probe always tests none (a required capability)")
-        if any(d.source != "declared" for d in self._declared_items()):
-            raise ValueError("items in the declared file must have source declared")
-        return self
-
-    def _declared_items(self) -> tuple[Item, ...]:
-        return (
-            self.link,
-            self.link_udp,
-            self.inbound_isolation,
-            self.implicit_egress_declared,
-            self.shared_volume,
-            self.missing_subpath,
-            self.no_auto_mount,
-            self.volume_file,
-            self.exec_auth,
-            self.diagnostics,
-            self.privileged_runtime,
-            self.multi_container,
-        )
-
-    def bootstrap_capabilities(self) -> Capabilities:
-        """`Capabilities` for the backend during probe: no report yet, so use declarations and the most conservative
-        values for measured items.
-
-        probe itself only uses `list_visibility_s` (the anchor waits to appear in listings) and the label length.
-        """
-        return Capabilities(
-            max_label_value_len=63,
-            list_visibility_s=self.list_visibility_s,
-            max_ttl_seconds=self.max_ttl_seconds,
-            link=False,
-            link_udp=False,
-            link_max_members=1,
-            inbound_isolation=False,
-            external_forms=frozenset({"none"}),
-            implicit_egress=self.implicit_egress,
-            cluster_dns=self.cluster_dns,
-            internal_address="exec",
-            shared_volume=False,
-            volume_file=False,
-            no_auto_mount=False,
-            exec_auth=False,
-            privileged_runtime=False,
-            devices=frozenset(),
-            readonly_rootfs=self.probe_readonly_rootfs,
-            native_tmpfs=self.probe_native_tmpfs,
-            shm_size=self.probe_shm_size,
-        )
-
-
-@dataclass(frozen=True)
-class ProbeSettings:
-    #: Image under test (repo@sha256:...); needs /bin/sh, id, pwd, stat, cat, ls, touch, awk, timeout, nc (`-z`).
-    image: str
-    share_release: str  # each unit mounts share read-only like real units (the exec wrapper needs its busybox)
-    endpoint: str  # written to the report; checked against config at provider `start`
-    create_timeout_s: float = 300.0
-    #: Delay before re-reading /etc/hosts. Acceptance runs use 10 minutes; routine probes may use less.
-    hosts_recheck_s: float = 30.0
-    ttl_s: int = 900
-    filesystem_profile: str | None = None
-
-
-async def probe(
-    platform: Platform,
-    clock: Clock,
-    anchor: Anchor,
-    declared: Declared,
-    settings: ProbeSettings,
+async def probe_deployment(
+    deployment: str | Path | FlotillaConfig,
+    *,
+    out: Path | None = None,
+    image: str | None = None,
+    hosts_recheck: float | None = None,
 ) -> CapabilityReport:
-    """Measure, merge declarations, return the report. `anchor` must be started; instances are deleted on exit."""
-    run = _Run(platform, clock, anchor, settings, run_id=f"p{uuid.uuid4().hex[:10]}")
-    try:
-        lifecycle = await run.lifecycle(declared.list_visibility_s, declared.max_ttl_seconds)
-        unit, placeholder = await run.create_unit()
-        digest = _probed(
-            placeholder.ok and "@sha256:" in settings.image,
-            f"create with {settings.image} "
-            + ("succeeded" if placeholder.ok else "failed")
-            + ("" if "@sha256:" in settings.image else "; image is not repo@sha256:..., digest pull not verified"),
-        )
-        exec_items = await run.exec_items(unit)
-        address = await run.address(unit)
-        memory_limit, cpu_limit, cpu_ratio = await run.resources(unit)
-        external_none = await run.external_none(unit)
-        inbound = await run.inbound(declared.inbound_isolation)
-        storage = await run.storage()
-        readonly, tmpfs = await run.filesystem(declared.probe_readonly_rootfs, declared.probe_native_tmpfs)
-        shm = await run.shm_size(declared.probe_shm_size)
-    finally:
-        leaked = await run.cleanup()
-    if leaked:  # labeled flotilla/probe with finite TTL, so platform TTL reclaims them; report notes it
-        notes_extra: tuple[str, ...] = (f"probed instances not confirmed deleted (left to platform TTL): {leaked}",)
-    else:
-        notes_extra = ()
+    """Probe, persist evidence at its configured location, and enforce admission.
 
+    Anchor and storage cleanup are part of the verdict, not best-effort work
+    after a successful report. No consumer may turn failed cleanup into admission.
+    """
+    from flotilla.config import ConfigError, FlotillaConfig
+    from flotilla.platform.clock import SystemClock
+
+    cfg = deployment if isinstance(deployment, FlotillaConfig) else FlotillaConfig.load(deployment)
+    target = cfg.capabilities_path()
+    if out is not None and out.resolve() != target.resolve():
+        raise ConfigError(["--out must match the deployment capabilities path; change the deployment explicitly"])
+    target.parent.mkdir(parents=True, exist_ok=True)
+    settings = cfg.probe_settings()
+    if image is not None:
+        settings = replace(settings, image=image)
+    if hosts_recheck is not None:
+        settings = replace(settings, hosts_recheck_s=hosts_recheck)
+    clock = SystemClock()
+    platform = cfg.build_platform(clock=clock, caps=cfg.management_capabilities())
+    anchor = Anchor(platform, clock, f"probe-{uuid.uuid4().hex[:12]}", cfg.anchor_settings())
+    report = None
+    cleanup_errors = []
+    directory = f"launches/{anchor.launch_id}"
+    try:
+        await anchor.start()
+        await anchor.mkdir(directory, stage="prepare")
+        report = await probe(platform, clock, anchor, settings)
+    finally:
+
+        async def remove_launch() -> None:
+            await anchor.remove(directory, stage="run")
+
+        for operation in (remove_launch, anchor.close, platform.aclose):
+            try:
+                await operation()
+            except Exception as exc:
+                cleanup_errors.append(type(exc).__name__)
+        if report is not None:
+            if cleanup_errors:
+                report = report.model_copy(
+                    update={
+                        "cleanup": Item(status="error", evidence="anchor/storage cleanup unconfirmed"),
+                        "notes": (*report.notes, "cleanup errors: " + ", ".join(cleanup_errors)),
+                    }
+                )
+            report.write_json(target)
+    assert report is not None
+    cfg.check_against(report)
+    return report
+
+
+async def probe(platform: Platform, clock: Clock, anchor: Anchor, settings: ProbeSettings) -> CapabilityReport:
+    """Measure configured choices; never import historical/manual verdicts."""
+    from flotilla.probe_checks import measure
+
+    run = _Run(platform, clock, anchor, settings, run_id=f"p{uuid.uuid4().hex[:10]}")
+    results: dict[str, Any] = {}
+    notes = []
+    cancelled = None
+    try:
+        async with asyncio.timeout(settings.total_timeout_s):
+            await measure(run, results)
+    except asyncio.CancelledError as exc:
+        cancelled = exc
+        notes.append("probe cancelled")
+    except Exception as exc:
+        # Exception text and remote responses may contain tokens; retain only the category.
+        notes.append(f"probe interrupted ({type(exc).__name__})")
+    finally:
+        task = asyncio.create_task(run.cleanup())
+        try:
+            leaked = await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            cancelled = exc
+            leaked = await task
+    if leaked:
+        notes.append(f"instances not confirmed deleted: {', '.join(leaked)}")
+    if cancelled is not None:
+        if leaked:
+            cancelled.add_note(notes[-1])
+        raise cancelled
     return CapabilityReport(
-        deployment=declared.deployment,
+        deployment=settings.deployment,
         endpoint=settings.endpoint,
         probed_at=clock.now(),
         probe_version=__version__,
-        filesystem_profile=settings.filesystem_profile,
-        lifecycle=Lifecycle(
-            create_get_delete=lifecycle["create_get_delete"],
-            label_list=lifecycle["label_list"],
-            renew=lifecycle["renew"],
-            max_label_value_len=63,
-            list_visibility_s=declared.list_visibility_s,
-            max_ttl_seconds=declared.max_ttl_seconds,
+        evidence_profile=settings.evidence_profile,
+        inputs=asdict(settings),
+        notes=tuple(notes),
+        cleanup=Item(
+            status="error" if leaked else "passed",
+            evidence="deletion confirmation",
+            measurements={"unconfirmed_instances": leaked},
         ),
-        exec=Exec(
-            exec_identity=exec_items["exec_identity"],
-            files=exec_items["files"],
-            placeholder_entry=placeholder,
-            background=exec_items["background"],
-        ),
-        network=Network(
-            link=declared.link,
-            link_udp=declared.link_udp,
-            link_max_members=declared.link_max_members,
-            inbound_isolation=inbound,
-            external_forms=declared.external_forms,
-            external_none=external_none,
-            internal_address="exec" if address.ok else "none",  # no address: report validation rejects link = True
-            implicit_egress=declared.implicit_egress,
-            cluster_dns=declared.cluster_dns,
-            implicit_egress_declared=declared.implicit_egress_declared,
-        ),
-        storage=Storage(
-            read_only=storage["read_only"],
-            shared_volume=declared.shared_volume,
-            subdir_isolation=storage["subdir_isolation"],
-            missing_subpath=declared.missing_subpath,
-            no_auto_mount=declared.no_auto_mount,
-            dir_management=storage["dir_management"],
-            volume_file=declared.volume_file,
-            native_tmpfs=tmpfs,
-            shm_size=shm,
-        ),
-        runtime=Runtime(
-            exec_auth=declared.exec_auth,
-            memory_limit=memory_limit,
-            cpu_limit=cpu_limit,
-            cpu_limit_ratio=cpu_ratio,
-            diagnostics=declared.diagnostics,
-            privileged_runtime=declared.privileged_runtime,
-            devices=declared.devices,
-            image_digest=digest,
-            multi_container=declared.multi_container,
-            readonly_rootfs=readonly,
-        ),
-        notes=(*declared.notes, f"probe run {run.run_id}; internal address: {address.evidence}", *notes_extra),
+        **results,
     )
 
 
@@ -266,7 +166,7 @@ def _mounted_subdir(entry: str, subdir: str) -> bool:
 
 
 def _probed(ok: bool, evidence: str) -> Item:
-    return Item(ok=ok, source="probed", evidence=evidence)
+    return Item(status="passed" if ok else "failed", evidence=evidence)
 
 
 def _sh(
@@ -284,9 +184,11 @@ class _Run:
     anchor: Anchor
     settings: ProbeSettings
     run_id: str
+    privileged: bool = False
 
     def __post_init__(self) -> None:
         self._created: list[str] = []
+        self._uncertain_create = False
 
     def _spec(
         self,
@@ -300,7 +202,8 @@ class _Run:
             key=f"share/releases/{self.settings.share_release}", mount_path="/.flotilla", read_only=True
         )
         return InstanceSpec(
-            image=self.settings.image,
+            image=self.settings.privileged_image if self.privileged else self.settings.image,
+            privileged=self.privileged,
             entrypoint=("/.flotilla/bin/busybox", "sleep", "2147483647"),
             labels={labels.LAUNCH: self.anchor.launch_id, PROBE_LABEL: self.run_id, labels.UNIT: name},
             timeout_seconds=self.settings.ttl_s,
@@ -311,21 +214,74 @@ class _Run:
         )
 
     async def _create(self, spec: InstanceSpec, *, wait: bool = True) -> InstanceHandle:
-        handle = await self.platform.create(spec)
+        create = getattr(self.platform, "probe_create", self.platform.create)
+        try:
+            handle = await create(spec)
+        except BaseException:
+            self._uncertain_create = True
+            raise
         self._created.append(handle.iid)
         if wait:
             await self._wait_running(handle)
+            ready = getattr(self.platform, "probe_ready", None)
+            if ready is not None:
+                await ready(handle)
         return handle
 
     async def filesystem(self, readonly: bool, tmpfs: bool) -> tuple[Item, Item]:
-        skipped = Item(ok=False, source="declared", evidence="not requested; enable the optional filesystem probes")
+        skipped = Item(status="skipped", evidence="configured backend cannot express filesystem options")
         ro_result = await self._filesystem_case(True, False) if readonly else skipped
         tmp_result = await self._filesystem_case(False, True) if tmpfs else skipped
         if readonly and tmpfs and ro_result.ok and tmp_result.ok:
             combined = await self._filesystem_case(True, True)
             if not combined.ok:
                 return combined, combined
+            missing = await self._missing_mount_targets()
+            if not missing.ok:
+                return missing, missing
         return ro_result, tmp_result
+
+    async def _missing_mount_targets(self) -> Item:
+        """Measure absent nested targets; choosing a protocol is not evidence."""
+        root = f"/flotilla-probe-{self.run_id}"
+        key = f"launches/{self.anchor.launch_id}/{self.run_id}/missing-target"
+        try:
+            baseline = await self._create(self._spec("missing-baseline"))
+            absent = await self.platform.exec(baseline, _sh(f"test ! -e {root} && test ! -L {root}"))
+            if absent.exit_code != 0 or absent.timed_out:
+                return _probed(False, "probe image already contains the random mount target")
+            await self.anchor.mkdir(key, stage="prepare")
+            target = root + "/nested/volume"
+            tmp = root + "/nested/tmpfs"
+            handle = await self._create(
+                replace(
+                    self._spec("missing-target", (SharedVolume(key, target, False),)),
+                    readonly_rootfs=True,
+                    tmpfs_mounts=(TmpfsMount(tmp, 1024 * 1024, 0o750, 1000, 1000),),
+                )
+            )
+            await self.platform.write_file(handle, target + "/probe", b"probe", mode=0o600, uid=1000, gid=1000)
+            if await self.platform.read_file(handle, target + "/probe") != b"probe":
+                return _probed(False, "missing-target writable volume roundtrip failed")
+            result = await self.platform.exec(
+                handle,
+                _sh(
+                    f'test "$(stat -f -c %T {tmp})" = tmpfs && '
+                    f'test "$(stat -c \'%u:%g %a\' {tmp})" = "1000:1000 750" && '
+                    f"printf x > {tmp}/probe && "
+                    "err=$(touch /tmp/flotilla-undeclared-write 2>&1); rc=$?; "
+                    'test $rc -ne 0 && printf "%s" "$err" | grep -q "Read-only file system"',
+                    uid=1000,
+                    gid=1000,
+                    LC_ALL="C",
+                ),
+            )
+            return _probed(
+                result.exit_code == 0 and not result.timed_out,
+                "absent nested volume/tmpfs targets, original user and undeclared /tmp readonly",
+            )
+        except (FlotillaError, ValueError, Expired) as exc:
+            return Item(status="error", evidence=f"missing-target probe failed ({type(exc).__name__})")
 
     async def _filesystem_case(self, readonly: bool, tmpfs: bool) -> Item:
         """Exercise actual mounts, exec, files and hosts; a JSON echo alone is insufficient evidence."""
@@ -404,12 +360,17 @@ class _Run:
             return _probed(True, f"filesystem behavior verified (readonly_rootfs={readonly}, native_tmpfs={tmpfs})")
         except (FlotillaError, ValueError, Expired) as exc:
             # Do not copy remote output or configuration into persistent evidence.
-            return _probed(False, f"filesystem probe failed ({type(exc).__name__})")
+            return Item(
+                status="failed"
+                if isinstance(exc, FlotillaError) and exc.category is ErrorCategory.INVALID
+                else "error",
+                evidence=f"filesystem probe failed ({type(exc).__name__})",
+            )
 
     async def shm_size(self, requested: bool) -> Item:
         """Request a size distinct from common defaults; check the mounted capacity and its enforcement."""
         if not requested:
-            return Item(ok=False, source="declared", evidence="not requested; enable probe_shm_size")
+            return Item(status="skipped", evidence="configured backend cannot express shm_size")
         size = _SHM_PROBE_BYTES
         try:
             handle = await self._create(replace(self._spec("shm"), shm_size_bytes=size))
@@ -432,7 +393,12 @@ class _Run:
                 return _probed(False, "/dev/shm type, requested capacity, non-root write or limit check failed")
             return _probed(True, f"/dev/shm mounted as tmpfs with the requested {size} bytes, enforced")
         except (FlotillaError, ValueError, Expired) as exc:
-            return _probed(False, f"shm_size probe failed ({type(exc).__name__})")
+            return Item(
+                status="failed"
+                if isinstance(exc, FlotillaError) and exc.category is ErrorCategory.INVALID
+                else "error",
+                evidence=f"shm_size probe failed ({type(exc).__name__})",
+            )
 
     async def _wait_running(self, handle: InstanceHandle) -> None:
         running = wait_running(self.platform, self.clock, handle.iid, stage="create")
@@ -459,34 +425,64 @@ class _Run:
 
         Returns the iids not confirmed deleted.
         """
-        leaked = []
-        for iid in list(self._created):
-            try:
-                if not await self._delete(iid):
-                    leaked.append(iid)
-            except FlotillaError:
-                leaked.append(iid)
-        return leaked
+        unresolved = []
+        try:
+            async with asyncio.timeout(self.settings.cleanup_timeout_s):
+                # A create response can be lost after allocation. Reconcile by this run's label, not by guesses.
+                try:
+                    began = self.clock.monotonic()
+                    while True:
+                        for state in await self.platform.list({PROBE_LABEL: self.run_id}):
+                            if state.iid not in self._created:
+                                self._created.append(state.iid)
+                        if (
+                            not self._uncertain_create
+                            or self.clock.monotonic() - began >= self.settings.list_visibility_s
+                        ):
+                            break
+                        await self.clock.sleep(1.0)
+                except Exception:
+                    unresolved.append(f"unknown allocations with {PROBE_LABEL}={self.run_id}")
+                for iid in list(self._created):
+                    with suppress(Exception):
+                        await self._delete(iid, timeout_s=min(30.0, self.settings.cleanup_timeout_s))
+                if not self._created and not unresolved:
+                    try:
+                        await self.anchor.remove(f"launches/{self.anchor.launch_id}/{self.run_id}", stage="run")
+                    except Exception:
+                        unresolved.append(f"shared directory not confirmed removed for probe {self.run_id}")
+        except TimeoutError:
+            unresolved.append(f"cleanup timeout for {PROBE_LABEL}={self.run_id}")
+        return [*self._created, *unresolved]
 
-    async def lifecycle(self, declared_visibility_s: float, max_ttl_s: int | None) -> dict[str, Item]:
+    async def lifecycle(self, visibility_s: float, ttl_s: int) -> dict[str, Item]:
         # Visibility is timed from the create request: list right after create returns, without waiting for Running.
         sent = self.clock.monotonic()
-        handle = await self._create(self._spec("lifecycle"), wait=False)
-        seen_after = await self._listed_after(handle.iid, sent, declared_visibility_s)
+        created_at = self.clock.now()
+        handle = await self._create(replace(self._spec("lifecycle"), timeout_seconds=ttl_s), wait=False)
+        create_returned_at = self.clock.now()
+        seen_after = await self._listed_after(handle.iid, sent, visibility_s)
         await self._wait_running(handle)
+        running_observed_at = self.clock.now()
         expires = (await self.platform.get(handle.iid)).expires_at
         label_item = _probed(
-            seen_after is not None and seen_after <= declared_visibility_s,
-            f"listed by label {seen_after:.1f}s after create request (declared limit {declared_visibility_s}s)"
+            seen_after is not None and seen_after <= visibility_s,
+            f"listed by label {seen_after:.1f}s after create request (configured budget {visibility_s}s)"
             if seen_after is not None
-            else f"did not appear in label listing within declared limit {declared_visibility_s}s",
+            else f"did not appear in label listing within configured budget {visibility_s}s",
         )
 
-        extend = self.settings.ttl_s + 600 if max_ttl_s is None else min(self.settings.ttl_s + 600, max_ttl_s)
+        extend = ttl_s
+        await self.clock.sleep(2.0)
         target = self.clock.now() + timedelta(seconds=extend)
         await self.platform.renew(handle.iid, target)
         renewed = (await self.platform.get(handle.iid)).expires_at
-        renew_ok = renewed is not None and abs((renewed - target).total_seconds()) < 5
+        renew_ok = (
+            renewed is not None
+            and expires is not None
+            and renewed > expires
+            and abs((renewed - target).total_seconds()) < 5
+        )
         renew_item = _probed(renew_ok, f"renewed to {target.isoformat()}, get returned {renewed}")
 
         gone = await self._delete(handle.iid)
@@ -496,7 +492,39 @@ class _Run:
             f"get returned expiry {expires}; after delete {'not_found confirmed' if gone else 'still visible'}; "
             "deleting a missing id succeeded",
         )
-        return {"create_get_delete": crud_item, "label_list": label_item, "renew": renew_item}
+        return {
+            "create_get_delete": crud_item,
+            "label_list": label_item,
+            "renew": renew_item,
+            # Creation does not document an exact TTL origin. Bound that origin by the
+            # request and first observed Running, then verify the explicit renewal target.
+            # This checks reported deadlines, not natural reclamation (CRUD above deletes).
+            "ttl": Item(
+                status="passed"
+                if (
+                    expires is not None
+                    and expires > running_observed_at
+                    and created_at + timedelta(seconds=ttl_s - 10)
+                    < expires
+                    < running_observed_at + timedelta(seconds=ttl_s + 10)
+                    and renew_ok
+                )
+                else "failed",
+                evidence=f"requested {ttl_s}s; create request interval {created_at.isoformat()} to "
+                f"{create_returned_at.isoformat()}; first Running observed {running_observed_at.isoformat()}; "
+                f"reported expiry {expires}; explicit renewal matched={renew_ok}; natural expiration not measured",
+                measurements={
+                    "requested_seconds": ttl_s,
+                    "create_requested_at": created_at.isoformat(),
+                    "create_returned_at": create_returned_at.isoformat(),
+                    "running_observed_at": running_observed_at.isoformat(),
+                    "expires_at": expires.isoformat() if expires is not None else None,
+                    "renew_target": target.isoformat(),
+                    "renewed_expires_at": renewed.isoformat() if renewed is not None else None,
+                    "natural_expiration_measured": False,
+                },
+            ),
+        }
 
     async def _listed_after(self, iid: str, sent: float, limit_s: float) -> float | None:
         """List by label every second from `sent`; return the delay until first seen, or None after `limit_s`."""
@@ -589,39 +617,13 @@ class _Run:
         verdict = "match" if memory_ok else "mismatch"
         memory = _probed(memory_ok, f"requested memory={_MEMORY}; cgroup reads {out[:1]} ({verdict})")
         if cpus is None:
-            cpu = _probed(True, f"requested cpu=1; cgroup reads {out[1:3]}, CPU unlimited")
+            cpu = Item(
+                status="passed" if len(out) >= 3 and out[1] in ("max", "-1") else "error",
+                evidence=f"requested cpu=1; cgroup reads {out[1:3]}",
+            )
         else:
             cpu = _probed(cpus >= 1.0, f"requested cpu=1; cgroup reads {out[1:3]}, i.e. {cpus:g} cores ({cpus:g}x)")
         return memory, cpu, cpus
-
-    async def external_none(self, unit: InstanceHandle) -> Item:
-        """Under `none`, TCP to a public IP fails (5 s timeout). Implicit egress (DNS etc.) is declared separately.
-
-        Only `nc -z` results count: a missing tool or rejected usage is a test error (raised), not "unreachable".
-        `nc -z` reports "cannot connect" with exit code 1, so first confirm that path on a closed loopback port.
-        """
-        script = (
-            "command -v nc >/dev/null && command -v timeout >/dev/null || { echo NOTOOL; exit 0; }; "
-            'timeout 5 nc -z 127.0.0.1 1 2>/dev/null; echo "self=$?"; '
-            f'timeout 5 nc -z {_PUBLIC_IP} 443 2>/dev/null; echo "public=$?"'
-        )
-        out = (await self.platform.exec(unit, _sh(script, timeout_s=_EXEC_TIMEOUT_S))).stdout.decode().split()
-        if out[:1] == ["NOTOOL"] or not (len(out) == 2 and out[0] == "self=1"):
-            raise FlotillaError(
-                f"cannot test egress none: image under test needs working nc -z and timeout (got {out})",
-                stage="run",
-                category=ErrorCategory.INVALID,
-                retryable=False,
-            )
-        reachable = out[1] == "public=0"
-        return _probed(
-            not reachable,
-            f"TCP {_PUBLIC_IP}:443 under none policy is {'reachable' if reachable else 'unreachable'} ({out[1]})",
-        )
-
-    async def inbound(self, declared: Item) -> Item:
-        # An outsider's egress policy blocks peers too: that cannot prove ingress isolation.
-        return declared.model_copy(update={"source": "declared"})
 
     async def storage(self) -> dict[str, Item]:
         """Anchor creates sibling dirs and a marker; an instance mounts one read-only; the anchor deletes them."""
@@ -668,4 +670,4 @@ class _Run:
         }
 
 
-__all__ = ["PROBE_LABEL", "Declared", "ProbeSettings", "probe"]
+__all__ = ["PROBE_LABEL", "ProbeSettings", "probe"]

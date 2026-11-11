@@ -6,7 +6,6 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 
-from flotilla.compose.interpolate import interpolate
 from flotilla.core.plan import (
     Dependency,
     ExecContext,
@@ -19,8 +18,9 @@ from flotilla.core.plan import (
 )
 from flotilla.manifest import Manifest
 from flotilla.manifest import Unit as ManifestUnit
-from flotilla.platform.base import Resources, SharedVolume, TmpfsMount
+from flotilla.platform.base import Resources, SharedVolume, StorageRoot, TmpfsMount
 from flotilla.platform.filesystem import unsized_tmpfs_bytes
+from flotilla.runtime.values import evaluate
 
 _REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
@@ -50,6 +50,9 @@ def to_plan(
     overlay: AgentOverlay = NO_OVERLAY,
     resources: Mapping[str, Resources] | None = None,
     external_mounts: Mapping[str, tuple[SharedVolume, ...]] | None = None,
+    workspace_mounts: Mapping[str, tuple[SharedVolume, ...]] | None = None,
+    workspace_root: str | None = None,
+    task_files_root: StorageRoot = "work",
 ) -> TrialPlan:
     """Turn a manifest into core trial input (see module docs). The result is already `validate()`d."""
     env_by_unit = {name: dict(u.context.env) for name, u in manifest.units.items()}
@@ -85,6 +88,9 @@ def to_plan(
         ),
         external_units=frozenset(manifest.external_units),
         external_mounts={name: tuple(mounts) for name, mounts in (external_mounts or {}).items()},
+        workspace_mounts={name: tuple(mounts) for name, mounts in (workspace_mounts or {}).items()},
+        workspace_root=workspace_root,
+        task_files_root=task_files_root,
     )
     try:
         plan.validate()
@@ -100,13 +106,12 @@ def _apply_runtime_params(
     for p in manifest.runtime_params:
         if p.service not in env_by_unit:
             raise PlanError(f"runtime environment entry {p.var} targets unknown service {p.service}")
-        result = interpolate(p.expr, {**values, **p.variables})
-        missing = [name for name, default in result.unresolved.items() if default is None]
+        result, missing = evaluate(p.expr, {**values, **p.variables})
         if missing:
             raise PlanError(
                 f"task {manifest.task} requires runtime parameters {', '.join(missing)} ({p.service}.{p.var})"
             )
-        env_by_unit[p.service][p.var] = str(result.value)
+        env_by_unit[p.service][p.var] = result
 
 
 def _resolve_tmpfs(mounts: tuple[TmpfsMount, ...], resources: Resources) -> tuple[TmpfsMount, ...]:

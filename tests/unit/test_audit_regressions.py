@@ -19,7 +19,7 @@ from flotilla.config import ResourceDefaults
 from flotilla.manifest import Manifest, Resources
 from flotilla.runtime.planning import to_plan
 from flotilla.scan import scan
-from flotilla.testing.build import FakeBuilder, FakeExport, _caps, _ctx, _task
+from flotilla.testing.build import DIGEST, FakeBuilder, FakeExport, _caps, _ctx, _task
 
 
 def test_volume_name_never_controls_recursive_deletion(tmp_path: Path) -> None:
@@ -67,7 +67,7 @@ def test_sibling_prefix_symlink_is_rejected_before_build(tmp_path: Path, kind: s
     outside.mkdir()
     (outside / "Dockerfile").write_text("FROM r.io/a")
     (env / "escape").symlink_to(outside, target_is_directory=True)
-    service = (
+    service: dict[str, object] = (
         {"image": "r.io/a", "build": {"context": "escape"}}
         if kind == "build"
         else {"image": "r.io/a", "volumes": [{"type": "bind", "source": "./escape", "target": "/data"}]}
@@ -125,7 +125,7 @@ def test_invalid_nested_fields_are_visible_rejections(field: dict[str, object]) 
     assert normalize({"services": {"main": {"image": "r.io/a", **field}}, "volumes": {"data": {}}}, {}).rejected
 
 
-def test_tmpfs_is_derived_and_container_alias_is_written(tmp_path: Path) -> None:
+def test_tmpfs_is_inspected_not_derived_without_approximating_container_identity(tmp_path: Path) -> None:
     task = load_task(
         _task(
             tmp_path,
@@ -133,7 +133,6 @@ def test_tmpfs_is_derived_and_container_alias_is_written(tmp_path: Path) -> None
             compose="""services:
   main:
     image: r.io/a
-    container_name: agent-alias
     tmpfs: /cache
     volumes:
       - {type: tmpfs, target: /scratch}
@@ -141,29 +140,82 @@ def test_tmpfs_is_derived_and_container_alias_is_written(tmp_path: Path) -> None
         )
     )
     builder = FakeBuilder()
-    ctx = _ctx()
+    export = FakeExport()
+    ctx = _ctx(builder=builder, image_export=export)
     outcome = build_task(
         task, tmp_path / "out", replace(ctx, builder=builder, caps=replace(ctx.caps, native_tmpfs=True))
     )
     assert outcome.status == "built", outcome.reason
-    assert builder.requests and "/cache" in str(builder.requests[-1].dockerfile_text)
-    assert "/scratch" in str(builder.requests[-1].dockerfile_text)
+    # Mount-point directories are runtime responsibilities: no derivation build,
+    # but every tmpfs target path is inspected in the source image for links.
+    assert builder.requests == []
+    assert export.inspected == [(f"r.io/a@{DIGEST}", ("/cache", "/scratch"))]
     assert outcome.manifest_path
-    assert Manifest.load_json(outcome.manifest_path.read_bytes()).networks["default"].names["agent-alias"] == ["main"]
+    manifest = Manifest.load_json(outcome.manifest_path.read_bytes())
+    assert [m.mount_path for m in manifest.units["main"].tmpfs_mounts] == ["/cache", "/scratch"]
+    assert manifest.networks["default"].names == {"main": ["main"]}
+    compose = task.env_dir / "docker-compose.yaml"
+    compose.write_text(compose.read_text().replace("image: r.io/a", "image: r.io/a\n    container_name: agent-alias"))
+    rejected_builder = FakeBuilder()
+    rejected = build_task(load_task(task.path), tmp_path / "rejected", replace(ctx, builder=rejected_builder))
+    assert rejected.status == "rejected" and "identity" in rejected.reason
+    assert not rejected_builder.requests
 
 
-def test_seed_uses_first_populated_reference(tmp_path: Path) -> None:
-    services = {s: Service(s, volumes=(VolumeMount("volume", "data", f"/{s}"),)) for s in ("main", "db")}
+def test_mount_path_inspection_rejects_image_symlink(tmp_path: Path) -> None:
+    task = load_task(
+        _task(
+            tmp_path,
+            "linked",
+            compose="services:\n  main:\n    image: r.io/a\n    tmpfs: /cache/scratch\n",
+        )
+    )
+    export = FakeExport(links=("/cache",))
+    ctx = _ctx(image_export=export)
+    outcome = build_task(task, tmp_path / "out", replace(ctx, caps=replace(ctx.caps, native_tmpfs=True)))
+    assert outcome.status == "failed" and "symlink" in outcome.reason
+    assert export.inspected  # the rejection came from real path inspection, not a silent skip
+
+
+@pytest.mark.parametrize("different_path", [False, True])
+def test_seed_rejects_ambiguous_initialization_before_extracting(tmp_path: Path, different_path: bool) -> None:
+    from unittest.mock import Mock
+
+    services = {
+        "main": Service("main", volumes=(VolumeMount("volume", "data", "/data"),)),
+        "db": Service("db", volumes=(VolumeMount("volume", "data", "/other" if different_path else "/data"),)),
+    }
+    digest_a, digest_b = "sha256:" + "a" * 64, "sha256:" + "b" * 64
+    images = {"main": f"r.io/a@{digest_a}", "db": f"r.io/b@{digest_a if different_path else digest_b}"}
+    exporter = Mock()
+    with pytest.raises(ExportError, match="multiple copy-enabled image/path sources"):
+        export_task_files(
+            Project(services, {}, frozenset({"data"})),
+            tmp_path,
+            tmp_path / "files",
+            images=images,
+            image_export=exporter,
+        )
+    exporter.extract.assert_not_called()
+
+
+def test_seed_allows_same_digest_and_path_across_registry_aliases(tmp_path: Path) -> None:
+    from unittest.mock import Mock
+
+    services = {s: Service(s, volumes=(VolumeMount("volume", "data", "/data"),)) for s in ("main", "db")}
+    digest = "sha256:" + "a" * 64
+    exporter = Mock(wraps=FakeExport({"/data": {"seed": "identical"}}))
     result = export_task_files(
         Project(services, {}, frozenset({"data"})),
         tmp_path,
         tmp_path / "files",
-        images={"main": "a", "db": "b"},
-        image_export=FakeExport({"/db": {"seed": "populated"}}),
+        images={"main": f"r.io/a@{digest}", "db": f"mirror.io/b@{digest}"},
+        image_export=exporter,
     )
+    exporter.extract.assert_called_once()
     with tarfile.open(tmp_path / "files" / result.seeds["data"]) as archive:
         stream = archive.extractfile("seed")
-        assert stream and stream.read() == b"populated"
+        assert stream and stream.read() == b"identical"
 
 
 def test_resource_precedence_and_harbor_declaration(tmp_path: Path) -> None:

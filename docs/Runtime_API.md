@@ -16,11 +16,46 @@ Import public types from `flotilla`. Configuration is loaded locally at construc
 | `await fleet.drain(timeout=None)` | Waits for pending cleanup; does not release active environments |
 | `await fleet.close(timeout=None)` | Releases owned environments and closes the runtime; returns a cleanup report |
 
-A `PreparedEnvironment` comes from a row of the jsonl that `flotilla prepare` writes: `load_prepared(path)` returns `PreparedTask` rows, `row.environment()` is the main environment, and `row.verifier` is the separate verifier environment or `None`. Images are digest-pinned and task files already published, so opening does not need Docker. Harbor verifier selection happens during preparation; the adapter opens the row's environment for its environment directory.
+For production native tasks use `NativeAttempt.create(fleet, bound_task)` from `flotilla.native`, where `bound_task = config.release_bindings().resolve(row)`. Local release validation and actual platform file validation precede opening roles. Call `await attempt.open("main", options)`, stop the agent, then `await attempt.verify()`. Verification stages hidden tests and declared artifact handoffs; a separate verifier is used only when the task defines one. Always `await attempt.close()` in `finally`; it closes roles before deleting their private workspace.
+
+`PreparedEnvironment` is the low-level in-memory boundary for `fleet.open`, not the persistent dataset interchange. The native release/dataset is that interchange. Do not use old `prepared.jsonl`, task-key rows or `load_prepared` as native inputs. `flotilla prepare` creates the release on the host. [Native tasks](Native_Tasks.md) documents models, bindings and integrity; [Harbor quick start](Harbor_Quick_Start.md) documents the optional consumer adapter.
+
+The native Anchor requires installed Flotilla and filesystem helpers, not Harbor, Compose, Docker or push credentials. Actual platform acceptance remains separate from package/unit checks. The old `HarborAttempt`, `HarborVerification` and workspace compiler remain explicit legacy source-task APIs; native consumers never fall back to them.
 
 `OpenOptions` accepts `request_id`, `admission_timeout`, `startup_timeout`, `lifetime`, `runtime_params`, per-service `exec_env` and `resources`, and `disable_internet`. Resource overrides support CPU and memory.
 
 Each phase of an open has its own budget. Client start (once per client) is bounded by `timeouts.client_start`. Waiting for a `trial_concurrency` / `instance_budget` slot is bounded by `admission_timeout` (default `limits.admission_timeout`) and raises `AdmissionTimeout` with the current counts. `startup_timeout` (default `runtime.startup_timeout_s`) starts at admission and ends when the environment is ready. `lifetime` starts at readiness and cannot exceed `runtime.run_timeout_s`. Runtime parameters are literal substitution values; only explicit network-policy targets are interpreted as network destinations.
+
+## Legacy source metadata
+
+For native releases, `ReleaseReader` and `ReleaseBindings` own metadata and full dataset identity. The following source-reader API is retained only for explicit legacy integrations and importer tooling; it does not read native releases.
+
+`flotilla.integrations.harbor_source_reader` provides `SourceMapping(local_root=..., platform_prefix=...)` and `NativeTaskSource(sources)`. Prefixes match whole path components; overlapping mappings and metadata files escaping their task/source roots are rejected.
+
+| Operation | Result |
+|---|---|
+| `resolve_task(key)` / `key_for_path(path)` | Map an original platform key to a contained local task directory, or back |
+| `read_config(key)` | Harbor `TaskConfig` with native defaults; does not read the instruction |
+| `read_metadata(key)` | `task_id` (directory basename), canary-stripped `instruction`, JSON-mode `task_config` |
+| `await read_configs(keys, workers=8)` | Full-key-to-`TaskConfig` mapping, config only |
+| `await read_many(keys, workers=8)` | Full-key-to-metadata mapping |
+| `metadata_identity(description)` | In-memory digest of canonical config and stripped instruction, not a full-tree hash |
+
+Single-task calls are synchronous. Bulk calls keep filesystem work off the event loop, deduplicate only full keys and preserve first-occurrence order. Spawn workers process batches of 64 with at most `2 × workers` in flight; small requests cap the effective worker count, and a single worker uses no subprocess. Cancellation stops new submissions, cancels queued work and joins active reads before propagating. Neither API constructs a filesystem Harbor `Task`, scans tests/solution/environment payloads, initializes a platform client or writes a persistent cache. Kernel-blocked filesystem reads still have to return before cleanup completes.
+
+Native dataset selection uses config-only reads; individual Trials load instructions when selected for execution. Dataset discovery and lifetime of any in-memory results belong to the caller. Keep original sources immutable during a run; the identity check does not compare hidden tests or other payload files.
+
+## Platform metadata read recovery
+
+`await fleet.describe_tasks(task_keys)` reads instruction/config metadata from native tasks without creating attempts. `await fleet.describe_task_resources(task_keys, runtime_params=...)` inspects declared resources without building images. The management image must contain the matching workspace helper. Inputs remain immutable throughout a run; metadata reuse does not deduplicate dataset rows or rename task IDs.
+
+The helper recovers actual `OSError(ESTALE)` in native description and explicit source-path/resource-discovery reads. Each logical read gets at most five attempts, with 0.5, 1, 2 and 4 second delays. No new retry is admitted after 30 seconds for that read, and one metadata request (at most 128 unique keys) shares 15 seconds of added sleep. A failed description rereads and reparses metadata directly, without constructing a filesystem Harbor `Task`; previously successful tasks are not reread. Metadata-only reads do not validate unrelated payload trees. The private-copy compile/use boundary still validates the task tree and relocatable test inputs, and enumeration errors there propagate instead of accepting an incomplete tree. No partial metadata batch is published.
+
+The same description recovery runs before an attempt publishes its instruction or stages tests. It does **not** retry file copies, Compose commands, builds, Agent/Verifier execution, remote command failures, or unknown execution outcomes. Permissions, missing files, invalid task data and unsafe links are not transient-read retries. Exhaustion preserves the original error with a short diagnostic note; it never becomes missing metadata or a task score. Successful recovery emits one concise helper diagnostic.
+
+Separately, the client's **read-only `Anchor.stat`** retries transient/rate-limited transport errors and unknown command responses (for example an HTTP 504 after sending `stat`): at most five attempts with 0.5/1/2/4 second delays and a 30-second retry-admission window. Command exit failures and malformed stat output are not retried. The metadata helper is not replayed: its result directory stays alive until result retrieval/validation finishes or fails, then normal cleanup runs. Cancellation or anchor deactivation interrupts recovery. OpenSandbox result downloads already use the HTTP layer's bounded idempotent GET retries; no outer download or batch retry multiplies them. Generic execution, writes, copies, builds and workloads remain non-replayed even when their response is unknown.
+
+These limits bound retry admission and added waiting, not kernel-blocked reads on a hard NFS mount. Existing command timeouts, settled cancellation and cleanup remain in force. This is transient-read recovery, not a repair of the underlying storage service.
 
 ## Services and processes
 
@@ -61,6 +96,8 @@ except CleanupError as exc:
 `FlotillaError` carries `stage`, `category`, and `retryable`. These describe an operation's failure, not permission to replay a command. HTTP exceptions exclude raw remote response bodies. Do not add command output, credentials, or complete configuration objects to diagnostics.
 
 `CleanupReport.clean` requires no remaining instances, directories, or uncertain creates. Each unclean `CleanupRecord` in `report.remaining` has a `reason` (`create_in_flight`, `create_outcome_unknown`, `delete_unconfirmed`, `directory_remove_failed`, `anchor_deactivated`, or `in_progress`) and, when one was seen, the last related `error`. `CleanupError` exposes that report. Context managers preserve a primary application error and attach cleanup failure information. A timed-out waiter does not cancel an owned deletion.
+
+Before retiring its Anchor, `Flotilla.close()` retries previously failed owned cleanup once, within the same close timeout. This allows a directory removal that failed while NFS file handles were still open to recover after those handles close. The retry uses retained ownership records, not a scan of unrelated resources. Persistent failures and exhausted deadlines still produce an unclean report; successful final cleanup does not retroactively accept an episode whose release failed.
 
 ## Diagnostic events
 

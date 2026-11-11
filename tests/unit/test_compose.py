@@ -218,7 +218,7 @@ def test_read_only_is_preserved_for_every_service() -> None:
     ("network", "path", "kind"),
     [
         ({"driver": "bridge", "internal": True, "ipam": {}}, None, None),
-        ({"driver_opts": {"com.docker.network.bridge.gateway_mode_ipv4": "isolated"}}, "driver_opts", "equivalent"),
+        ({"driver_opts": {"com.docker.network.bridge.gateway_mode_ipv4": "isolated"}}, "driver_opts", "reject"),
         ({"driver_opts": {"com.docker.network.bridge.enable_icc": "false"}}, "driver_opts", "reject"),
         ({"driver": "overlay"}, "driver", "reject"),
         ({"ipam": {"config": [{"subnet": "10.5.0.0/16"}]}}, "ipam", "reject"),
@@ -248,15 +248,15 @@ def test_equivalent_fields_are_recorded() -> None:
             }
         }
     )
-    assert not p.rejected
+    assert p.rejected
     assert {
         "services.app.init",
         "services.app.restart",
         "services.app.ports",
-        "services.app.networks.default.gw_priority",
         "services.app.depends_on.main.restart",
-    } <= _paths(p, "equivalent")
-    assert "services.app.hostname" in _paths(p, "warn")
+        "services.app.hostname",
+        "services.app.networks.default.gw_priority",
+    } <= _paths(p, "reject")
     app = p.services["app"]
     assert (app.restart, tuple(m.mount_path for m in app.tmpfs), app.udp_ports, app.hostname) == (
         "always",

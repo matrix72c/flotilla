@@ -15,6 +15,7 @@ from flotilla.testing.runtime import deployment as deployment
 
 def _dns_report(cfg: FlotillaConfig, platform: FakePlatform, *, extra: bool = False) -> None:
     data = cfg.load_report().model_dump(mode="json", by_alias=True)
+    data["evidence_profile"] = cfg.evidence_profile()
     data["network"]["cluster_dns"] = ["10.96.0.10"]
     data["network"]["implicit_egress"] = ["10.96.0.10:53/udp,tcp"]
     if extra:

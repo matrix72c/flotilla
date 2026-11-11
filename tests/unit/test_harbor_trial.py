@@ -1,4 +1,8 @@
-"""Real Harbor Trial and verifier over Flotilla's public adapter and fake resources."""
+"""Native Trial I/O contracts with test-only transient role injection.
+
+Native Trial's local-task lifecycle is not a supported remote task entrypoint;
+production enters HarborAttempt. This harness preserves pinned native contracts.
+"""
 
 from __future__ import annotations
 
@@ -14,9 +18,11 @@ from harbor.trial.trial import Trial
 
 from flotilla.config import FlotillaConfig
 from flotilla.core import labels
+from flotilla.integrations.harbor import FlotillaEnvironment
 from flotilla.integrations.harbor_source import task_environments
 from flotilla.platform.base import ErrorCategory, FlotillaError, InstanceSpec
-from flotilla.testing.build import prepared_task, write_prepared
+from flotilla.prepared import PreparedEnvironment
+from flotilla.testing.build import prepared_task
 from flotilla.testing.harbor_local import attach_local_files
 from flotilla.testing.platform import FakePlatform, SharedTree
 from flotilla.testing.runtime import deployment as deployment
@@ -68,7 +74,12 @@ async def test_native_harbor_trial(
     definitions = task_environments(source)
     assert len(definitions) == (1 if mode == "shared" else 2)
     assert all(definition.environment_config is not None for definition in definitions)
-    prepared = write_prepared(tmp_path / "prepared.jsonl", [prepared_task(source, environments=task_environments)])
+    compiled = prepared_task(source, cfg, environments=task_environments)
+
+    def transient_role(environment: FlotillaEnvironment) -> PreparedEnvironment:
+        return compiled.environment("main" if Path(environment.environment_dir).name == "environment" else "verifier")
+
+    monkeypatch.setattr(FlotillaEnvironment, "_prepared_environment", transient_role)
 
     # Seed the separate verifier's prebuilt /tests, which Harbor intentionally
     # does not upload. Main/shared receives tests through real tar transfers.
@@ -115,7 +126,7 @@ async def test_native_harbor_trial(
             "agent": {"name": "nop"},
             "environment": {
                 "import_path": "flotilla.integrations.harbor:FlotillaEnvironment",
-                "kwargs": {"deployment": str(deployment_file), "prepared": str(prepared)},
+                "kwargs": {"deployment": str(deployment_file)},
             },
         }
     )

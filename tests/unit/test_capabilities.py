@@ -1,83 +1,102 @@
-"""Capability report: schema, required items, security gaps, `Capabilities` projection."""
+"""Measured outcomes and evidence projection (no declared/manual source)."""
 
-from __future__ import annotations
-
-from typing import Any
+import json
+from pathlib import Path
+from typing import Literal
 
 import pytest
 from pydantic import ValidationError
 
-from flotilla.capabilities import SCHEMA_VERSION, CapabilityReport
-from flotilla.testing.reports import no, ok, report, report_data
+from flotilla.capabilities import CapabilityReport, Item
+from flotilla.testing.reports import no, report, report_data
 
 
-def test_round_trips_through_json() -> None:
-    r = report()
-    assert CapabilityReport.load_json(r.dump_json()) == r
+def test_round_trip_and_atomic_write(tmp_path: Path) -> None:
+    value = report()
+    path = tmp_path / "capabilities.json"
+    value.write_json(path)
+    assert CapabilityReport.load_json(path.read_bytes()) == value
+    assert list(tmp_path.iterdir()) == [path]
 
 
-def test_full_report_has_no_missing_required_or_gaps() -> None:
-    r = report()
-    assert r.missing_required() == [] and r.security_gaps() == []
+def test_full_report_required_and_security() -> None:
+    value = report()
+    assert value.missing_required() == []
+    assert value.security_gaps() == []
+
+
+@pytest.mark.parametrize("status", ["failed", "error", "skipped"])
+def test_non_passed_outcomes_cannot_grant_capabilities(status: Literal["failed", "error", "skipped"]) -> None:
+    value = report(
+        **{
+            "network.link": {"status": status},
+            "storage.volume_file": {"status": status},
+            "runtime.readonly_rootfs": {"status": status},
+        }
+    )
+    caps = value.to_capabilities()
+    assert not caps.link and not caps.link_udp and not caps.volume_file and not caps.readonly_rootfs
+    assert "ok" not in Item(status=status).model_dump()
+    assert "source" not in Item(status=status).model_dump()
+
+
+def test_manual_fields_and_legacy_schema_rejected() -> None:
+    with pytest.raises(ValidationError):
+        Item.model_validate({"ok": True, "source": "declared"})
+    for schema in (1, 99):
+        data = report_data(schema=schema)
+        with pytest.raises(ValueError, match="schema"):
+            CapabilityReport.load_json(json.dumps(data))
+
+
+def test_no_network_requires_acceptance_not_empty_exception_list() -> None:
+    caps = report(**{"network.network_acceptance": no(), "network.implicit_egress": []}).to_capabilities()
+    assert not caps.supports_no_network
+    assert "none" not in caps.external_forms
+
+
+def test_unknown_address_cannot_enable_links() -> None:
+    assert not report(**{"network.internal_address": "none"}).to_capabilities().link
+
+
+def test_ordinary_security_does_not_cover_privileged_runtime() -> None:
+    for check in ("privileged_storage", "privileged_exec_auth", "privileged_no_auto_mount"):
+        caps = report(**{f"runtime.{check}": {"status": "skipped"}}).to_capabilities()
+        assert not caps.privileged_runtime and not caps.devices
 
 
 @pytest.mark.parametrize(
-    ("override", "expected"),
+    "check",
     [
-        ({"lifecycle.label_list": no()}, "lifecycle list by label"),
-        ({"exec.background": no()}, "background processes"),
-        ({"storage.read_only": no()}, "read-only mounts"),
-        ({"network.implicit_egress_declared": no()}, "implicit egress declaration"),
-        ({"network.external_forms": ["none"]}, "egress any or allowlist"),
+        "privileged_runtime",
+        "privileged_storage",
+        "privileged_network",
+        "privileged_exec_auth",
+        "privileged_no_auto_mount",
+        "privileged_inbound_isolation",
     ],
 )
-def test_missing_required(override: dict[str, Any], expected: str) -> None:
-    assert expected in report(**override).missing_required()
+def test_passed_ordinary_scope_cannot_enable_privileged_runtime(check: str) -> None:
+    from flotilla.testing.config import config
+
+    value = report(**{f"runtime.{check}": {"status": "passed", "scope": "ordinary"}})
+    assert not value.to_capabilities().privileged_runtime
+    assert not config().platform_capabilities(value).privileged_runtime
 
 
-def test_functional_and_degraded_items_are_not_required() -> None:
-    r = report(**{"network.link": no(), "storage.shared_volume": no(), "runtime.diagnostics": no()})
-    assert r.missing_required() == []
+def test_devices_require_privileged_scoped_evidence() -> None:
+    assert report().to_capabilities().devices == frozenset({"fuse"})
+    assert not report(**{"runtime.fuse": {"status": "passed", "scope": "ordinary"}}).to_capabilities().devices
 
 
-def test_security_gaps_listed_in_fixed_order() -> None:
-    r = report(**{"runtime.exec_auth": no(), "network.inbound_isolation": no(), "storage.no_auto_mount": no()})
-    assert r.security_gaps() == ["inbound_isolation", "exec_auth", "no_auto_mount"]
-
-
-def test_to_capabilities_projects_fields() -> None:
-    caps = report(**{"network.link": no(), "storage.volume_file": no()}).to_capabilities()
-    assert caps.link is False and caps.link_udp is False  # without link, UDP is moot
-    assert caps.volume_file is False and caps.shared_volume is True
-    assert caps.external_forms == frozenset({"none", "any", "allowlist"})
-    assert caps.list_visibility_s == 30.0 and caps.max_ttl_seconds is None
-    assert caps.devices == frozenset({"fuse"})
-
-
-def test_devices_require_privileged_runtime() -> None:
-    caps = report(**{"runtime.privileged_runtime": no()}).to_capabilities()
-    assert caps.privileged_runtime is False and caps.devices == frozenset()
-
-
-@pytest.mark.parametrize(
-    "override",
-    [
-        {"lifecycle.max_label_value_len": 32},  # label values must allow at least 63 characters
-        {"lifecycle.list_visibility_s": 0},
-        {"network.external_forms": ["all"]},
-        {"network.internal_address": "none"},  # an address must be obtainable when link is true
-        {"network.external_forms": ["any"]},  # external_none is true but none is missing
-    ],
-)
-def test_rejects_inconsistent_report(override: dict[str, Any]) -> None:
-    with pytest.raises(ValidationError):
-        report(**override)
-
-
-def test_rejects_unknown_fields_and_versions() -> None:
-    data = report_data()
-    data["runtime"]["gpu"] = ok()
-    with pytest.raises(ValidationError):
-        CapabilityReport.model_validate(data)
-    with pytest.raises(ValueError, match="schema"):
-        CapabilityReport.load_json(report().dump_json().replace(f'"schema": {SCHEMA_VERSION}', '"schema": 99'))
+def test_required_and_security_failure_order() -> None:
+    value = report(
+        **{
+            "lifecycle.label_list": no(),
+            "runtime.exec_auth": no(),
+            "network.inbound_isolation": no(),
+            "storage.no_auto_mount": no(),
+        }
+    )
+    assert "lifecycle list by label" in value.missing_required()
+    assert value.security_gaps() == ["inbound_isolation", "exec_auth", "no_auto_mount"]

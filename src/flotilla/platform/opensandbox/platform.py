@@ -36,7 +36,7 @@ from flotilla.platform.opensandbox.filesystem import SHM_SIZE_EXTENSION, UPSTREA
 from flotilla.platform.opensandbox.http import DEFAULT_RETRY, Http, RetryPolicy
 from flotilla.platform.opensandbox.lifecycle import Lifecycle
 from flotilla.platform.opensandbox.network import NetworkSettings, compile_policy
-from flotilla.platform.opensandbox.storage import StorageSettings
+from flotilla.platform.opensandbox.storage import StorageSettings, compile_volumes
 
 CREDENTIAL_HEADER = "OPEN-SANDBOX-API-KEY"  # credentials only go in request headers
 EXECD_PORT = 44772  # exec channel port
@@ -101,12 +101,14 @@ class OpenSandboxPlatform:
         settings: NetworkSettings,
         storage: StorageSettings,
         caps: Capabilities,
+        inputs: Mapping[str, StorageSettings] | None = None,
         filesystem: FilesystemSettings = UPSTREAM_FILESYSTEM,
         execd: ExecdSettings | None = None,
         workload_http: Callable[[str], Http] | None = None,
         command_gate: Callable[[], Awaitable[None]] | None = None,
         extensions: Mapping[str, Any] | None = None,
         privileged_extensions: Mapping[str, Any] | None = None,
+        management_extensions: Mapping[str, Any] | None = None,
         create_fields: Mapping[str, Any] | None = None,
         group_extension: str | None = None,
         create_timeout_s: float | None = None,
@@ -115,13 +117,12 @@ class OpenSandboxPlatform:
         clash = sorted(MANAGED_CREATE_FIELDS & set(create_fields or {}))
         if clash:
             raise ValueError(f"create_fields cannot override create fields managed by flotilla: {clash}")
-        if group_extension is not None and (
-            group_extension in (extensions or {}) or group_extension in (privileged_extensions or {})
-        ):
+        extension_sets = (extensions or {}, privileged_extensions or {}, management_extensions or {})
+        if group_extension is not None and any(group_extension in values for values in extension_sets):
             raise ValueError(
                 f"extensions cannot set the placement group key {group_extension!r}: flotilla writes it per trial"
             )
-        if SHM_SIZE_EXTENSION in (extensions or {}) or SHM_SIZE_EXTENSION in (privileged_extensions or {}):
+        if any(SHM_SIZE_EXTENSION in values for values in extension_sets):
             raise ValueError(
                 f"extensions cannot set {SHM_SIZE_EXTENSION!r}: flotilla writes it per instance from Compose shm_size"
             )
@@ -133,10 +134,12 @@ class OpenSandboxPlatform:
         self._command_gate = command_gate
         self._settings = settings
         self._storage = storage
+        self._inputs = dict(inputs or {})
         self._execd = execd or ExecdSettings()
         self._create_fields = dict(create_fields or {})
         self._extensions = dict(extensions or {})
         self._privileged_extensions = dict(privileged_extensions or {})
+        self._management_extensions = dict(management_extensions or {})
         self._group_extension = group_extension
         self._create_timeout_s = create_timeout_s
         self._close = close
@@ -156,6 +159,34 @@ class OpenSandboxPlatform:
             )
         except ValueError as exc:
             raise FlotillaError(str(exc), stage="create", category=ErrorCategory.INVALID, retryable=False) from exc
+        return await self._create(spec)
+
+    async def probe_create(self, spec: InstanceSpec) -> InstanceHandle:
+        """Management-only pending operation, without manufacturing capability evidence."""
+        from flotilla.platform.filesystem import validate_mounts
+        from flotilla.platform.opensandbox.filesystem import INTERNAL_LIMITS
+
+        if "flotilla/probe" not in spec.labels:
+            raise ValueError("probe_create requires a probe run label")
+        options = spec.readonly_rootfs or spec.tmpfs_mounts or spec.shm_size_bytes is not None
+        if options and (self._filesystem.protocol != "sandbox-system-v1" or spec.privileged):
+            raise ValueError("filesystem probe not applicable to this protocol/runtime combination")
+        validate_mounts(
+            spec.tmpfs_mounts,
+            tuple(v.mount_path for v in spec.volumes),
+            limits=INTERNAL_LIMITS,
+            memory=spec.resources.memory,
+            shm_size_bytes=spec.shm_size_bytes,
+        )
+        return await self._create(spec)
+
+    async def probe_ready(self, handle: InstanceHandle) -> None:
+        """Wait for the configured execd endpoint, not just platform Running."""
+        execd = await self._execd_of(handle.iid, stage="create")
+        await self._await_execd(execd)
+        await execd.ping()  # an exhausted readiness budget is an error, not readiness evidence
+
+    async def _create(self, spec: InstanceSpec) -> InstanceHandle:
         unit = _Unit(
             external=spec.external,
             token=secrets.token_urlsafe(32),
@@ -306,7 +337,16 @@ class OpenSandboxPlatform:
     def _create_body(self, spec: InstanceSpec, token: str) -> dict[str, Any]:
         """Create request: `env` holds only the execd token (workload env per exec); always has `networkPolicy`."""
         extensions = dict(self._extensions)
-        if spec.privileged:
+        if spec.profile == "management":
+            if not self._management_extensions:
+                raise FlotillaError(
+                    "management profile requires opensandbox.management_extensions",
+                    stage="create",
+                    category=ErrorCategory.INVALID,
+                    retryable=False,
+                )
+            extensions.update(self._management_extensions)
+        elif spec.privileged:
             extensions.update(self._privileged_extensions)
         if spec.group is not None and self._group_extension is not None:
             extensions[self._group_extension] = spec.group
@@ -320,7 +360,7 @@ class OpenSandboxPlatform:
             "timeout": max(int(spec.timeout_seconds), MIN_TTL_SECONDS),
             "resourceLimits": resources,
             "resourceRequests": dict(resources),
-            "volumes": self._storage.compile(spec.volumes),
+            "volumes": compile_volumes(spec.volumes, self._storage, self._inputs),
             "networkPolicy": compile_policy(spec.external, [], self._settings),
             "env": {EXECD_TOKEN_ENV: token},
             **self._filesystem.compile(spec),
@@ -379,10 +419,12 @@ def build(
     settings: NetworkSettings,
     storage: StorageSettings,
     caps: Capabilities,
+    inputs: Mapping[str, StorageSettings] | None = None,
     filesystem: FilesystemSettings = UPSTREAM_FILESYSTEM,
     execd: ExecdSettings | None = None,
     extensions: Mapping[str, Any] | None = None,
     privileged_extensions: Mapping[str, Any] | None = None,
+    management_extensions: Mapping[str, Any] | None = None,
     create_fields: Mapping[str, Any] | None = None,
     group_extension: str | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
@@ -430,11 +472,13 @@ def build(
         execd_http,
         settings=settings,
         storage=storage,
+        inputs=inputs,
         caps=caps,
         filesystem=filesystem,
         execd=execd,
         extensions=extensions,
         privileged_extensions=privileged_extensions,
+        management_extensions=management_extensions,
         create_fields=create_fields,
         group_extension=group_extension,
         create_timeout_s=create_timeout_s,

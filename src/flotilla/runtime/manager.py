@@ -42,6 +42,7 @@ from flotilla.runtime.types import (
     RuntimeEvent,
     ServiceInfo,
 )
+from flotilla.runtime.workspace import WorkspaceStore
 from flotilla.share.release import ReleaseError, check_release
 
 
@@ -79,7 +80,8 @@ class Manager:
             clock=self.clock, caps=cfg.platform_capabilities(report), command_gate=command_rate.acquire
         )
         self.launch_id = f"run-{uuid.uuid4().hex[:16]}"
-        self.anchor = Anchor(self.platform, self.clock, self.launch_id, cfg.anchor_settings())
+        self.anchor = Anchor(self.platform, self.clock, self.launch_id, cfg.anchor_settings(workspace=True))
+        self.workspaces = WorkspaceStore(self.anchor, cfg)
         self.deleter = Deleter(self.platform, self.clock, concurrency=cfg.limits.reap_concurrency)
         self.reaper = Reaper(self.platform, self.clock, self.anchor, self.deleter, cfg.reaper_settings())
         self.runs: dict[str, Run] = {}
@@ -127,6 +129,9 @@ class Manager:
         await self.anchor.start()
         if not await self.anchor.exists("", stage="prepare"):
             raise invalid("shared storage root does not exist")
+        for name in sorted(self.cfg.inputs):
+            if not await self.anchor.exists("", stage="prepare", root=name):
+                raise invalid(f"input storage root {name!r} does not exist")
         try:
             await check_release(self.anchor, self.cfg.share.release, expected_sha256=self.cfg.share.release_sha256)
         except ReleaseError as exc:
@@ -140,9 +145,21 @@ class Manager:
 
     def plan(self, request: RunRequest) -> TrialPlan:
         manifest = request.task.manifest()
-        published = manifest.task_files_published
-        if manifest.task_files and (published is None or published.storage_root != self.cfg.storage_settings().root):
-            raise invalid("task files must be published to this deployment's storage root")
+        native = self.workspaces.native_environments.get(request.task.digest)
+        validated_native = native is not None and native[0] == manifest.task_files
+        workspace_root = None
+        if request.workspace_id is not None:
+            workspace_root = self.workspaces.owned(request.workspace_id).info.key
+            if (
+                manifest.task_files
+                and not validated_native
+                and not manifest.task_files.startswith(workspace_root + "/")
+            ):
+                raise invalid("attempt inputs must belong to its workspace or a validated native release")
+        elif manifest.task_files and not validated_native:
+            raise invalid("task files require a validated native release or an owned workspace")
+        if request.workspace_mounts and workspace_root is None:
+            raise invalid("workspace mounts require an owned workspace")
         if set(request.exec_env) - set(manifest.units):
             raise invalid("exec_env contains unknown services")
         cfg = self.cfg.model_copy(update={"runtime_params": {**self.cfg.runtime_params, **request.runtime_params}})
@@ -150,8 +167,8 @@ class Manager:
         resources = cfg.resources.for_manifest(manifest)
         if set(request.resources) - set(manifest.units):
             raise invalid("resource override names unknown service")
-        from flotilla.compose.resources import cpu, memory
         from flotilla.platform.base import Resources
+        from flotilla.resources import cpu, memory
 
         for name, override in request.resources.items():
             if set(override) - {"cpu", "memory"}:
@@ -167,6 +184,9 @@ class Manager:
             runtime_params=cfg.runtime_params,
             resources=resources,
             external_mounts=request.external_mounts,
+            workspace_mounts=request.workspace_mounts,
+            workspace_root=workspace_root,
+            task_files_root=native[1] if validated_native and native is not None else "work",
             overlay=AgentOverlay(
                 env=overlay.env,
                 services=None if overlay.services is None else frozenset(overlay.services),
@@ -182,7 +202,8 @@ class Manager:
                     privileged=unit.privileged,
                     memory=unit.resources.memory,
                     volume_paths=tuple(m.target for m in unit.mounts)
-                    + tuple(m.mount_path for m in plan.external_mounts.get(name, ())),
+                    + tuple(m.mount_path for m in plan.external_mounts.get(name, ()))
+                    + tuple(m.mount_path for m in plan.workspace_mounts.get(name, ())),
                     shm_size_bytes=unit.shm_size_bytes,
                 )
                 if unit.readonly_rootfs and not caps.shared_volume:
@@ -191,7 +212,7 @@ class Manager:
                 raise invalid(f"{name}: {exc}") from exc
         if network.topology(plan) is not None and (not caps.link or len(members) > caps.link_max_members):
             raise invalid("deployment cannot connect this task's services")
-        if any(plan.external_mounts.values()) and not caps.shared_volume:
+        if (any(plan.external_mounts.values()) or any(plan.workspace_mounts.values())) and not caps.shared_volume:
             raise invalid("deployment does not support external shared volumes")
         if plan.volumes and not caps.shared_volume:
             raise invalid("deployment does not support shared trial volumes")
@@ -230,6 +251,8 @@ class Manager:
                         if self.closing:
                             raise RuntimeError("Flotilla is closing")
                         self.anchor.ensure_alive("create")
+                        if request.workspace_id is not None:
+                            self.workspaces.owned(request.workspace_id)
                         # The startup budget starts at admission: queueing never consumes it.
                         run = Run(request, plan, time.monotonic() + startup_s, reservation)
                         run.opening = asyncio.current_task()
@@ -544,6 +567,17 @@ class Manager:
             tuple(record for eid, record in sorted(records.items()) if ids is None or eid in ids),
         )
 
+    async def release_workspace(self, wid: str) -> None:
+        """Never remove storage still referenced by active or incompletely reaped environments."""
+        record = self.workspaces.records.get(wid)
+        if record is None:
+            return
+        record.closing = True
+        dependent = {eid for eid, run in {**self.runs, **self.failed_runs}.items() if run.request.workspace_id == wid}
+        for eid in dependent:
+            await self.wait_release(eid, self.cfg.timeouts.close)
+        await self.workspaces.remove(wid)
+
     async def drain(self, timeout: float) -> CleanupReport:
         _timeout(timeout)
         ids = set(self.reaping) | set(self.failures)
@@ -571,6 +605,15 @@ class Manager:
         anchor_cleanup = self.deleter.scope()
         try:
             async with asyncio.timeout(timeout):
+                await self.workspaces.settle()
+                await self.drain(timeout)
+                # A release may have failed while NFS handles were still open.
+                # Retry retained ownership once before retiring the anchor, within
+                # the same close deadline. Persistent failures remain in the report.
+                for eid, run in tuple(self.failed_runs.items()):
+                    if eid not in self.reaping:
+                        self.reaper.retry(eid)
+                        self.reaping[eid] = asyncio.create_task(self._finish_release(eid, run))
                 await self.drain(timeout)
                 if self.launch_directory_attempted:
                     clean = await self.reaper.close()

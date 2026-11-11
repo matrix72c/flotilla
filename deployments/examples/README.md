@@ -7,7 +7,6 @@ For the complete first-time setup, follow the [operator guide](../../docs/Deploy
 ```sh
 mkdir -p deployments/local
 cp deployments/examples/opensandbox.toml deployments/local/deployment.toml
-cp deployments/examples/declared.json deployments/local/
 ```
 
 Before running `flotilla probe`:
@@ -16,10 +15,10 @@ Before running `flotilla probe`:
 2. Replace the network CIDRs with the actual sandbox and platform ranges.
 3. Provide shared storage: either an allowed host path that is backed by the same storage on every worker node (`volumes = "host"`), or an existing volume that every worker can mount read-write (`volumes = "pvc"`). Create the shared root directory before running the probe.
 4. Build and push the anchor and probe images, make them accessible to your deployment, and replace the image digest placeholders. Share publication needs the anchor image already configured.
-5. Review every field in `declared.json`. Its `ok: false` values mean that the template asserts no capability. Set a value to true only after obtaining supporting deployment evidence, and update `evidence` accordingly. Fill in the real TTL, list-visibility bound, and implicit egress targets.
-6. Prepare the immutable `share/releases/<release>/` tree, including `bin/busybox`. `flotilla share publish <dir>` assembles it from a local directory: it writes `RELEASE.json`, uploads through a temporary anchor, renames it into place, and prints the two `[share]` lines to paste back. The first publication happens before any capability report exists, so pass `--declared` to bootstrap from the declaration file.
+5. Set `[probe]` inputs: pinned ordinary/privileged/inner images, controlled TCP/UDP echo targets, DNS name and budgets. Missing controls remain non-passed; never fill in manual success flags.
+6. Prepare the immutable `share/releases/<release>/` tree, including `bin/busybox`. `flotilla share publish <dir> --deployment deployment.toml` publishes through a bounded management anchor without needing a capability report. Paste the resulting `[share]` release and digest back into the same TOML file.
 
-The probe does not automatically verify every declaration. It creates real sandboxes and may leave resources for TTL-based cleanup if platform deletion fails. Keep local settings and generated reports in the Git-ignored `deployments/local/` directory.
+Run `flotilla probe --deployment deployment.toml --out capabilities.candidate.json`. Review all four-state results and unconfirmed resources before promoting the report. Configuration does not grant capability evidence; there is no declaration file or bootstrap all-capable report. Probe makes real sandbox requests only when explicitly invoked. Failed deletion is reported, not disguised as successful TTL cleanup. Keep private deployment inputs and generated reports outside source control.
 
 See [the backend documentation](../../docs/backends/opensandbox.md) for the implementation and [the platform requirements](../../docs/Platform_Requirements.md) for the contract.
 

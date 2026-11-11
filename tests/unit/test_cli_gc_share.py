@@ -22,7 +22,6 @@ SHA = "0" * 64
 
 def _deployment(tmp_path: Path, **extra: str) -> Path:
     """A minimal working deployment config, with the capability report written next to it."""
-    (tmp_path / "capabilities.json").write_text(report().dump_json())
     lines = [
         "[opensandbox]",
         'endpoint = "http://os.test"',
@@ -46,6 +45,8 @@ def _deployment(tmp_path: Path, **extra: str) -> Path:
     ]
     path = tmp_path / "flotilla.toml"
     path.write_text("\n".join(lines) + "\n")
+    cfg = FlotillaConfig.load(path)
+    report(evidence_profile=cfg.evidence_profile()).write_json(cfg.capabilities_path())
     return path
 
 

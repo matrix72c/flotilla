@@ -216,6 +216,9 @@ async def test_failed_share_verification_reclaims_anchor(
 ) -> None:
     cfg, platform, _ = deployment
     cfg = cfg.model_copy(update={"share": cfg.share.model_copy(update={"release_sha256": "f" * 64})})
+    cfg.load_report().model_copy(update={"evidence_profile": cfg.evidence_profile()}).write_json(
+        cfg.capabilities_path()
+    )
     fleet = Flotilla(deployment=cfg)
     with pytest.raises(FlotillaError):
         await fleet.start()
@@ -245,10 +248,10 @@ async def test_explicit_development_acceptance_allows_operations_and_records_gap
     deployment: tuple[FlotillaConfig, FakePlatform, SharedTree],
 ) -> None:
     cfg, platform, _ = deployment
-    capability_data = cfg.load_report().model_dump(mode="json")
+    capability_data = cfg.load_report().model_dump(mode="json", by_alias=True)
     gaps = {"inbound_isolation", "exec_auth", "no_auto_mount"}
     for section, name in [("network", "inbound_isolation"), ("runtime", "exec_auth"), ("storage", "no_auto_mount")]:
-        capability_data[section][name] = {"ok": False, "source": "declared", "evidence": "known development gap"}
+        capability_data[section][name] = {"status": "failed", "evidence": "known development gap"}
     cfg.capabilities_path().write_text(json.dumps(capability_data))
     platform.caps = cfg.load_report().to_capabilities()
     cfg = cfg.model_copy(update={"security": cfg.security.model_copy(update={"accept_insecure": frozenset(gaps)})})

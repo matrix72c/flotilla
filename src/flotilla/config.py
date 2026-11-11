@@ -12,23 +12,36 @@ import tomllib
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from flotilla.backends import BUILTIN, Backend, BackendSettings, load_backend
-from flotilla.build.images import BuildSettings
-from flotilla.capabilities import SECURITY_FIELDS, CapabilityReport
-from flotilla.compose.resources import cpu, memory
+from flotilla.capabilities import SECURITY_FIELDS, CapabilityReport, ExternalTarget, ProbeSettings
 from flotilla.core.anchor import AnchorSettings
 from flotilla.core.reaper import ReaperSettings
 from flotilla.core.runtime import MonitorSettings
 from flotilla.core.trial import TrialSettings
 from flotilla.manifest import Manifest
-from flotilla.platform.base import Capabilities, Clock, ExternalPolicy, Platform, Resources
+from flotilla.platform.base import (
+    WORK_ROOT,
+    Capabilities,
+    Clock,
+    ExternalPolicy,
+    InstanceProfile,
+    Platform,
+    Resources,
+    SharedVolume,
+    check_root_name,
+)
 from flotilla.platform.opensandbox import ExecdSettings, NetworkSettings, StorageSettings
 from flotilla.platform.opensandbox import build as build_opensandbox
 from flotilla.platform.opensandbox.filesystem import FilesystemProtocol, FilesystemSettings
+from flotilla.resources import cpu, memory
+
+if TYPE_CHECKING:
+    from flotilla.build.images import BuildSettings
+    from flotilla.native import ReleaseBindings
 
 #: Anchor renewal retry interval (`AnchorSettings.retry_interval_s`); the renew interval cannot be shorter.
 ANCHOR_RETRY_S = AnchorSettings(image="x").retry_interval_s
@@ -77,6 +90,7 @@ class OpenSandbox(BackendSettings):
 
     extensions: dict[str, Any] = Field(default_factory=dict)
     privileged_extensions: dict[str, Any] = Field(default_factory=dict)
+    management_extensions: dict[str, Any] = Field(default_factory=dict)
     network: OpenSandboxNetwork = OpenSandboxNetwork()
     execd: OpenSandboxExecd = OpenSandboxExecd()
     filesystem_protocol: FilesystemProtocol = "upstream"
@@ -94,13 +108,19 @@ class Build(_Model):
 
     pullable_registries: tuple[str, ...] = ()
     mirror_images: bool = False
+    oci_mediatypes: bool = False
+    attestations: bool = False
     target: str = ""
     image_replacements: dict[str, str] = {}
 
     def settings(self) -> BuildSettings:
+        from flotilla.build.images import BuildSettings
+
         return BuildSettings(
             pullable_registries=self.pullable_registries,
             mirror_images=self.mirror_images,
+            oci_mediatypes=self.oci_mediatypes,
+            attestations=self.attestations,
             target=self.target,
             image_replacements=self.image_replacements,
         )
@@ -209,7 +229,7 @@ class Timeouts(_Model):
     # One sandbox staying pending; it is deleted and created again once. Some platforms never start a few
     # sandboxes of a burst, and waiting would hold their quota for the whole `create` budget. The default is
     # off when it is not below `create`.
-    pending: PositiveFloat = 300.0
+    pending: PositiveFloat | None = 300.0
     address: PositiveFloat = 30.0
     wire: PositiveFloat = 60.0
     hosts: PositiveFloat = 30.0
@@ -224,12 +244,16 @@ class Timeouts(_Model):
             raise ValueError(
                 "timeouts.create_request must be below timeouts.create, or lost responses are never recovered"
             )
-        if "pending" in self.model_fields_set and self.pending >= self.create:
-            raise ValueError("timeouts.pending must be below timeouts.create, or a stuck sandbox is never replaced")
+        if self.pending is not None and self.pending >= self.create:
+            if "pending" in self.model_fields_set:
+                raise ValueError("timeouts.pending must be below timeouts.create, or a stuck sandbox is never replaced")
+            # Preserve the effective disabled value in full snapshots. Otherwise revalidation
+            # mistakes the omitted default for an explicitly configured, invalid deadline.
+            object.__setattr__(self, "pending", None)
         return self
 
     def pending_limit(self) -> float | None:
-        return self.pending if self.pending < self.create else None
+        return self.pending if self.pending is not None and self.pending < self.create else None
 
 
 class Process(_Model):
@@ -300,13 +324,23 @@ class ResourceDefaults(_Model):
 
 
 class Prepare(_Model):
-    """Offline `flotilla prepare`: image builds/derivations and task-file publication."""
+    """Attempt-local compilation and optional image-cache prewarming."""
 
+    management_profile: InstanceProfile = "default"
+    management_resources: Resource | None = None  # None preserves the lightweight anchor default.
+    management_network: Network = Field(default_factory=Network)
+    management_mounts: tuple[SharedVolume, ...] = ()
+    # Nonsecret connection settings only; credentials belong in explicit RO mounts.
+    management_env: dict[str, str] = Field(default_factory=dict)
     concurrency: PositiveInt = 4
     docker_command: tuple[str, ...] = ("docker",)
+    workspace_command: tuple[str, ...] = ("python3", "-I", "-m", "flotilla.integrations.workspace")
+    compose_command: tuple[str, ...] = ("docker", "compose")
+    compose_version: str = "2.39.4"
+    workspace_timeout: PositiveFloat = 1800.0
     export_timeout: PositiveFloat = 600.0  # per `docker cp` of an image volume's initial content
 
-    @field_validator("docker_command")
+    @field_validator("docker_command", "workspace_command", "compose_command")
     @classmethod
     def _command(cls, value: tuple[str, ...]) -> tuple[str, ...]:
         return _argv(value)
@@ -318,13 +352,73 @@ def _argv(value: tuple[str, ...]) -> tuple[str, ...]:
     return value
 
 
+class ProbeTarget(_Model):
+    host: str
+    port: Annotated[int, Field(ge=1, le=65535)]
+    protocol: Literal["tcp", "udp"] = "tcp"
+
+    service: Literal["echo", "https", "ntp"] = "echo"
+
+    @model_validator(mode="after")
+    def _service(self) -> ProbeTarget:
+        ExternalTarget(self.host, self.port, self.protocol, self.service)
+        return self
+
+    @field_validator("host")
+    @classmethod
+    def _host(cls, value: str) -> str:
+        try:
+            ipaddress.ip_address(value)
+        except ValueError:
+            if not _is_hostname(value) or value.startswith("*."):
+                raise ValueError("probe target host must be an IP address or exact hostname") from None
+        return value
+
+
+class Probe(_Model):
+    deployment: str = "deployment"
+    image: str = ""
+    privileged_image: str = ""
+    inner_image: str = ""
+    link_members: Annotated[int, Field(ge=2, le=32)] = 9
+    hosts_recheck_s: Annotated[float, Field(ge=0)] = 600.0
+    list_visibility_s: PositiveFloat = 30.0
+    total_timeout_s: PositiveFloat = 3600.0
+    cleanup_timeout_s: PositiveFloat = 180.0
+    external_targets: tuple[ProbeTarget, ...] = ()
+    dns_name: str = ""
+
+    @field_validator("image", "privileged_image", "inner_image")
+    @classmethod
+    def _image(cls, value: str) -> str:
+        if value and not re.fullmatch(r"[^\s]+@sha256:[0-9a-f]{64}", value):
+            raise ValueError("probe images must be pinned repo@sha256:<64 lowercase hex> references")
+        return value
+
+
+class TaskRelease(_Model):
+    """Deployment locations, not immutable task identity; no I/O at load time."""
+
+    local_root: Path
+    platform_root: str = Field(min_length=1)
+    # Name of the [inputs.<name>] root holding the release; None means the work root ([storage]).
+    input: str | None = None
+
+
 class FlotillaConfig(_Model):
     backend: str = BUILTIN
     opensandbox: OpenSandbox | None = None  # built-in backend table
     backends: dict[str, dict[str, Any]] = {}  # third-party backend tables, validated by the selected backend
     storage: Storage
+    # Named read-only roots for published task releases and external read-only payloads (e.g. an owner's
+    # storage shared read-only with this deployment). Launch, attempt and share state always stay on `storage`.
+    inputs: dict[str, Storage] = Field(default_factory=dict)
+    task_releases: dict[str, TaskRelease] = Field(default_factory=dict)
+    # Opaque consumer namespace: validated by Voyager, never interpreted by Flotilla.
+    voyager: dict[str, Any] = Field(default_factory=dict)
     build: Build = Build()
     prepare: Prepare = Prepare()
+    probe: Probe = Probe()
     share: Share
     network: Network = Network()
     security: Security = Security()
@@ -352,6 +446,13 @@ class FlotillaConfig(_Model):
 
     @model_validator(mode="after")
     def _local(self) -> FlotillaConfig:
+        for name in self.inputs:
+            check_root_name(name)
+            if name == WORK_ROOT:
+                raise ValueError(f"[inputs.{WORK_ROOT}] is reserved for [storage]")
+        for label, release in self.task_releases.items():
+            if release.input is not None and release.input not in self.inputs:
+                raise ValueError(f"task_releases.{label}.input names no [inputs.{release.input}]")
         backend = load_backend(self.backend)
         if self.backend == BUILTIN:
             if self.backends:
@@ -413,7 +514,26 @@ class FlotillaConfig(_Model):
         data = self.model_dump(mode="json", exclude={"base_dir"})
         table = data["opensandbox"] if self.backend == BUILTIN else data["backends"][self.backend]
         table["capabilities"] = str(self.capabilities_path().resolve())
+        for name, binding in self.task_releases.items():
+            root = binding.local_root
+            if not root.is_absolute() and self.base_dir is not None:
+                root = self.base_dir / root
+            data["task_releases"][name]["local_root"] = str(root.absolute())
         return data
+
+    def release_bindings(self) -> ReleaseBindings:
+        """Open releases only for consume/train, not probe/select/prepare."""
+        from flotilla.native import ReleaseBinding, ReleaseBindings
+
+        bindings = {}
+        for name, binding in self.task_releases.items():
+            root = binding.local_root
+            if not root.is_absolute() and self.base_dir is not None:
+                root = self.base_dir / root
+            bindings[name] = ReleaseBinding(
+                local_root=root, platform_root=binding.platform_root, root=binding.input or WORK_ROOT
+            )
+        return ReleaseBindings(bindings, storage=self.storage.settings(), inputs=self.input_settings())
 
     def capabilities_path(self) -> Path:
         path = Path(self.backend_settings.capabilities)
@@ -425,17 +545,105 @@ class FlotillaConfig(_Model):
         return CapabilityReport.load_json(self.capabilities_path().read_bytes())
 
     def platform_capabilities(self, report: CapabilityReport | None = None) -> Capabilities:
-        """Combine recorded evidence with explicitly configured backend enforcement, retaining the report."""
+        """Only use measured evidence bound to this deployment's runtime choices."""
         report = report or self.load_report()
+        if report.evidence_profile != self.evidence_profile():
+            raise ConfigError(["capability evidence does not match deployment settings; rerun probe"])
         caps = report.to_capabilities()
-        matched = report.filesystem_profile == self.filesystem_profile()
+        rt = report.runtime
         caps = replace(
             caps,
-            readonly_rootfs=caps.readonly_rootfs and matched,
-            native_tmpfs=caps.native_tmpfs and matched,
-            shm_size=caps.shm_size and matched,
+            privileged_runtime=(
+                rt.privileged_runtime.passed_for("privileged")
+                and rt.privileged_storage.passed_for("privileged")
+                and rt.privileged_network.passed_for("privileged")
+                and (
+                    rt.privileged_no_auto_mount.passed_for("privileged")
+                    or "no_auto_mount" in self.security.accept_insecure
+                )
+                and (rt.privileged_exec_auth.passed_for("privileged") or "exec_auth" in self.security.accept_insecure)
+                and (
+                    rt.privileged_inbound_isolation.passed_for("privileged")
+                    or "inbound_isolation" in self.security.accept_insecure
+                )
+            ),
+        )
+        caps = replace(
+            caps,
+            devices=frozenset(
+                name
+                for name, item in (("fuse", rt.fuse), ("kvm", rt.kvm))
+                if caps.privileged_runtime and item.ok and item.scope == "privileged"
+            ),
         )
         return load_backend(self.backend).capabilities(self.backend_settings, self, caps)
+
+    def evidence_profile(self) -> str:
+        """Bind relevant operational choices, not build concurrency or image replacements."""
+        settings = self.backend_settings.model_dump(mode="json")
+        for key in ("capabilities", "credential_env", "max_connections"):
+            settings.pop(key, None)
+        if self.backend == BUILTIN:
+            # Workspace-only selection is not measured by task/probe capability checks.
+            settings.pop("management_extensions", None)
+        data = {
+            "protocol": "native-task-v1-missing-mount-targets",
+            "backend": self.backend,
+            "settings": settings,
+            "storage": self.storage.model_dump(mode="json"),
+            **(
+                {"inputs": {name: root.model_dump(mode="json") for name, root in sorted(self.inputs.items())}}
+                if self.inputs
+                else {}
+            ),
+            "share": self.share.model_dump(mode="json"),
+            "network": self.network.model_dump(mode="json"),
+            "anchor_image": self.reaper.anchor_image,
+            "anchor_ttl": self.reaper.anchor_ttl,
+            "trial_ttl": self.reaper.trial_ttl,
+            "list_visibility_s": self.probe.list_visibility_s,
+        }
+        return hashlib.sha256(json.dumps(data, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+    def management_capabilities(self) -> Capabilities:
+        """A bounded management client, NOT a capability report usable by normal tasks."""
+        return Capabilities(
+            max_label_value_len=63,
+            list_visibility_s=self.probe.list_visibility_s,
+            max_ttl_seconds=None,
+            link=False,
+            link_udp=False,
+            link_max_members=1,
+            inbound_isolation=False,
+            external_forms=frozenset(),
+            implicit_egress=(),
+            internal_address="none",
+            shared_volume=False,
+            volume_file=False,
+            no_auto_mount=False,
+            exec_auth=False,
+            privileged_runtime=False,
+            devices=frozenset(),
+        )
+
+    def probe_settings(self) -> ProbeSettings:
+
+        if not self.probe.image:
+            raise ConfigError(["probe.image must be a pinned image reference"])
+        return ProbeSettings(
+            **self.probe.model_dump(exclude={"external_targets"}),
+            external_targets=tuple(ExternalTarget(**t.model_dump()) for t in self.probe.external_targets),
+            share_release=self.share.release,
+            endpoint=self.backend_settings.endpoint,
+            create_timeout_s=self.timeouts.create,
+            ttl_s=self.reaper.trial_ttl,
+            anchor_ttl_s=self.reaper.anchor_ttl,
+            evidence_profile=self.evidence_profile(),
+            test_external_any=self.network.external == "any",
+            filesystem_supported=(
+                self.backend == BUILTIN and self.opensandbox_settings().filesystem_protocol == "sandbox-system-v1"
+            ),
+        )
 
     def filesystem_settings(self) -> FilesystemSettings:
         return FilesystemSettings(self.opensandbox_settings().filesystem_protocol)
@@ -464,6 +672,8 @@ class FlotillaConfig(_Model):
     def check_against(self, report: CapabilityReport) -> None:
         """Startup validation without platform calls. Raises `ConfigError` listing every problem."""
         problems: list[str] = []
+        if report.evidence_profile != self.evidence_profile():
+            problems.append("capability evidence does not match deployment settings; rerun probe")
         endpoint = self.backend_settings.endpoint
         if report.endpoint.rstrip("/") != endpoint:
             problems.append(f"capability report endpoint {report.endpoint} does not match config {endpoint}")
@@ -483,7 +693,7 @@ class FlotillaConfig(_Model):
         for name in sorted(self.security.accept_insecure - gaps):
             logging.getLogger(__name__).warning("Unused security waiver: %s", name)
 
-        visibility = report.lifecycle.list_visibility_s
+        visibility = self.probe.list_visibility_s
         if not self.reaper.grace + visibility < self.reaper.gc_window:
             problems.append(
                 f"requires grace + list_visibility_s < gc_window ({self.reaper.grace} + {visibility} >= "
@@ -496,15 +706,23 @@ class FlotillaConfig(_Model):
         if problems:
             raise ConfigError(problems)
 
-    def anchor_settings(self) -> AnchorSettings:
+    def anchor_settings(self, *, workspace: bool = False) -> AnchorSettings:
         if not self.reaper.anchor_image:
             raise ConfigError(["reaper.anchor_image is not set"])
-        return AnchorSettings(
+        settings = AnchorSettings(
             image=self.reaper.anchor_image,
             ttl_s=self.reaper.anchor_ttl,
             renew_interval_s=self.reaper.renew_interval,
             grace_s=self.reaper.grace,
+            external=self.prepare.management_network.policy() if workspace else ExternalPolicy(mode="none"),
+            management_mounts=self.prepare.management_mounts if workspace else (),
+            management_env=dict(self.prepare.management_env) if workspace else {},
+            profile=self.prepare.management_profile if workspace else "default",
+            inputs=tuple(sorted(self.inputs)),
         )
+        if workspace and self.prepare.management_resources is not None:
+            settings = replace(settings, resources=Resources(**self.prepare.management_resources.model_dump()))
+        return settings
 
     def reaper_settings(self) -> ReaperSettings:
         return ReaperSettings(
@@ -554,6 +772,17 @@ class FlotillaConfig(_Model):
     def storage_settings(self) -> StorageSettings:
         return self.storage.settings()
 
+    def input_settings(self) -> dict[str, StorageSettings]:
+        return {name: root.settings() for name, root in self.inputs.items()}
+
+    def storage_settings_for(self, root: str | None) -> StorageSettings:
+        """Settings of the work root (`None`/`"work"`) or of a named read-only input root."""
+        if root is None or root == WORK_ROOT:
+            return self.storage.settings()
+        if root not in self.inputs:
+            raise ConfigError([f"no [inputs.{root}] storage root is configured"])
+        return self.inputs[root].settings()
+
     def execd_settings(self) -> ExecdSettings:
         e = self.opensandbox_settings().execd
         return ExecdSettings(
@@ -591,6 +820,8 @@ class OpenSandboxBackend(Backend[OpenSandbox]):
 
     def check(self, settings: OpenSandbox, cfg: FlotillaConfig) -> list[str]:
         problems = []
+        if cfg.prepare.management_profile == "management" and not settings.management_extensions:
+            problems.append("prepare.management_profile = management requires opensandbox.management_extensions")
         net = settings.network
         external = cfg.network.external
         if net.ingress == "sandbox" and net.link != "sandbox":
@@ -607,11 +838,12 @@ class OpenSandboxBackend(Backend[OpenSandbox]):
         return problems
 
     def capabilities(self, settings: OpenSandbox, cfg: FlotillaConfig, caps: Capabilities) -> Capabilities:
-        caps = replace(caps, sandbox_ingress=settings.network.ingress == "sandbox")
+        caps = replace(caps, sandbox_ingress=caps.sandbox_ingress and settings.network.ingress == "sandbox")
         return FilesystemSettings(settings.filesystem_protocol).capabilities(caps)
 
     def profile(self, settings: OpenSandbox, cfg: FlotillaConfig) -> str:
-        # Fixed field list: existing capability reports record this exact digest.
+        # Fixed field list: existing capability reports record this exact digest. management_extensions
+        # affect only workspace anchors, not the task/probe runtime this evidence describes.
         data = [
             settings.filesystem_protocol,
             settings.extensions,
@@ -636,6 +868,7 @@ class OpenSandboxBackend(Backend[OpenSandbox]):
             clock=clock,
             settings=cfg.network_settings(),
             storage=cfg.storage_settings(),
+            inputs=cfg.input_settings(),
             caps=caps,
             execd=cfg.execd_settings(),
             filesystem=cfg.filesystem_settings(),
@@ -644,6 +877,7 @@ class OpenSandboxBackend(Backend[OpenSandbox]):
             create_fields=settings.create_fields,
             group_extension=settings.group_extension,
             privileged_extensions=settings.privileged_extensions,
+            management_extensions=settings.management_extensions,
             create_timeout_s=cfg.timeouts.create_request,
             max_connections=settings.max_connections,
         )

@@ -19,7 +19,7 @@ from flotilla.platform.filesystem import memory_bytes
 from flotilla.platform.opensandbox.filesystem import INTERNAL_LIMITS, parse_effective
 from flotilla.runtime.planning import _resolve_tmpfs, to_plan
 from flotilla.scan import scan
-from flotilla.testing.build import FakeBuilder, _ctx, _task
+from flotilla.testing.build import DIGEST, FakeBuilder, FakeExport, _ctx, _task
 from flotilla.testing.config import config_data
 from flotilla.testing.reports import ok, report
 
@@ -47,7 +47,8 @@ def test_compose_filesystem_fields_roundtrip_to_runtime(tmp_path: Path) -> None:
         )
     )
     builder = FakeBuilder()
-    ctx = _ctx(builder=builder)
+    export = FakeExport()
+    ctx = _ctx(builder=builder, image_export=export)
     ctx = replace(
         ctx, caps=replace(ctx.caps, readonly_rootfs=True, native_tmpfs=True, filesystem_limits=INTERNAL_LIMITS)
     )
@@ -60,10 +61,10 @@ def test_compose_filesystem_fields_roundtrip_to_runtime(tmp_path: Path) -> None:
         TmpfsMount("/tmp", 16 * 1024**2, 0o750, 1000, 1001),
         TmpfsMount("/cache", 8 * 1024**2, 0o700),
     )
-    dockerfile = "\n".join(r.dockerfile_text or "" for r in builder.requests)
-    assert "mkdir -p /tmp" in dockerfile and "mkdir -p /.flotilla-runtime" in dockerfile
-    assert "test ! -L /cache" in dockerfile
-    assert "rm -rf /tmp" not in dockerfile and "rm -rf /cache" not in dockerfile
+    # Mount points and the readonly runtime dir are runtime responsibilities:
+    # no derived image build, but every path is inspected in the source image.
+    assert builder.requests == []
+    assert export.inspected == [(f"r.io/app@{DIGEST}", ("/tmp", "/cache", "/.flotilla-runtime"))]
     assert not any(f.kind == "equivalent" and "tmpfs" in f.path for f in manifest.findings)
     with pytest.raises(ValueError, match="schema"):
         Manifest.load_json(manifest.dump_json().replace(f'"schema": {SCHEMA_VERSION}', '"schema": 5'))
@@ -142,7 +143,7 @@ def test_readonly_rootfs_promotes_single_writer_mounts_to_real_storage() -> None
         "volumes": {"data": {}},
     }
     writable = classify(normalize(raw, {}).services)
-    assert writable.volumes[0].mode == "local" and writable.binds[0].mode == "image"
+    assert writable.volumes[0].mode == writable.binds[0].mode == "trial"
     raw["services"]["main"]["read_only"] = True
     readonly = classify(normalize(raw, {}).services)
     assert readonly.volumes[0].mode == readonly.binds[0].mode == "trial"
@@ -166,17 +167,19 @@ def test_report_requires_matching_dialect_and_runtime_profile() -> None:
         **{
             "runtime.readonly_rootfs": ok(),
             "storage.native_tmpfs": ok(),
-            "filesystem_profile": cfg.filesystem_profile(),
+            "evidence_profile": cfg.evidence_profile(),
         }
     )
     assert cfg.platform_capabilities(evidence).readonly_rootfs and cfg.platform_capabilities(evidence).native_tmpfs
-    assert not cfg.platform_capabilities(report()).readonly_rootfs
+    assert not cfg.platform_capabilities(report(evidence_profile=cfg.evidence_profile())).readonly_rootfs
     changes: list[dict[str, Any]] = [{"filesystem_protocol": "upstream"}, {"extensions": {"runtimeClass": "kata"}}]
     for changed in changes:
         other = cfg.model_copy(update={"opensandbox": cfg.opensandbox_settings().model_copy(update=changed)})
-        assert not other.platform_capabilities(evidence).readonly_rootfs
-    unmeasured = evidence.model_copy(update={"filesystem_profile": None})
-    assert not cfg.platform_capabilities(unmeasured).native_tmpfs
+        with pytest.raises(ValueError, match="evidence"):
+            other.platform_capabilities(evidence)
+    unmeasured = evidence.model_copy(update={"evidence_profile": ""})
+    with pytest.raises(ValueError, match="evidence"):
+        cfg.platform_capabilities(unmeasured)
 
 
 def test_effective_configuration_is_normalized_and_malformed_values_fail_closed() -> None:

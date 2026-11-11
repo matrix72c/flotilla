@@ -8,11 +8,11 @@ import copy
 import threading
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable, Coroutine
+from collections.abc import AsyncIterator, Callable, Coroutine, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from types import TracebackType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from flotilla.config import FlotillaConfig
 from flotilla.prepared import PreparedEnvironment
@@ -29,6 +29,9 @@ from flotilla.runtime.types import (
     RuntimeEvent,
 )
 from flotilla.runtime.worker import Worker
+
+if TYPE_CHECKING:
+    from flotilla.runtime.workspace import Workspace
 
 
 class Flotilla:
@@ -117,13 +120,70 @@ class Flotilla:
 
     def client_reservation(self) -> ResourceReservation:
         """Per-client anchor overhead, in addition to environment reservations."""
-        resource = self._deployment.anchor_settings().resources
+        resource = self._deployment.anchor_settings(workspace=True).resources
         return ResourceReservation({"anchor": {"cpu": resource.cpu, "memory": resource.memory}})
 
+    async def describe_tasks(self, task_keys: Sequence[str]) -> dict[str, dict[str, Any]]:
+        """Read native Harbor instruction/config metadata without creating attempts.
+
+        Keys are canonical platform-relative source directories, deduplicated by
+        full key (never basename). Sources must remain immutable during the run.
+        Requests are bounded to 128 tasks / 1 MiB and results to 64 MiB per batch;
+        any invalid task or exceeded limit fails the call, without partial results.
+        """
+        await self.start()
+        return await self._call(lambda manager: manager.workspaces.describe_tasks(task_keys), settle_cancel=True)
+
+    async def describe_task_resources(
+        self, task_keys: Sequence[str], *, runtime_params: Mapping[str, str] | None = None
+    ) -> dict[str, dict[str, ResourceReservation]]:
+        """Inspect capacity without attempts, image builds/exports or task instances.
+
+        Returns full source key -> Harbor role -> effective per-service resources,
+        with the same retry copies and deployment overrides as ``reservation``.
+        One interpolation mapping applies to the whole call (over deployment
+        runtime_params). Batching, failure and cancellation match describe_tasks.
+        Compose inputs use private copies and the official normalizer; this is
+        not a buildability check, image prewarming, or a persistent resource cache.
+        """
+        from flotilla.runtime.workspace import runtime_parameters
+
+        params = runtime_parameters(runtime_params)
+        await self.start()
+        declared = await self._call(
+            lambda manager: manager.workspaces.describe_task_resources(task_keys, runtime_params=params),
+            settle_cancel=True,
+        )
+        return {
+            key: {
+                role: ResourceReservation(
+                    {
+                        name: self._deployment.resources.effective(key.rsplit("/", 1)[-1], name, values)
+                        for name, values in services.items()
+                    },
+                    copies=ENVIRONMENT_RESERVATION_COPIES,
+                )
+                for role, services in roles.items()
+            }
+            for key, roles in declared.items()
+        }
+
+    async def workspace(self, task_key: str) -> Workspace:
+        """Copy one original Harbor directory into an independent platform-side attempt."""
+        from flotilla.runtime.workspace import Workspace
+
+        await self.start()
+        info = await self._call(
+            lambda manager: manager.workspaces.create(task_key),
+            settle_cancel=True,
+            cancel_result=lambda manager, value: manager.release_workspace(value.id),
+        )
+        return Workspace(self, info)
+
     async def open(self, prepared: PreparedEnvironment, options: OpenOptions | None = None) -> Environment:
-        """Open one prepared environment (a row's `environment(role)`); no images are built or files published."""
+        """Open a transient compiled environment; Harbor callers should use HarborAttempt."""
         if not isinstance(prepared, PreparedEnvironment):
-            raise TypeError("open takes a PreparedEnvironment; run `flotilla prepare` and load its rows")
+            raise TypeError("open takes a transient PreparedEnvironment; use HarborAttempt for a platform task_key")
         options = copy.deepcopy(options or OpenOptions())
         admission = options.admission_timeout or self._deployment.limits.admission_timeout
         startup = options.startup_timeout or self._deployment.runtime.startup_timeout_s
@@ -139,6 +199,8 @@ class Flotilla:
             disable_internet=options.disable_internet,
             resources=options.resources,
             external_mounts=options.external_mounts,
+            workspace_id=options.workspace_id,
+            workspace_mounts=options.workspace_mounts,
             lifetime=lifetime,
         )
         try:

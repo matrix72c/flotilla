@@ -15,7 +15,7 @@ import pytest
 from flotilla.platform.base import ErrorCategory, ExternalPolicy, FlotillaError, SharedVolume
 from flotilla.platform.opensandbox.http import Http, RetryPolicy, error_fields, map_status
 from flotilla.platform.opensandbox.network import NetworkSettings, compile_policy
-from flotilla.platform.opensandbox.storage import StorageSettings
+from flotilla.platform.opensandbox.storage import StorageSettings, compile_volumes
 from flotilla.platform.opensandbox.volumes import compile_host_volumes, compile_pvc_volumes
 from flotilla.testing.platform import ManualClock
 
@@ -187,7 +187,9 @@ def test_pvc_volumes_at_claim_root() -> None:
     [
         (SharedVolume(key="a/../b", mount_path="/x", read_only=True), "/mnt"),
         (SharedVolume(key="a", mount_path="rel", read_only=True), "/mnt"),
-        (SharedVolume(key="a", mount_path="/x", read_only=True), "relative"),
+        (SharedVolume(key="a", mount_path="/x", read_only=True), ""),
+        (SharedVolume(key="a", mount_path="/x", read_only=True), " @user"),
+        (SharedVolume(key="a", mount_path="/x", read_only=True), "@user\n"),
     ],
 )
 def test_host_volumes_reject_bad_paths(vol: SharedVolume, host: str) -> None:
@@ -236,7 +238,7 @@ def test_storage_settings_compiles_pvc_volumes() -> None:
     "kwargs",
     [
         {},  # host form missing host_path
-        {"host_path": "relative"},
+        {"host_path": "@user\t"},
         {"host_path": "/mnt", "claim_name": "data"},  # host form does not take pvc fields
         {"volumes": "pvc"},  # pvc form missing claim_name
         {"volumes": "pvc", "claim_name": "data", "host_path": "/mnt"},
@@ -396,3 +398,58 @@ async def test_non_json_error_body_falls_back_to_text(clock: ManualClock) -> Non
     with pytest.raises(FlotillaError) as exc:
         await clock.run(_http(handler, clock).request("POST", "/x", stage="run", idempotent=False))
     assert exc.value.category is ErrorCategory.TRANSIENT and "bad gateway" not in str(exc.value)
+
+
+def test_host_path_is_passed_through_verbatim() -> None:
+    # A platform identifier (e.g. a user-scoped storage domain) is opaque to Flotilla.
+    vol = SharedVolume(key="releases/r1", mount_path="/m", read_only=True)
+    settings = StorageSettings(host_path="@user:alice")
+    assert settings.compile([vol]) == [
+        {"name": "v0", "host": {"path": "@user:alice"}, "mountPath": "/m", "readOnly": True, "subPath": "releases/r1"}
+    ]
+    assert settings.root == "host:@user:alice"
+
+
+def test_input_volumes_compile_against_their_named_root() -> None:
+    work = StorageSettings(host_path="@user")
+    inputs = {
+        "datasets": StorageSettings(host_path="@user:owner", root_subpath="datasets"),
+        "runtimes": StorageSettings(host_path="@user:other"),
+    }
+    volumes = [
+        SharedVolume(key="share/releases/r1", mount_path="/.flotilla", read_only=True),
+        SharedVolume(key="r1/tasks/a", mount_path="/task", read_only=True, root="datasets"),
+        SharedVolume(key="node/abc", mount_path="/opt/node", read_only=True, root="runtimes"),
+        SharedVolume(key="launches/L/t/static", mount_path="/srv", read_only=False),
+    ]
+    out = compile_volumes(volumes, work, inputs)
+    assert [(v["name"], v["host"]["path"], v["subPath"]) for v in out] == [
+        ("v0", "@user", "share/releases/r1"),
+        ("v1", "@user:owner", "datasets/r1/tasks/a"),
+        ("v2", "@user:other", "node/abc"),
+        ("v3", "@user", "launches/L/t/static"),
+    ]
+    # Work-root volumes compile exactly as without inputs.
+    work_only = [volumes[0], volumes[3]]
+    assert compile_volumes(work_only, work) == work.compile(work_only)
+    with pytest.raises(ValueError, match="unconfigured storage root"):
+        compile_volumes(volumes, work, {"datasets": inputs["datasets"]})
+
+
+def test_input_volumes_must_be_read_only() -> None:
+    with pytest.raises(ValueError, match="read-only"):
+        SharedVolume(key="releases/r1", mount_path="/m", read_only=False, root="datasets")
+
+
+def test_host_root_subpath_scopes_every_mount_including_the_anchor_root() -> None:
+    # A platform may authorize only a shared subdirectory: every mount, including the anchor's root mount (key ""),
+    # must stay inside it.
+    settings = StorageSettings(host_path="@user:owner", root_subpath="voyager-inputs")
+    volumes = [
+        SharedVolume(key="releases/r1", mount_path="/task", read_only=True),
+        SharedVolume(key="", mount_path="/flotilla-input", read_only=True),
+    ]
+    assert [v["subPath"] for v in settings.compile(volumes)] == ["voyager-inputs/releases/r1", "voyager-inputs"]
+    assert settings.root == "host:@user:owner/voyager-inputs"
+    with pytest.raises(ValueError, match="root_subpath"):
+        StorageSettings(host_path="@user", root_subpath="../other")

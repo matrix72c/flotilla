@@ -15,13 +15,19 @@ def docker_context(cfg: FlotillaConfig, journal: Path) -> BuildContext:
     """Export containers are journaled under `journal` before creation, so a killed run can remove them."""
     command = cfg.prepare.docker_command
     exporter = DockerImageExport(docker_cmd=command, timeout_s=cfg.prepare.export_timeout, ownership_dir=journal)
+    settings = cfg.build.settings()
     return BuildContext(
-        settings=cfg.build.settings(),
+        settings=settings,
         caps=cfg.platform_capabilities(),
         registry=DockerRegistry(docker_cmd=command),
-        builder=DockerBuilder(docker_cmd=command),
+        builder=DockerBuilder(
+            docker_cmd=command,
+            oci_mediatypes=settings.oci_mediatypes,
+            attestations=settings.attestations,
+        ),
         image_export=exporter,
         image_accounts=exporter.accounts,
+        validate_mount_paths=exporter.validate_mount_paths,
     )
 
 

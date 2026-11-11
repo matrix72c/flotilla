@@ -124,3 +124,50 @@ def test_export_uses_the_configured_timeout_and_reports_docker_stderr(
     with pytest.raises(ImageError, match="status 1: Error response from daemon: disk quota exceeded"):
         exporter.extract("test-image", "/data", tmp_path / "out")
     assert seen == [1234]
+
+
+def test_builder_publication_pins_schema2_manifests_by_default(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from flotilla.build.builder import BuildRequest
+    from flotilla.build.docker import DockerBuilder
+
+    (tmp_path / "Dockerfile").write_text("FROM r.io/base:1\n")
+    argv: list[str] = []
+
+    def fake_docker(args: Sequence[str], **kwargs: Any) -> str:
+        argv.extend(args)
+        metadata = Path(args[args.index("--metadata-file") + 1])
+        metadata.write_text('{"containerimage.digest": "sha256:' + "ab" * 32 + '"}')
+        return "pushed"
+
+    monkeypatch.setattr(docker, "_docker", fake_docker)
+    request = BuildRequest(service="main", tag="r.io/ns/out:user0-1", context=tmp_path, dockerfile="Dockerfile")
+    assert DockerBuilder().build(request) == "sha256:" + "ab" * 32
+    # An explicit image exporter replaces `--push` shorthand: schema2 manifests, no
+    # attestation index, matching registries that reject OCI manifests by quota checks.
+    assert "--push" not in argv
+    assert argv[argv.index("--output") + 1] == "type=image,push=true,oci-mediatypes=false"
+    assert argv[argv.index("--provenance") + 1] == "false"
+    assert argv[argv.index("--sbom") + 1] == "false"
+
+    argv.clear()
+    oci = DockerBuilder(oci_mediatypes=True, attestations=True)
+    oci.build(request)
+    assert argv[argv.index("--output") + 1] == "type=image,push=true,oci-mediatypes=true"
+    assert argv[argv.index("--provenance") + 1] == "true"
+    with pytest.raises(ImageError, match="oci_mediatypes"):
+        DockerBuilder(attestations=True)
+
+
+def test_docker_context_threads_publication_settings(tmp_path: Path) -> None:
+    from flotilla.config import FlotillaConfig
+    from flotilla.prepare.docker import docker_context
+    from flotilla.testing.config import config_data
+    from flotilla.testing.reports import report
+
+    caps = tmp_path / "caps.json"
+    caps.write_text(report().dump_json())
+    data = config_data()
+    data["opensandbox"]["capabilities"] = str(caps)
+    builder = docker_context(FlotillaConfig.from_mapping(data), tmp_path / "journal").builder
+    assert isinstance(builder, docker.DockerBuilder)
+    assert builder.oci_mediatypes is False and builder.attestations is False  # schema2 default

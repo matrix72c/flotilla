@@ -7,7 +7,15 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Literal
 
-from flotilla.platform.base import RESERVED_MOUNTS, Resources, SharedVolume, TmpfsMount, overlaps, validate_mounts
+from flotilla.platform.base import (
+    RESERVED_MOUNTS,
+    Resources,
+    SharedVolume,
+    StorageRoot,
+    TmpfsMount,
+    overlaps,
+    validate_mounts,
+)
 
 Condition = Literal["service_started", "service_healthy", "service_completed_successfully"]
 RestartPolicy = Literal["no", "always", "unless-stopped", "on-failure"]
@@ -127,6 +135,11 @@ class TrialPlan:
     external_units: frozenset[str] = frozenset()  # units granted external access by caller policy
     # Caller-owned storage: never prepared, seeded, chowned, or deleted by the trial.
     external_mounts: Mapping[str, tuple[SharedVolume, ...]] = field(default_factory=dict)
+    # Workspace lifetime spans multiple environments; only its owner may delete it.
+    workspace_root: str | None = None
+    # Storage root that `task_files` is relative to: validated native releases live on the read-only input root.
+    task_files_root: StorageRoot = "work"
+    workspace_mounts: Mapping[str, tuple[SharedVolume, ...]] = field(default_factory=dict)
 
     def validate(self) -> None:
         """Check cross-field consistency; raise `ValueError` if not (a manifest or translation bug, not platform)."""
@@ -139,6 +152,11 @@ class TrialPlan:
                 _require_subset(targets, net.members, f"services named {host} in network {name}")
         _require_subset(self.external_units, units, "external_units")
         _require_subset(set(self.external_mounts), units, "external_mounts")
+        _require_subset(set(self.workspace_mounts), units, "workspace_mounts")
+        if self.workspace_root is not None:
+            _require_key(self.workspace_root, "workspace_root")
+        if self.workspace_mounts and self.workspace_root is None:
+            raise ValueError("workspace mounts require a workspace root")
         _require_subset(set(self.depends_on), units, "depends_on units")
         for dependent, deps in self.depends_on.items():
             # required: false deps may be absent (e.g. profile not selected) and do not block; required ones must exist.
@@ -167,7 +185,10 @@ class TrialPlan:
             occupied = [m.target for m in unit.mounts] + [m.mount_path for m in unit.tmpfs_mounts]
             if unit.shm_size_bytes is not None:
                 occupied.append("/dev/shm")
-            for mount in self.external_mounts.get(name, ()):
+            for mount in self.workspace_mounts.get(name, ()):
+                if self.workspace_root is None or not mount.key.startswith(self.workspace_root + "/"):
+                    raise ValueError("workspace mount escapes the owned workspace")
+            for mount in (*self.external_mounts.get(name, ()), *self.workspace_mounts.get(name, ())):
                 _require_key(mount.key, f"external mount of {name}")
                 if "_runtime" in mount.key.split("/"):
                     raise ValueError("external mount key _runtime is reserved for framework scratch space")
@@ -181,7 +202,7 @@ class TrialPlan:
                     or any(ord(c) < 32 for c in path)
                 ):
                     raise ValueError("external mount_path must be a canonical absolute directory")
-                if mount.read_only is not True:
+                if mount in self.external_mounts.get(name, ()) and mount.read_only is not True:
                     raise ValueError("external mounts must be read-only")
                 if any(overlaps(path, other) for other in (*RESERVED_MOUNTS, *occupied)):
                     raise ValueError(f"{name}: external mount {path} conflicts with another or reserved mount")

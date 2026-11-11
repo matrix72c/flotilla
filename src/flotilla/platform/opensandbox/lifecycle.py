@@ -64,6 +64,7 @@ def metadata_filter(labels: Mapping[str, str]) -> str:
 class Lifecycle:
     def __init__(self, http: Http) -> None:
         self._http = http
+        self.probe_token_disclosure: dict[str, bool] = {}
 
     async def create(self, body: Mapping[str, Any], *, timeout: float | None) -> str:
         """`POST /sandboxes`, returning the instance ID. Not retried (create is not idempotent)."""
@@ -78,6 +79,12 @@ class Lifecycle:
                 category=ErrorCategory.TRANSIENT,
                 retryable=True,
             )
+        if "flotilla/probe" in (body.get("metadata") or {}):
+            import json
+
+            # Do not retain a token or complete response, only the observation.
+            token = (body.get("env") or {}).get("EXECD_ACCESS_TOKEN", "")
+            self.probe_token_disclosure[str(result["id"])] = bool(token and token in json.dumps(result))
         return str(result["id"])
 
     async def get(self, iid: str) -> InstanceState:

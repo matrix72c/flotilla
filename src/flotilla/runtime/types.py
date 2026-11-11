@@ -24,6 +24,9 @@ class RunRequest:
     lifetime: float | None = None
     # Caller-owned, read-only directories relative to the deployment's shared root, by service.
     external_mounts: dict[str, tuple[SharedVolume, ...]] = field(default_factory=dict)
+    # Attempt-owned mounts may be writable, but must remain under this client's workspace.
+    workspace_id: str | None = None
+    workspace_mounts: dict[str, tuple[SharedVolume, ...]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.request_id:
@@ -100,6 +103,9 @@ class OpenOptions:
     disable_internet: bool = False
     # Caller-owned, read-only directories relative to the deployment's shared root, by service.
     external_mounts: dict[str, tuple[SharedVolume, ...]] = field(default_factory=dict)
+    # Attempt-owned mounts may be writable, but must remain under this client's workspace.
+    workspace_id: str | None = None
+    workspace_mounts: dict[str, tuple[SharedVolume, ...]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         for value in (self.admission_timeout, self.startup_timeout, self.lifetime):

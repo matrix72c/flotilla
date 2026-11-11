@@ -7,6 +7,17 @@ import os
 import stat
 from collections.abc import Iterator
 from pathlib import Path
+from typing import NotRequired, TypedDict
+
+
+class FileEntry(TypedDict):
+    path: str
+    type: str
+    mode: str
+    uid: int
+    gid: int
+    size: NotRequired[int]
+    target: NotRequired[str]
 
 
 def _walk(root: Path) -> Iterator[tuple[str, os.stat_result]]:
@@ -32,16 +43,16 @@ def _kind(info: os.stat_result) -> str:
     return "file" if stat.S_ISREG(info.st_mode) else "other"
 
 
-def entries(root: Path) -> list[dict[str, object]]:
+def entries(root: Path) -> list[FileEntry]:
     """Path, type, mode and numeric owner of every entry under `root`, plus file size or link target."""
     metadata = root.parent / "file-identities.json"
     identities = json.loads(metadata.read_text()) if metadata.exists() else {}
-    result: list[dict[str, object]] = []
+    result: list[FileEntry] = []
     for relative, info in _walk(root):
         owner = identities.get(relative, (info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)))
         if not isinstance(owner, (list, tuple)) or len(owner) != 3 or any(type(v) is not int or v < 0 for v in owner):
             raise ValueError("invalid file identity metadata")
-        entry: dict[str, object] = {
+        entry: FileEntry = {
             "path": relative,
             "type": _kind(info),
             "mode": f"{owner[2]:04o}",

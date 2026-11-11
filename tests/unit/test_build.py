@@ -100,23 +100,18 @@ def _project(**services: Any) -> Project:
 # ───────────────────────────── Derived Dockerfile ─────────────────────────────
 
 
-def test_derive_dockerfile_clears_then_copies() -> None:
-    df = derive_dockerfile(
-        "r.io/base@sha256:ab", copy=[("entrypoint.sh", "/secret/entrypoint.sh")], clear=["/var/cache"]
-    )
+def test_derive_dockerfile_only_prepares_mount_points() -> None:
+    df = derive_dockerfile("r.io/base@sha256:ab", directories=["/var/cache"])
     lines = df.splitlines()
     assert lines[0] == "FROM r.io/base@sha256:ab"
-    assert lines[1] == lines[-1] == "USER 0:0"  # minimal images without passwd/group can still build.
-    assert any("rm -rf /var/cache/*" in x for x in lines)
-    # bind writes delete the target first so directory shadowing holds; COPY uses exec form.
-    assert lines.index('RUN ["/bin/sh", "-c", "rm -rf /secret/entrypoint.sh"]') < lines.index(
-        'COPY ["entrypoint.sh", "/secret/entrypoint.sh"]'
-    )
+    assert lines[1] == lines[-1] == "USER 0:0"
+    assert "mkdir -p /var/cache" in df
+    assert "COPY " not in df and "rm -rf" not in df
 
 
 def test_derive_dockerfile_quotes_odd_paths() -> None:
-    df = derive_dockerfile("b", copy=[("a b.txt", "/opt/a b.txt")], clear=["/x y"])
-    assert '"a b.txt"' in df and '"/opt/a b.txt"' in df and "'/x y'" in df
+    df = derive_dockerfile("b", directories=["/x y"])
+    assert "'/x y'" in df
 
 
 # ───────────────────────────── Image naming ─────────────────────────────
@@ -172,9 +167,12 @@ def test_build_contexts_only_maps_replaced() -> None:
 def test_replacement_applies_before_disposition() -> None:
     # Under a pullable prefix after replacement -> mirror becomes link (the disposition is decided after replacement).
     svc = Service(name="cache", image="docker.io/library/redis:7")
-    assert plan_image("cache", svc, SETTINGS, needs_change=False).disposition == "link"
+    assert plan_image("cache", svc, SETTINGS).disposition == "link"
     plain = BuildSettings(pullable_registries=("registry.example.com",), target="t.io/ns/r")
-    assert plan_image("cache", svc, plain, needs_change=False).disposition == "mirror"
+    with pytest.raises(ImageError, match="mirror_images"):  # mirroring stays explicit
+        plan_image("cache", svc, plain)
+    explicit = BuildSettings(pullable_registries=("registry.example.com",), target="t.io/ns/r", mirror_images=True)
+    assert plan_image("cache", svc, explicit).disposition == "mirror"
 
 
 def test_named_root_uses_the_image_database() -> None:

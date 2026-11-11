@@ -1,4 +1,4 @@
-"""`flotilla probe` (Architecture section 14): verdict logic, declared-item merging and cleanup on the fake platform.
+"""Measured probe behavior and cleanup on the fake platform.
 
 On the fake platform, anchor directory operations go to `SharedTree`; unit shell commands are answered by `ProbeShell`
 the way a compliant deployment would, and each item can be made non-compliant to check that probe reports it as
@@ -9,43 +9,24 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+from datetime import datetime, timedelta
+from typing import Any
 
 import pytest
-from pydantic import ValidationError
 
-from flotilla.capabilities import CapabilityReport, Item
+from flotilla.capabilities import CapabilityReport
 from flotilla.core.anchor import Anchor, AnchorSettings
-from flotilla.platform.base import ErrorCategory, ExecResult, FlotillaError, InstanceHandle, ProcessSpec
-from flotilla.probe import _INBOUND_TOKEN, PROBE_LABEL, Declared, ProbeSettings, _mounted_subdir, probe
+from flotilla.platform.base import ErrorCategory, ExecResult, FlotillaError, InstanceHandle, InstanceSpec, ProcessSpec
+from flotilla.probe import PROBE_LABEL, ProbeSettings, _mounted_subdir, _Run, probe
 from flotilla.testing.platform import FakePlatform, ManualClock, SharedTree
 
 SETTINGS = ProbeSettings(
-    image="reg/unit@sha256:" + "b" * 64, share_release="r1", endpoint="http://os.test", hosts_recheck_s=5.0
-)
-
-
-def _item(ok: bool) -> Item:
-    return Item(ok=ok, source="declared", evidence="declared by deployer")
-
-
-DECLARED = Declared(
-    deployment="fake",
-    list_visibility_s=30.0,
-    link=_item(False),
-    link_udp=_item(False),
-    inbound_isolation=_item(False),
-    external_forms=frozenset({"none", "allowlist"}),
-    implicit_egress=("10.96.0.10:53/udp",),
-    cluster_dns=("10.96.0.10",),
-    implicit_egress_declared=_item(True),
-    shared_volume=_item(True),
-    missing_subpath=_item(False),
-    no_auto_mount=_item(False),
-    volume_file=_item(False),
-    exec_auth=_item(False),
-    diagnostics=_item(False),
-    privileged_runtime=_item(True),
-    multi_container=_item(False),
+    image="reg/unit@sha256:" + "b" * 64,
+    share_release="r1",
+    endpoint="http://os.test",
+    evidence_profile="test-profile",
+    hosts_recheck_s=5.0,
+    link_members=2,
 )
 
 
@@ -87,14 +68,6 @@ class ProbeShell:
                 next((b for b in self.broken if b.startswith("cpu-")), ""), "100000 100000"
             )
             return _out(f"{memory}\n{cpu}\n")
-        if "nc -z" in script:
-            if "notool" in self.broken:
-                return _out("NOTOOL\n")
-            return _out("self=1\npublic=0\n" if "egress" in self.broken else "self=1\npublic=1\n")
-        if _INBOUND_TOKEN in script:  # inbound: self always ok; external only if not isolated (broken "inbound")
-            if "127.0.0.1" in script:
-                return _out(f"{_INBOUND_TOKEN}\n")
-            return _out(f"{_INBOUND_TOKEN}\n" if "inbound" in self.broken else "")
         if script.startswith("ls -A /probe-ro"):
             listing = "inner\nsibling\n" if "isolation" in self.broken else "inner\n"
             run_id = self._platform.spec_of(iid).labels[PROBE_LABEL]
@@ -127,7 +100,7 @@ async def run_probe(
     *,
     broken: frozenset[str] = frozenset(),
     exit_code: int = 7,
-    declared: Declared = DECLARED,
+    settings: ProbeSettings = SETTINGS,
 ) -> CapabilityReport:
     tree = SharedTree(platform)
     anchor = Anchor(platform, clock, "Lp", AnchorSettings(image="anchor@sha256:abc"))
@@ -138,285 +111,207 @@ async def run_probe(
     platform.initial_files["/etc/hosts"] = b"127.0.0.1 localhost\n"
     finisher = asyncio.ensure_future(_finish_background(platform, clock, exit_code))
     try:
-        return await clock.run(probe(platform, clock, anchor, declared, SETTINGS))
+        return await clock.run(probe(platform, clock, anchor, settings))
     finally:
         finisher.cancel()
         await asyncio.wait({finisher})
         await anchor.close()
 
 
-# ───────────────────────────── Compliant deployment ─────────────────────────────
+@pytest.mark.asyncio
+async def test_unmeasured_network_and_auth_never_become_passed(platform: FakePlatform, clock: ManualClock) -> None:
+    value = await run_probe(platform, clock)
+    assert value.lifecycle.create_get_delete.ok and value.lifecycle.renew.ok
+    assert value.exec.exec_identity.ok and value.exec.background.ok
+    assert value.runtime.memory_limit.ok
+    assert not value.network.external_none.ok
+    assert not value.network.network_acceptance.ok
+    assert value.runtime.exec_auth.status == "skipped"
+    assert not value.to_capabilities().supports_no_network
+    assert not platform.iids()
 
 
 @pytest.mark.asyncio
-async def test_compliant_deployment_satisfies_required_items(platform: FakePlatform, clock: ManualClock) -> None:
-    report = await run_probe(platform, clock)
-    assert report.missing_required() == []
-    for item in (
-        report.lifecycle.create_get_delete,
-        report.lifecycle.label_list,
-        report.lifecycle.renew,
-        report.exec.exec_identity,
-        report.exec.files,
-        report.exec.placeholder_entry,
-        report.exec.background,
-        report.network.external_none,
-        report.storage.read_only,
-        report.storage.subdir_isolation,
-        report.storage.dir_management,
-        report.runtime.memory_limit,
-        report.runtime.cpu_limit,
-        report.runtime.image_digest,
-    ):
-        assert item.ok and item.source == "probed", item
-    assert report.network.internal_address == "exec"
-    assert report.endpoint == "http://os.test" and report.deployment == "fake"
-    assert not report.runtime.readonly_rootfs.ok and not report.storage.native_tmpfs.ok
+@pytest.mark.parametrize("broken,item", [("identity", "exec_identity"), ("timeout", "exec_identity")])
+async def test_exec_behavior_not_json_echo(platform: FakePlatform, clock: ManualClock, broken: str, item: str) -> None:
+    value = await run_probe(platform, clock, broken=frozenset({broken}))
+    assert getattr(value.exec, item).status == "failed"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "broken",
-    [
-        frozenset(),
-        frozenset({"rootfs"}),
-        frozenset({"tmpfs"}),
-        frozenset({"tmpfs-output"}),
-        frozenset({"tmpfs-stderr"}),
-        frozenset({"tmpfs-exit"}),
-    ],
+    "broken", [frozenset(), frozenset({"rootfs"}), frozenset({"tmpfs-output"}), frozenset({"tmpfs"})]
 )
-async def test_optional_filesystem_probes_require_behavior_and_cleanup(
-    platform: FakePlatform,
-    clock: ManualClock,
-    broken: frozenset[str],
-) -> None:
-    platform.caps = replace(platform.caps, readonly_rootfs=True, native_tmpfs=True)
-    declared = DECLARED.model_copy(update={"probe_readonly_rootfs": True, "probe_native_tmpfs": True})
-    report = await run_probe(platform, clock, declared=declared, broken=broken)
-    assert report.runtime.readonly_rootfs.ok == ("rootfs" not in broken)
-    assert report.storage.native_tmpfs.ok == (not broken & {"tmpfs", "tmpfs-output", "tmpfs-stderr", "tmpfs-exit"})
-    assert report.runtime.readonly_rootfs.source == report.storage.native_tmpfs.source == "probed"
-    assert not platform.iids()
-
-
-@pytest.mark.parametrize("broken", [frozenset(), frozenset({"shm"})])
-@pytest.mark.asyncio
-async def test_optional_shm_size_probe_requests_a_distinct_size(
+async def test_filesystem_actual_behavior_and_cleanup(
     platform: FakePlatform, clock: ManualClock, broken: frozenset[str]
 ) -> None:
-    skipped = await run_probe(platform, clock)
-    assert not skipped.storage.shm_size.ok and skipped.storage.shm_size.source == "declared"
-    platform.caps = replace(platform.caps, shm_size=True)
-    sizes: list[int] = []
-    platform.on_create = lambda _iid, spec: sizes.extend([spec.shm_size_bytes] if spec.shm_size_bytes else [])
-    report = await run_probe(
-        platform, clock, declared=DECLARED.model_copy(update={"probe_shm_size": True}), broken=broken
-    )
-    assert report.storage.shm_size.ok == (not broken) and report.storage.shm_size.source == "probed"
-    assert report.to_capabilities().shm_size == (not broken)
-    assert sizes == [96 * 1024 * 1024]
+    platform.caps = replace(platform.caps, readonly_rootfs=True, native_tmpfs=True, shm_size=True)
+    value = await run_probe(platform, clock, settings=replace(SETTINGS, filesystem_supported=True), broken=broken)
+    assert value.runtime.readonly_rootfs.ok == ("rootfs" not in broken)
+    assert value.storage.native_tmpfs.ok == (not broken & {"tmpfs", "tmpfs-output"})
     assert not platform.iids()
 
 
 @pytest.mark.asyncio
-async def test_declared_items_are_copied_verbatim(platform: FakePlatform, clock: ManualClock) -> None:
-    report = await run_probe(platform, clock)
-    assert report.network.link == DECLARED.link and report.runtime.exec_auth == DECLARED.exec_auth
-    assert report.network.external_forms == DECLARED.external_forms
-    assert report.network.cluster_dns == DECLARED.cluster_dns
-    assert report.network.implicit_egress == DECLARED.implicit_egress
-    assert report.lifecycle.list_visibility_s == 30.0
-    assert report.security_gaps() == ["inbound_isolation", "exec_auth", "no_auto_mount"]
-
-
-@pytest.mark.asyncio
-async def test_label_list_latency_is_measured(platform: FakePlatform, clock: ManualClock) -> None:
-    # The fake platform makes list results visible caps.list_visibility_s after the request (30s, the declared bound).
-    report = await run_probe(platform, clock)
-    assert "listed by label 30.0s after create request" in report.lifecycle.label_list.evidence
-
-
-@pytest.mark.asyncio
-async def test_cleans_up_every_instance_and_directory(platform: FakePlatform, clock: ManualClock) -> None:
-    await run_probe(platform, clock)
-    assert [i for i in platform.iids() if PROBE_LABEL in platform.spec_of(i).labels] == []
-
-
-# ───────────────────────────── Non-compliant answers are reported unsatisfied, not raised ─────────────────────────────
-
-
-@pytest.mark.parametrize(
-    ("broken", "item"),
-    [
-        ("identity", "exec.exec_identity"),
-        ("timeout", "exec.exec_identity"),
-        ("memory", "runtime.memory_limit"),
-        ("egress", "network.external_none"),
-        ("isolation", "storage.subdir_isolation"),
-        ("mount-root", "storage.subdir_isolation"),  # mount source is the root, not the mounted subdirectory
-    ],
-)
-@pytest.mark.asyncio
-async def test_non_compliant_answer_reported_as_unsatisfied(
-    platform: FakePlatform, clock: ManualClock, broken: str, item: str
-) -> None:
-    report = await run_probe(platform, clock, broken=frozenset({broken}))
-    section, field = item.split(".")
-    assert getattr(getattr(report, section), field).ok is False
-    assert report.missing_required()  # all of these are required items
-
-
-@pytest.mark.asyncio
-async def test_inbound_not_isolated_is_security_gap(platform: FakePlatform, clock: ManualClock) -> None:
-    # External instances can reach members: inbound isolation probes unsatisfied and becomes a security gap (provider
-    # rejects the deployment by default).
-    report = await run_probe(platform, clock, broken=frozenset({"inbound"}))
-    assert report.network.inbound_isolation.ok is False
-    assert report.network.inbound_isolation.source == "declared"
-    assert "inbound_isolation" in report.security_gaps()
-
-
-@pytest.mark.asyncio
-async def test_inbound_falls_back_to_declared_without_platform_cidrs(
-    platform: FakePlatform, clock: ManualClock
-) -> None:
-    # Cannot build an external instance with open egress (external=any needs platform_cidrs): skip, use the declared
-    # value, create no instance.
-    from flotilla.core.anchor import Anchor, AnchorSettings
-    from flotilla.platform.base import ErrorCategory, FlotillaError
-    from flotilla.probe import _Run
-
-    anchor = Anchor(platform, clock, "Lp", AnchorSettings(image="anchor@sha256:abc"))
-    await clock.run(anchor.start())
-    run = _Run(platform, clock, anchor, SETTINGS, run_id="pX")
+async def test_command_failure_is_error_not_failed(platform: FakePlatform, clock: ManualClock) -> None:
     platform.inject_fault(
-        "create",
-        FlotillaError("any requires platform_cidrs", stage="create", category=ErrorCategory.INVALID, retryable=False),
+        "start_process", FlotillaError("secret-token", stage="run", category=ErrorCategory.TRANSIENT, retryable=True)
     )
-    declared = DECLARED.inbound_isolation
-    result = await clock.run(run.inbound(declared))
-    assert result == declared
-    assert [i for i in platform.iids() if PROBE_LABEL in platform.spec_of(i).labels] == []
+    value = await run_probe(platform, clock)
+    assert value.exec.background.status == "error"
+    assert "secret-token" not in value.dump_json()
+    assert not platform.iids()
+
+
+@pytest.mark.asyncio
+async def test_cpu_unreadable_is_not_unlimited(platform: FakePlatform, clock: ManualClock) -> None:
+    anchor = Anchor(platform, clock, "Lp", AnchorSettings(image="anchor"))
+    await clock.run(anchor.start())
+    run = _Run(platform, clock, anchor, SETTINGS, "p1")
+    platform.set_exec_handler(lambda *_: ExecResult(0, b"", b""))
+    unit = await clock.run(run._create(run._spec("unit")))
+    _, cpu, _ = await clock.run(run.resources(unit))
+    assert cpu.status == "error"
+    await clock.run(run.cleanup())
     await anchor.close()
 
 
 @pytest.mark.asyncio
-async def test_wrong_background_exit_code_is_unsatisfied(platform: FakePlatform, clock: ManualClock) -> None:
-    report = await run_probe(platform, clock, exit_code=0)
-    assert not report.exec.background.ok and "(expected 7)" in report.exec.background.evidence
+async def test_external_positive_control_failure_is_error(
+    platform: FakePlatform, clock: ManualClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from flotilla import probe_network
 
-
-@pytest.mark.asyncio
-async def test_hosts_rewritten_by_platform_is_unsatisfied(platform: FakePlatform, clock: ManualClock) -> None:
-    real_read = platform.read_file
-    reads = 0
-
-    async def flaky_read(handle: InstanceHandle, path: str) -> bytes:
-        nonlocal reads
-        data = await real_read(handle, path)
-        if path == "/etc/hosts":
-            reads += 1
-            if reads == 3:  # by the third read (after a delay) the platform has reverted it
-                return b"127.0.0.1 localhost\n"
-        return data
-
-    platform.read_file = flaky_read  # type: ignore[method-assign]
-    report = await run_probe(platform, clock)
-    assert not report.exec.files.ok and ", rewritten after" in report.exec.files.evidence
-
-
-@pytest.mark.asyncio
-async def test_platform_error_aborts_probe_and_still_cleans_up(platform: FakePlatform, clock: ManualClock) -> None:
-    # "The test did not run" must not become "capability unsatisfied": on error the whole probe raises and created
-    # instances are still deleted. The fault targets start_process, since the anchor's own background renewal also
-    # calls renew and would consume a fault on renew first.
-    error = FlotillaError("503", stage="run", category=ErrorCategory.TRANSIENT, retryable=True)
-    platform.inject_fault("start_process", error)
-    with pytest.raises(FlotillaError):
-        await run_probe(platform, clock)
-    assert [i for i in platform.iids() if PROBE_LABEL in platform.spec_of(i).labels] == []
-
-
-@pytest.mark.asyncio
-async def test_tag_image_does_not_verify_digest_pull(platform: FakePlatform, clock: ManualClock) -> None:
-    # The image capability requires pulling by digest: a successful create from a tag-referenced image does not count.
-    tagged = ProbeSettings(image="reg/unit:latest", share_release="r1", endpoint="http://os.test", hosts_recheck_s=5.0)
-    tree = SharedTree(platform)
-    anchor = Anchor(platform, clock, "Lt", AnchorSettings(image="anchor@sha256:abc"))
+    anchor = Anchor(platform, clock, "Lp", AnchorSettings(image="anchor"))
     await clock.run(anchor.start())
-    await anchor.mkdir("launches/Lt", stage="prepare")
-    ProbeShell(platform, tree, anchor)
-    platform.initial_files["/etc/hosts"] = b"127.0.0.1 localhost\n"
-    finisher = asyncio.ensure_future(_finish_background(platform, clock, 7))
-    try:
-        report = await clock.run(probe(platform, clock, anchor, DECLARED, tagged))
-    finally:
-        finisher.cancel()
-        await asyncio.wait({finisher})
-        await anchor.close()
-    assert report.exec.placeholder_entry.ok and not report.runtime.image_digest.ok
-    assert "digest pull not verified" in report.runtime.image_digest.evidence
+    settings = replace(SETTINGS, external_targets=(("192.0.2.1", 1234, "tcp"),))
+    run = _Run(platform, clock, anchor, settings, "p1")
+
+    async def unavailable(*args: object) -> str:
+        return "blocked"
+
+    monkeypatch.setattr(probe_network, "exchange", unavailable)
+    none, allow = await clock.run(probe_network.egress(run))
+    assert none.status == allow.status == "error"
+    await clock.run(run.cleanup())
+    await anchor.close()
 
 
 @pytest.mark.asyncio
-async def test_missing_network_tool_aborts_instead_of_reporting_unreachable(
-    platform: FakePlatform, clock: ManualClock
+async def test_cleanup_on_cancellation(
+    platform: FakePlatform, clock: ManualClock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # With the tool missing, "unreachable" must not count as "none policy in effect": the test itself failed.
-    with pytest.raises(FlotillaError, match="nc -z"):
-        await run_probe(platform, clock, broken=frozenset({"notool"}))
-    assert [i for i in platform.iids() if PROBE_LABEL in platform.spec_of(i).labels] == []
+    from flotilla import probe_checks
+
+    anchor = Anchor(platform, clock, "Lp", AnchorSettings(image="anchor"))
+    await clock.run(anchor.start())
+
+    async def cancelled(run: _Run, _results: dict[str, Any]) -> None:
+        await run._create(run._spec("pending"))
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(probe_checks, "measure", cancelled)
+    with pytest.raises(asyncio.CancelledError):
+        await clock.run(probe(platform, clock, anchor, SETTINGS))
+    assert [iid for iid in platform.iids() if PROBE_LABEL in platform.spec_of(iid).labels] == []
+    await anchor.close()
 
 
 @pytest.mark.asyncio
-async def test_label_list_beyond_declared_limit_is_unsatisfied(platform: FakePlatform, clock: ManualClock) -> None:
-    platform.set_latency("list", 45.0)  # every listing is slower than the declared 30s limit
-    report = await run_probe(platform, clock)
-    assert not report.lifecycle.label_list.ok
+async def test_cleanup_reports_unconfirmed_instances(
+    platform: FakePlatform, clock: ManualClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from flotilla import probe_checks
+
+    anchor = Anchor(platform, clock, "Lp", AnchorSettings(image="anchor"))
+    await clock.run(anchor.start())
+    real_delete = platform.delete
+
+    async def create(run: _Run, _results: dict[str, Any]) -> None:
+        await run._create(run._spec("leak"))
+
+        async def fail_delete(iid: str) -> None:
+            raise RuntimeError("private response")
+
+        monkeypatch.setattr(platform, "delete", fail_delete)
+
+    monkeypatch.setattr(probe_checks, "measure", create)
+    value = await clock.run(probe(platform, clock, anchor, SETTINGS))
+    assert value.cleanup.status == "error"
+    assert value.cleanup.measurements["unconfirmed_instances"]
+    assert "private response" not in value.dump_json()
+    monkeypatch.setattr(platform, "delete", real_delete)
+    await anchor.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ttl_error", [0, -120, 120])
+async def test_ttl_accounts_for_create_latency_but_rejects_wrong_duration(
+    platform: FakePlatform, clock: ManualClock, monkeypatch: pytest.MonkeyPatch, ttl_error: int
+) -> None:
+    anchor = Anchor(platform, clock, "Lp", AnchorSettings(image="anchor"))
+    await clock.run(anchor.start())
+    run = _Run(platform, clock, anchor, SETTINGS, "p1")
+    create = platform.create
+
+    async def delayed(spec: InstanceSpec) -> InstanceHandle:
+        await clock.sleep(20)
+        handle = await create(replace(spec, timeout_seconds=spec.timeout_seconds + ttl_error))
+        await clock.sleep(20)
+        return handle
+
+    monkeypatch.setattr(platform, "create", delayed)
+    result = await clock.run(run.lifecycle(60, 1800))
+    assert result["ttl"].ok is (ttl_error == 0)
+    assert "create request interval" in result["ttl"].evidence
+    await clock.run(run.cleanup())
+    await anchor.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ttl_error,renew_error", [(0, 0), (-120, 0), (120, 0), (0, 120)])
+async def test_ttl_bounds_startup_origin_and_requires_explicit_renewal(
+    platform: FakePlatform,
+    clock: ManualClock,
+    monkeypatch: pytest.MonkeyPatch,
+    ttl_error: int,
+    renew_error: int,
+) -> None:
+    anchor = Anchor(platform, clock, "Lp", AnchorSettings(image="anchor"))
+    await clock.run(anchor.start())
+    run = _Run(platform, clock, anchor, SETTINGS, "p1")
+    wait_running = run._wait_running
+    renew = platform.renew
+
+    async def delayed_running(handle: InstanceHandle) -> None:
+        # Platform assigns the initial deadline during startup, after create has returned.
+        await clock.sleep(30)
+        await renew(handle.iid, clock.now() + timedelta(seconds=1800 + ttl_error))
+        await wait_running(handle)
+
+    async def wrong_renewal(iid: str, expires_at: datetime) -> None:
+        await renew(iid, expires_at + timedelta(seconds=renew_error))
+
+    monkeypatch.setattr(run, "_wait_running", delayed_running)
+    monkeypatch.setattr(platform, "renew", wrong_renewal)
+    result = await clock.run(run.lifecycle(60, 1800))
+    assert result["ttl"].ok is (ttl_error == 0 and renew_error == 0)
+    evidence = result["ttl"].measurements
+    assert evidence["running_observed_at"] > evidence["create_returned_at"]
+    assert evidence["natural_expiration_measured"] is False
+    assert evidence["renew_target"]
+    await clock.run(run.cleanup())
+    await anchor.close()
 
 
 @pytest.mark.parametrize(
-    "change",
+    "entry,ok",
     [
-        {"external_forms": frozenset({"allowlist"})},  # probe always tests none
-        {"list_visibility_s": 0},
-        {"link_max_members": 0},
-        {"exec_auth": Item(ok=True, source="probed")},  # items in the declaration file can only be declared
+        ("srv:/export/p1/visible|/", True),
+        ("/dev/sda1|/data/p1/visible", True),
+        ("srv:/export|/", False),
+        ("srv:/export/p1/visible-other|/", False),
     ],
 )
-def test_declared_file_validated_before_probing(change: dict[str, object]) -> None:
-    with pytest.raises(ValidationError):
-        Declared.model_validate({**DECLARED.model_dump(), **change})
-
-
-@pytest.mark.parametrize(
-    ("entry", "ok"),
-    [
-        ("srv:/export/launches/L/p1/visible|/", True),  # NFS: subpath in the mount source
-        ("/dev/sda1|/data/launches/L/p1/visible", True),  # bind / K8s subPath: subpath in the mount root
-        ("srv:/export/launches/L|/p1/visible", True),
-        ("srv:/export|/", False),  # mounted the shared root itself
-        ("srv:/export/launches/L/p1/visible-other|/", False),
-        ("|", False),
-    ],
-)
-def test_mounted_subdir_reads_source_and_root(entry: str, ok: bool) -> None:
+def test_mount_subdir(entry: str, ok: bool) -> None:
     assert _mounted_subdir(entry, "p1/visible") is ok
-
-
-@pytest.mark.parametrize(
-    ("broken", "ok", "ratio"),
-    [
-        ("cpu-double", True, 2.0),  # limit is 2x the given value: satisfied (not lower), ratio recorded as-is
-        ("cpu-max", True, None),  # unlimited
-        ("cpu-low", False, 0.5),  # below the given value: unsatisfied
-    ],
-)
-@pytest.mark.asyncio
-async def test_cpu_limit_at_least_requested_and_ratio_recorded(
-    platform: FakePlatform, clock: ManualClock, broken: str, ok: bool, ratio: float | None
-) -> None:
-    report = await run_probe(platform, clock, broken=frozenset({broken}))
-    assert report.runtime.cpu_limit.ok is ok and report.runtime.cpu_limit_ratio == ratio
-    assert report.missing_required() == []  # CPU is a degraded item and does not affect "usable"

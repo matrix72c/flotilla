@@ -21,7 +21,9 @@ from flotilla.core.deletion import Deleter
 from flotilla.platform.base import FlotillaError
 from flotilla.platform.clock import SystemClock
 from flotilla.platform.opensandbox import build
-from flotilla.prepare import prepare
+
+# Legacy filesystem contract uses low-level publication, not the Harbor runtime API.
+from flotilla.prepare.runner import prepare
 
 CASES = {
     "readonly": (True, False, 0),

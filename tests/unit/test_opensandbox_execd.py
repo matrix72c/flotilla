@@ -9,6 +9,7 @@ docs/backends/opensandbox.md.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import shlex
@@ -395,10 +396,10 @@ async def test_write_file_not_retried(clock: ManualClock) -> None:
 async def test_read_file_returns_bytes(clock: ManualClock) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/files/download"
-        assert request.url.params["path"] == "/etc/hosts"
+        assert request.url.params["path"] == "/tmp/ordinary"
         return httpx.Response(200, content=b"127.0.0.1 localhost\n")
 
-    data = await clock.run(_execd(handler, clock).read_file("/etc/hosts"))
+    data = await clock.run(_execd(handler, clock).read_file("/tmp/ordinary"))
     assert data == b"127.0.0.1 localhost\n"
 
 
@@ -410,6 +411,64 @@ async def test_read_file_404_is_not_found(clock: ManualClock) -> None:
     with pytest.raises(FlotillaError) as exc:
         await clock.run(_execd(handler, clock).read_file("/missing"))
     assert exc.value.category is ErrorCategory.NOT_FOUND
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/etc/hosts", "/etc/resolv.conf"])
+@pytest.mark.parametrize("payload", [b"", b"no newline", b"CR\r\nLF\n", bytes(range(256))])
+@pytest.mark.parametrize("settings", [CURRENT, LEGACY])
+async def test_system_file_encoded_exec_is_byte_exact(
+    clock: ManualClock, path: str, payload: bytes, settings: ExecdSettings
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/command"
+        body = json.loads(request.content)
+        command = body["argv"] if settings.protocol == "current" else body["command"]
+        assert "base64" in command and path in command
+        encoded = base64.b64encode(payload).decode()
+        events = [json.dumps({"type": "stdout", "text": encoded[i : i + 64]}) for i in range(0, len(encoded), 64)]
+        return httpx.Response(200, text=_sse(*events, '{"type":"execution_complete"}'))
+
+    assert await clock.run(_execd(handler, clock, settings).read_file(path)) == payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("encoded", ["not-base64!", "YQ", "YQ==junk", "AAAA" * 349527])
+async def test_system_file_rejects_invalid_or_oversized_encoding(clock: ManualClock, encoded: str) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            text=_sse(json.dumps({"type": "stdout", "text": encoded}), '{"type":"execution_complete"}'),
+        )
+
+    with pytest.raises(FlotillaError):
+        await clock.run(_execd(handler, clock).read_file("/etc/hosts"))
+
+
+@pytest.mark.asyncio
+async def test_system_file_command_failure_is_not_empty_success(clock: ManualClock) -> None:
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return httpx.Response(200, text=_sse('{"type":"error","error":{"evalue":"1"}}'))
+
+    with pytest.raises(FlotillaError, match="cannot read system file"):
+        await clock.run(_execd(handler, clock).read_file("/etc/hosts"))
+    assert calls == ["/command"]
+
+
+@pytest.mark.asyncio
+async def test_system_file_auth_failure_never_falls_back(clock: ManualClock) -> None:
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return httpx.Response(401, json={"error": "Unauthorized"})
+
+    with pytest.raises(FlotillaError):
+        await clock.run(_execd(handler, clock).read_file("/etc/hosts"))
+    assert calls == ["/command"]
 
 
 # ───────────────────────────── legacy protocol ─────────────────────────────

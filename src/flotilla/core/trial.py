@@ -166,12 +166,19 @@ class Trial:
             key = f"{base}/{vol.key}"
             if vol.copy_from is not None:
                 assert self._plan.task_files is not None
-                await self._anchor.copy_tree(f"{self._plan.task_files}/{vol.copy_from}", key, stage="prepare")
+                await self._anchor.copy_tree(
+                    f"{self._plan.task_files}/{vol.copy_from}",
+                    key,
+                    stage="prepare",
+                    src_root=self._plan.task_files_root,
+                )
                 continue
             await self._anchor.mkdir(key, stage="prepare")
             if vol.seed is not None:
                 assert self._plan.task_files is not None
-                await self._anchor.unpack(f"{self._plan.task_files}/{vol.seed}", key, stage="prepare")
+                await self._anchor.unpack(
+                    f"{self._plan.task_files}/{vol.seed}", key, stage="prepare", src_root=self._plan.task_files_root
+                )
             elif vol.owner is not None:
                 await self._anchor.chown(key, *vol.owner, stage="prepare")
 

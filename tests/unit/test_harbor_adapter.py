@@ -21,7 +21,7 @@ from flotilla.core import labels
 from flotilla.integrations.harbor import FlotillaEnvironment
 from flotilla.integrations.harbor_source import task_environments
 from flotilla.platform.base import ExecResult, FlotillaError, ProcessSpec
-from flotilla.testing.build import prepared_task, write_prepared
+from flotilla.testing.build import prepared_task
 from flotilla.testing.platform import FakePlatform, SharedTree
 from flotilla.testing.reports import report
 from flotilla.testing.runtime import deployment as runtime_deployment
@@ -73,6 +73,23 @@ def source(tmp_path: Path, toml_text: str = '[environment]\ndocker_image="r.io/m
     return path
 
 
+def test_harbor_resolves_compose_once_per_role(tmp_path: Path) -> None:
+    from unittest.mock import Mock
+
+    from flotilla.compose.task import load_environment
+
+    path = source(tmp_path, '[environment]\ndocker_image="r.io/main:1"\n[verifier]\nenvironment_mode="separate"\n')
+    (path / "tests/docker-compose.yaml").write_text("services:\n  main:\n    image: r.io/verifier:1\n")
+    adapter = Mock()
+    adapter.load.return_value = load_environment(
+        path, path / "environment", {"docker_image": "r.io/main:1"}, name=path.name
+    ).project
+    definitions = task_environments(path, compose_adapter=adapter)
+    assert len(definitions) == adapter.load.call_count == 2
+    assert [call.args[0] for call in adapter.load.call_args_list] == [path / "environment", path / "tests"]
+    assert all(definition.name == path.name for definition in definitions)
+
+
 def adapter(
     tmp_path: Path,
     cfg: FlotillaConfig,
@@ -86,7 +103,7 @@ def adapter(
     config = tmp_path / "deployment.toml"
     config.write_text(toml.dumps(cfg.model_dump(exclude_none=True, exclude={"base_dir"})))
     path = source(tmp_path) if not (tmp_path / "dataset" / "task").exists() else tmp_path / "dataset" / "task"
-    rows = write_prepared(tmp_path / "prepared.jsonl", [prepared_task(path, cfg, environments=task_environments)])
+    compiled = prepared_task(path, cfg, environments=task_environments)
     return FlotillaEnvironment(
         environment_dir=path / environment,
         environment_name="task",
@@ -95,14 +112,16 @@ def adapter(
         task_env_config=EnvironmentConfig(docker_image="r.io/main:1"),
         network_policy=network_policy,
         deployment=str(config),
-        prepared=str(rows) if prepared else None,
+        prepared_environment=compiled.environment("main" if environment == "environment" else "verifier")
+        if prepared
+        else None,
         fleet=fleet,
         **kwargs,  # type: ignore[arg-type]
     )
 
 
 @pytest.mark.asyncio
-async def test_harbor_opens_the_prepared_role_of_its_environment_directory(
+async def test_harbor_opens_an_internal_transient_role(
     tmp_path: Path, deployment: tuple[FlotillaConfig, FakePlatform, SharedTree]
 ) -> None:
     cfg, _, _ = deployment
@@ -117,22 +136,26 @@ async def test_harbor_opens_the_prepared_role_of_its_environment_directory(
 
 
 @pytest.mark.asyncio
-async def test_harbor_requires_prepared_rows_and_rejects_force_build(
+async def test_harbor_requires_attempt_and_rejects_legacy_prepared_and_force_build(
     tmp_path: Path, deployment: tuple[FlotillaConfig, FakePlatform, SharedTree]
 ) -> None:
     cfg, platform, _ = deployment
     async with Flotilla(deployment=cfg) as fleet:
-        with pytest.raises(ValueError, match="prepared jsonl"):
+        with pytest.raises(ValueError, match="HarborAttempt"):
             await adapter(tmp_path, cfg, fleet, prepared=False).start()
         with pytest.raises(ValueError, match="force_build is unsupported"):
             await adapter(tmp_path, cfg, fleet).start(force_build=True)
-        other = tmp_path / "other"
-        (other / "environment").mkdir(parents=True)
-        (other / "task.toml").write_text('[environment]\ndocker_image="r.io/main:1"\n')
-        missing = adapter(tmp_path, cfg, fleet)
-        missing._task_root, missing._directory = other.resolve(), (other / "environment").resolve()
-        with pytest.raises(ValueError, match="has no row"):
-            await missing.start()
+        with pytest.raises(ValueError, match="legacy prepared JSONL"):
+            FlotillaEnvironment(
+                environment_dir=tmp_path / "remote-only",
+                environment_name="task",
+                session_id="legacy",
+                trial_paths=TrialPaths(tmp_path / "legacy"),
+                task_env_config=EnvironmentConfig(),
+                deployment=str(tmp_path / "deployment.toml"),
+                fleet=fleet,
+                prepared="obsolete.jsonl",
+            )
     assert not await platform.list({labels.ROLE: labels.ROLE_UNIT})
 
 
@@ -184,7 +207,11 @@ async def test_harbor_no_network_overrides_deployment_egress_with_dns_exception(
 ) -> None:
     cfg, platform, _ = deployment
     cfg = cfg.model_copy(update={"network": cfg.network.model_copy(update={"external": "any"})})
-    data = cfg.load_report().model_dump(mode="json", by_alias=True)
+    data = (
+        cfg.load_report()
+        .model_copy(update={"evidence_profile": cfg.evidence_profile()})
+        .model_dump(mode="json", by_alias=True)
+    )
     data["network"]["cluster_dns"] = ["10.96.0.10"]
     data["network"]["implicit_egress"] = ["10.96.0.10:53/udp,tcp"]
     cfg.capabilities_path().write_text(json.dumps(data))

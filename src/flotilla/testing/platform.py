@@ -602,7 +602,9 @@ class SharedTree:
     ordering checks. Paths are relative to the shared root.
     """
 
-    def __init__(self, platform: FakePlatform, *, mount: str = "/flotilla-root") -> None:
+    def __init__(
+        self, platform: FakePlatform, *, mount: str = "/flotilla-root", inputs_mount: str = "/flotilla-inputs"
+    ) -> None:
         self.dirs: set[str] = set()
         self.files: set[str] = set()  # regular files (e.g. published seed tars)
         self.owners: dict[str, str] = {}  # path -> "uid:gid"
@@ -610,11 +612,23 @@ class SharedTree:
         self.links: dict[str, str] = {}  # symlink -> target (verbatim)
         self.events: list[str] = []
         self.mount = mount.rstrip("/") + "/"
+        # Paths under `<inputs_mount>/<name>` map to `@<name>/<key>` (see `input_key`); any write there fails the
+        # test, as the anchor mounts input roots read-only.
+        self.inputs_mount = inputs_mount.rstrip("/") + "/"
         self._platform = platform
         platform.set_exec_handler(self._exec)
         platform.shared_tree = self  # route write_file / read_file to this tree
 
-    def _rel(self, path: str) -> str:
+    @staticmethod
+    def input_key(root: str, key: str = "") -> str:
+        """Tree path of `key` on the named input root."""
+        return f"@{root}/{key}" if key else f"@{root}"
+
+    def _rel(self, path: str, *, write: bool = False) -> str:
+        if path.startswith(self.inputs_mount):
+            assert not write, f"write to a read-only input root: {path}"
+            root, _, key = path[len(self.inputs_mount) :].partition("/")
+            return self.input_key(root, key)
         if path == self.mount.rstrip("/"):
             return ""
         assert path.startswith(self.mount), path
@@ -622,9 +636,11 @@ class SharedTree:
 
     def _exec(self, iid: str, proc: ProcessSpec) -> ExecResult:
         op = proc.argv[0]
+        if proc.argv == ("true",):
+            return ExecResult(0, b"", b"")
         missing = ExecResult(exit_code=1, stdout=b"", stderr=b"No such file or directory")
         if op == "tar":  # tar -xpf <tar> --numeric-owner -C <dest>
-            tar, dest = self._rel(proc.argv[2]), self._rel(proc.argv[-1])
+            tar, dest = self._rel(proc.argv[2]), self._rel(proc.argv[-1], write=True)
             if dest not in self.dirs or tar not in self.files:
                 return missing
             data = self._platform.tree_contents[tar]
@@ -646,7 +662,9 @@ class SharedTree:
             self.events.append(f"unpack {tar} {dest}")
             return ExecResult(exit_code=0, stdout=b"", stderr=b"")
         if op == "cp":  # cp -a -- <src> <dest>: like real cp, no intermediate dirs; copies into an existing dest
-            src, dest = self._rel(proc.argv[-2]), self._rel(proc.argv[-1])
+            src, dest = self._rel(proc.argv[-2].removesuffix("/.")), self._rel(proc.argv[-1], write=True)
+            if proc.argv[-2].endswith("/."):
+                src = src + "/."
             parent = dest.rsplit("/", 1)[0] if "/" in dest else ""
             if (src not in self.dirs and src not in self.files) or (parent and parent not in self.dirs):
                 return missing
@@ -669,7 +687,7 @@ class SharedTree:
             self.events.append(f"cp {src} {dest}")
             return ExecResult(exit_code=0, stdout=b"", stderr=b"")
         if op == "mv":  # mv -Tn -- <src> <dest>
-            src, dest = self._rel(proc.argv[-2]), self._rel(proc.argv[-1])
+            src, dest = self._rel(proc.argv[-2], write=True), self._rel(proc.argv[-1], write=True)
             if src not in self.dirs and src not in self.files:
                 return missing
             if dest in self.dirs or dest in self.files:
@@ -692,7 +710,7 @@ class SharedTree:
             return ExecResult(0, f"{mode} {uid} {gid} {size}\n".encode(), b"")
         if op not in {"chmod", "mkdir", "chown", "rm", "ls"}:
             raise AssertionError(f"unsupported SharedTree command: {proc.argv!r}")
-        path = self._rel(proc.argv[-1])
+        path = self._rel(proc.argv[-1], write=op != "ls")
         if op == "chmod":
             if path not in self.dirs and path not in self.files:
                 return missing

@@ -1,52 +1,75 @@
 # Harbor quick start
 
-[Harbor](https://github.com/harbor-framework/harbor) is a framework for evaluating agents on containerized tasks, such as Terminal-Bench. Flotilla provides a Harbor environment so that each trial runs on sandboxes instead of a local Docker host.
+Harbor is a **host-side import source** and an optional evaluation consumer. Flotilla's execution authority is a versioned [native task release](Native_Tasks.md), not an original Harbor directory or a platform task key. Attempts do not parse Compose, build/push images, or export image seeds.
 
-Install the adapter together with its pinned Harbor version:
-
-```sh
-python -m pip install '.[harbor]'
-```
-
-Complete the [deployment guide](Deployment.md) first. The machine that prepares tasks needs Docker/BuildKit and registry access; the machine running Harbor does not. The platform credential must be exported in the variable named by `opensandbox.credential_env`.
-
-Start with a task whose expected rewards are known. Harbor's built-in `oracle` agent runs the task's reference solution (it should pass) and `nop` does nothing (it should fail), so together they check the environment and verifier without involving a model:
+Install the controlled Flotilla wheel with its `harbor` extra, or use the full Git SHA in your delivery manifest:
 
 ```sh
-export FLOTILLA_DEPLOYMENT=/path/to/deployment.toml
-export HARBOR_TASK=/path/to/task
-export HARBOR_JOBS=/path/to/private/results
-flotilla prepare "$HARBOR_TASK" --deployment "$FLOTILLA_DEPLOYMENT" --out "$HARBOR_JOBS/prepared.jsonl"
-for agent in oracle nop; do
-  harbor run --path "$HARBOR_TASK" \
-    --env flotilla.integrations.harbor:FlotillaEnvironment \
-    --ek deployment="$FLOTILLA_DEPLOYMENT" \
-    --ek prepared="$HARBOR_JOBS/prepared.jsonl" \
-    --agent "$agent" --n-concurrent 1 --max-retries 0 \
-    --jobs-dir "$HARBOR_JOBS" --job-name "$agent-smoke"
-done
+python -m pip install 'flotilla[harbor] @ git+https://github.com/matrix72c/flotilla.git@bd28834c0685d9002ab85b1903d3c6f291d61d7b'
 ```
 
-Use fresh job names on subsequent runs. `flotilla prepare` resolves the main and separate verifier environments with Harbor's own inheritance and step rules and writes both into the task's row; the adapter opens the one for the environment directory Harbor gives it. A task without a row fails to start, so prepare a whole dataset directory before running it. `flotilla inspect` checks the task's main environment only.
+The extra pins [Harbor d78eb9c262e7074944106d16bff0ba6426bb2d34](https://github.com/matrix72c/harbor/commit/d78eb9c262e7074944106d16bff0ba6426bb2d34), which supplies `task_source`, trial `runtime`, and `Task.from_metadata`. Stock Harbor 0.24.0 lacks these extension interfaces. The public PyPI package named `flotilla` is unrelated; do not install it by bare name.
 
-## Supported behavior
+## Prepare once, publish static files
 
-- Shared verification uses the existing main environment. Separate verification receives its own selected source/configuration and lifecycle.
-- CPU and memory overrides are applied at runtime without mutating the caller's Harbor configuration. Storage/GPU/TPU overrides and additional Compose overlays are rejected.
-- A normally constructed adapter owns its fleet. An explicitly injected fleet is borrowed, but the adapter still releases the environment it opened. `FlotillaEnvironment.view(...)` borrows both an existing environment and its fleet; stopping the view does not delete them.
-- Agent/verifier users must exist in the image and have suitable permissions. The adapter prepares Harbor's log directories; it does not create task users or recursively change task ownership.
-- Main-service termination preserves a local log snapshot for Harbor's later collection while sidecars remain available. Failures to confirm service termination cannot be accepted as a normal verifier result.
-- `force_build` is rejected: images come from `flotilla prepare`. After changing a task, rerun it with `--force`.
+Use [Quick start](Quick_Start.md) to probe the deployment and run host-side `select` then `prepare`. The preparation environment needs the pinned official Compose CLI and configured image tooling. Registry credentials belong only there. Execution requires a compatible installed Anchor and shared tools, **not** Harbor/Compose/build tooling in the Anchor.
 
-## Running at scale
+The output is a portable directory containing `manifest.json`, `dataset.jsonl`, `tasks/`, and `assets/`. Publish the complete directory through your existing storage tools, preserving its metadata. Bind both its local readable copy and its platform copy:
 
-- Run the Harbor driver on a dedicated machine. One driver process holds an event loop and one stream per in-flight command; sharing it with other heavy workloads stalls the loop and surfaces as false environment-start timeouts across the whole job.
-- Prepare before loading: run `flotilla prepare` on the dataset once, then pass the same jsonl to every job. Trials build nothing and upload no task files.
-- Scale out, not up: raise total concurrency by sharding jobs across driver processes instead of one large `--n-concurrent`; each process keeps its own limits.
-- Judge by per-trial `result.json` and cleanup records (below), never by CLI exit codes or wall-clock impressions.
+```toml
+[task_releases.tb2]
+local_root = "/srv/eval/releases/tb2"
+platform_root = "pvc:YOUR-CLAIM/YOUR-ROOT/releases/tb2"
+```
+
+This example uses PVC storage; the claim and configured root subpath must match `[storage]`. For host-path storage, use its absolute host path (or a relative key under that configured root). A PVC binding must use the explicit `pvc:` form. Bindings do not upload or synchronize files. Keep the release immutable while jobs or restored trials reference it.
+
+## Native `harbor run`
+
+Save `/srv/eval/harbor-job.yaml`:
+
+```yaml
+job_name: flotilla-native-smoke
+n_concurrent_trials: 1
+agents:
+  - name: nop
+task_source:
+  import_path: flotilla.integrations.harbor_native:FlotillaTaskSource
+  kwargs:
+    dataset: /srv/eval/releases/tb2/dataset.jsonl
+    deployment: /srv/eval/deployment.toml
+    metadata_workers: 8
+runtime:
+  import_path: flotilla.integrations.harbor_native:NativeFlotillaRuntime
+  kwargs:
+    deployment: /srv/eval/deployment.toml
+environment:
+  import_path: flotilla.integrations.harbor_native:NativeFlotillaEnvironment
+  delete: true
+```
+
+```sh
+harbor run --config /srv/eval/harbor-job.yaml
+```
+
+`nop` is a lifecycle smoke agent, not a solver. Supply your intended Harbor agent and its credentials separately for evaluation. Do **not** set Harbor `tasks`/`datasets`, `verifier.import_path`, or `verifier.env`: the native dataset owns selection and the release owns verification. To filter or repeat tasks, write a selection JSONL retaining the complete original rows (`release_id`, `task_ref`, `task_digest`, annotations and parameters). Order and duplicate rows remain separate trials.
+
+Relative `task_source.kwargs.dataset` and `deployment` resolve against the config that defines them. Snapshots freeze absolute external paths. Remote configs require absolute input paths. A standalone restored Trial revalidates its selection rather than depending on the old Job's in-memory cache.
+
+The importer stores Harbor presentation metadata in `task.provenance.harbor.config`. The adapter reconstructs a metadata-backed Harbor Task from that field and the verified public instruction; it never scans original source tasks at evaluation time. Missing importer provenance, remote task downloads, multi-step and non-Linux tasks fail explicitly.
+
+## Execution and ownership
+
+- `task_source` owns local selection and metadata; `runtime` owns the Flotilla client, `NativeAttempt`, verification, artifacts and cleanup; `environment` is the Harbor I/O adapter. Configure all three together.
+- Each attempt has private mutable volumes and verification output. Immutable assets may be shared read-only after launch-local integrity verification.
+- Hidden tests are not exposed during the agent phase. A prepared task with an explicit separate verifier releases main before opening the verifier; artifact handoff remains platform-side. Without an explicit Harbor `[verifier.environment]`, preparation uses main for verification, even if an old source requested inherited `environment_mode="separate"`. Inspect the prepared roles rather than assuming that old hint created another sandbox.
+- Original application and healthcheck UID/GID remain authoritative after host-side USER0 adaptation. Flotilla does not recursively rewrite published asset ownership or create application users.
+- Task and job/trial result-artifact downloads use Harbor's ordinary trial output and manifest. Agent failures and disabled verification still collect available results before cleanup. They are distinct from release preparation and verifier handoff.
+- A test script's nonzero exit with a valid reward may be a graded failure. Missing/malformed/nonfinite rewards and transport/cleanup failures are infrastructure errors, not reward zero.
+- `environment.delete: false` and `force_build` are rejected. `runtime.kwargs.run_timeout` must be positive and within the deployment lifetime.
+
+For non-Harbor applications, use the public `ReleaseBindings` and `NativeAttempt` API in [Native tasks](Native_Tasks.md). There is no task-key or old prepared-row fallback. The old source-workspace compiler is a legacy API, not this execution path.
 
 ## Acceptance
 
-Inspect every trial's `result.json`: require no infrastructure exception and the task's expected verifier reward. A successful CLI exit alone does not establish success. Check agent/verifier logs, artifacts, resource overrides, and each `flotilla/<session>/environment.json` / `cleanup.json` record. Session records distinguish separate verifiers.
-
-When validating a new deployment or adapter change, repeat with shared and separate verifier configurations, a borrowed view, cancellation during start/exec/stop, and a deliberately failed cleanup. A failed cleanup must remain visible. Use an independent platform connection to confirm all owned instances and launch directories have disappeared.
+Check known positive/negative outcomes, same-role and explicit separate verification, nonempty handoff, original nonroot identities, hidden-test isolation, cancellation and failed cleanup. Require independent confirmation that platform resources were released. Simulated transport tests and successful CLI parsing are not real platform acceptance; see [Deployment](Deployment.md) for the evidence contract.

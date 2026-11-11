@@ -1,4 +1,4 @@
-"""`flotilla prepare`: rows, failure report, skip/force, publication, and resumption."""
+"""Legacy lower-level runner regression coverage; not the public prepare API."""
 
 from __future__ import annotations
 
@@ -15,8 +15,8 @@ from flotilla.build.driver import BuildContext, BuildOutcome, build_task
 from flotilla.compose.task import HarborTask, load_task
 from flotilla.config import FlotillaConfig
 from flotilla.core.anchor import Anchor, AnchorSettings
-from flotilla.prepare import PrepareReport, prepare, runner
-from flotilla.prepare.runner import failures_path
+from flotilla.prepare import runner
+from flotilla.prepare.runner import PrepareReport, failures_path, prepare
 from flotilla.prepared import PreparedEnvironment, load_prepared
 from flotilla.testing.build import FakeBuilder, FakeRegistry, _ctx, _task
 from flotilla.testing.config import config

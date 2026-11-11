@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import tarfile
 from dataclasses import replace
 from pathlib import Path
@@ -52,8 +53,8 @@ def test_export_copies_platform_mounted_binds(tmp_path: Path) -> None:
     assert (files / key / "f.txt").read_text() == "payload"
 
 
-def test_export_skips_binds_written_into_the_image(tmp_path: Path) -> None:
-    # Single writer, single reference -> written into the image (mode="image"), not into task files.
+def test_export_stages_single_writable_bind(tmp_path: Path) -> None:
+    # Even one writable reference needs a real mount, not an image COPY.
     task = load_task(
         _task(
             tmp_path,
@@ -66,7 +67,40 @@ def test_export_skips_binds_written_into_the_image(tmp_path: Path) -> None:
         )
     )
     files = tmp_path / "files"
-    assert export_task_files(task.project, task.env_dir, files).binds == {}
+    assert export_task_files(task.project, task.env_dir, files).binds == {0: "binds/0"}
+    assert (files / "binds/0/f.txt").read_text() == "x"
+
+
+def test_bind_export_preserves_same_tree_hardlinks(tmp_path: Path) -> None:
+    task = load_task(
+        _task(
+            tmp_path,
+            "hardlinks",
+            compose="services:\n  main:\n    image: r.io/a:1\n    volumes: ['./data:/data']\n",
+            data__first="payload",
+        )
+    )
+    os.link(task.env_dir / "data/first", task.env_dir / "data/second")
+    files = tmp_path / "files"
+    export_task_files(task.project, task.env_dir, files)
+    assert (files / "binds/0/first").stat().st_ino == (files / "binds/0/second").stat().st_ino
+    (files / "binds/0/first").write_text("changed")
+    assert (files / "binds/0/second").read_text() == "changed"
+    assert (task.env_dir / "data/first").read_text() == "payload"
+
+
+def test_bind_export_rejects_cross_root_hardlinks(tmp_path: Path) -> None:
+    task = load_task(
+        _task(
+            tmp_path,
+            "hardlinks",
+            compose="services:\n  main:\n    image: r.io/a:1\n    volumes: ['./first:/a', './second:/b']\n",
+            first="payload",
+        )
+    )
+    os.link(task.env_dir / "first", task.env_dir / "second")
+    with pytest.raises(ExportError, match="independent bind"):
+        export_task_files(task.project, task.env_dir, tmp_path / "files")
 
 
 def test_export_writes_seed_tar_for_shared_volume(tmp_path: Path) -> None:
@@ -79,7 +113,7 @@ def test_export_writes_seed_tar_for_shared_volume(tmp_path: Path) -> None:
                 "  main:\n    image: r.io/a:1\n"
                 "    volumes:\n      - {type: volume, source: data, target: /var/lib/data}\n"
                 "  app:\n    image: r.io/b:1\n"
-                "    volumes:\n      - {type: volume, source: data, target: /mnt/data}\n"
+                "    volumes:\n      - {type: volume, source: data, target: /mnt/data, volume: {nocopy: true}}\n"
                 "volumes:\n  data: {}\n"
             ),
         )
@@ -95,6 +129,63 @@ def test_export_writes_seed_tar_for_shared_volume(tmp_path: Path) -> None:
     assert not any(files.glob(".seed-*"))  # staging directory cleaned up
 
 
+def test_seed_bytes_ignore_extraction_times_preserving_identity_and_links(tmp_path: Path) -> None:
+    task = load_task(
+        _task(
+            tmp_path,
+            "stable-seed",
+            compose="services:\n  main:\n    image: r.io/a:1\n    volumes: ['data:/data']\nvolumes:\n  data: {}\n",
+        )
+    )
+
+    class TimedExport:
+        def __init__(self, timestamp: float) -> None:
+            self.timestamp = timestamp
+
+        def extract(
+            self, image: str, path: str, dest: Path, *, identities: dict[str, tuple[int, int, int]] | None = None
+        ) -> bool:
+            directory = dest / "nested"
+            directory.mkdir()
+            (directory / "first").write_bytes(b"from-image")
+            os.link(directory / "first", directory / "second")
+            (directory / "link").symlink_to("first")
+            metadata = {".": (101, 202, 0o750), "nested": (101, 202, 0o700)}
+            metadata.update({f"nested/{name}": (103, 204, 0o640) for name in ("first", "second")})
+            metadata["nested/link"] = (103, 204, 0o777)
+            assert identities is not None
+            identities.update(metadata)
+            for entry in [dest, *dest.rglob("*")]:
+                os.utime(entry, (self.timestamp, self.timestamp), follow_symlinks=False)
+            return True
+
+    archives = []
+    for index, timestamp in enumerate((1234567890.123, 1794309451.485)):
+        files = tmp_path / str(index) / "files"
+        exported = export_task_files(
+            task.project,
+            task.env_dir,
+            files,
+            images={"main": "r.io/a@" + DIGEST},
+            image_export=TimedExport(timestamp),
+        )
+        archives.append((files / exported.seeds["data"]).read_bytes())
+    assert archives[0] == archives[1]
+    with tarfile.open(fileobj=io.BytesIO(archives[0])) as tar:
+        assert all(member.mtime == 0 and not member.pax_headers for member in tar.getmembers())
+        assert all(member.uname == member.gname == "" for member in tar.getmembers())
+        assert (tar.getmember(".").uid, tar.getmember(".").gid, tar.getmember(".").mode) == (101, 202, 0o750)
+        assert tar.getmember("nested").mode == 0o700
+        first = tar.getmember("nested/first")
+        assert (first.uid, first.gid, first.mode) == (103, 204, 0o640)
+        stream = tar.extractfile(first)
+        assert stream is not None and stream.read() == b"from-image"
+        assert tar.getmember("nested/second").islnk()
+        assert tar.getmember("nested/second").linkname == "nested/first"
+        assert tar.getmember("nested/link").issym()
+        assert tar.getmember("nested/link").linkname == "first"
+
+
 def test_export_no_seed_when_image_path_is_absent(tmp_path: Path) -> None:
     task = load_task(
         _task(
@@ -105,7 +196,7 @@ def test_export_no_seed_when_image_path_is_absent(tmp_path: Path) -> None:
                 "  main:\n    image: r.io/a:1\n"
                 "    volumes:\n      - {type: volume, source: data, target: /data}\n"
                 "  app:\n    image: r.io/b:1\n"
-                "    volumes:\n      - {type: volume, source: data, target: /data2}\n"
+                "    volumes:\n      - {type: volume, source: data, target: /data2, volume: {nocopy: true}}\n"
                 "volumes:\n  data: {}\n"
             ),
         )
@@ -144,9 +235,7 @@ def test_volume_seed_ignores_nocopy_references(tmp_path: Path, read_only: bool, 
         images=None if all_nocopy else {"main": "a", "app": "b"},
         image_export=None if all_nocopy else FakeExport({"/skip": {"wrong": "skip"}, "/seed": {"right": "seed"}}),
     )
-    if read_only:
-        contents = sorted(p.name for p in (files / exported.readonly_volumes["data"]).iterdir())
-    elif all_nocopy:
+    if all_nocopy:
         assert exported.seeds == {}
         return
     else:
@@ -166,8 +255,10 @@ def test_writable_root_bind_derives_from_environment_directory(tmp_path: Path) -
     builder = FakeBuilder()
     outcome = build_task(task, tmp_path / "out", _ctx(builder=builder))
     assert outcome.status == "built", outcome.reason
-    assert builder.requests[0].context == task.env_dir
-    assert 'COPY [".", "/workspace"]' in str(builder.requests[0].dockerfile_text)
+    assert builder.requests == []
+    manifest = _manifest(outcome)
+    assert manifest.units["main"].mounts[0].target == "/workspace"
+    assert manifest.trial_volumes[0].copy_from == "binds/0"
 
 
 def test_export_requires_exporter_for_seeds(tmp_path: Path) -> None:
@@ -180,7 +271,7 @@ def test_export_requires_exporter_for_seeds(tmp_path: Path) -> None:
                 "  main:\n    image: r.io/a:1\n"
                 "    volumes:\n      - {type: volume, source: data, target: /data}\n"
                 "  app:\n    image: r.io/b:1\n"
-                "    volumes:\n      - {type: volume, source: data, target: /data2}\n"
+                "    volumes:\n      - {type: volume, source: data, target: /data2, volume: {nocopy: true}}\n"
                 "volumes:\n  data: {}\n"
             ),
         )
@@ -298,7 +389,7 @@ def _shared_volume_task(root: Path, name: str) -> Path:
             "  main:\n    image: r.io/a:1\n"
             "    volumes:\n      - {type: volume, source: data, target: /data}\n"
             "  app:\n    image: r.io/b:1\n"
-            "    volumes:\n      - {type: volume, source: data, target: /data2}\n"
+            "    volumes:\n      - {type: volume, source: data, target: /data2, volume: {nocopy: true}}\n"
             "volumes:\n  data: {}\n"
         ),
     )
@@ -466,7 +557,8 @@ def test_effective_build_configuration_applies_to_next_open(tmp_path: Path, chan
 
 @pytest.mark.parametrize("source", ["build", "image", "prebuilt"])
 @pytest.mark.parametrize("mount", ["bind", "nocopy"])
-def test_all_image_sources_apply_compose_derivation(tmp_path: Path, source: str, mount: str) -> None:
+def test_all_image_sources_adapt_user0_and_keep_real_mounts(tmp_path: Path, source: str, mount: str) -> None:
+    """Mounts never derive images; the only builds are the app Dockerfile and USER0 adaptation."""
     origin = "image: r.io/base:1" if source == "image" else "build: {context: .}"
     volume = (
         "{type: bind, source: ./payload, target: /data}"
@@ -475,7 +567,7 @@ def test_all_image_sources_apply_compose_derivation(tmp_path: Path, source: str,
     )
     path = _task(
         tmp_path,
-        "derive",
+        "adapt",
         compose=f"services:\n  main:\n    {origin}\n    volumes:\n      - {volume}\nvolumes:\n  cache: {{}}\n",
         Dockerfile="FROM r.io/base:1\n",
         payload__value="payload",
@@ -484,28 +576,28 @@ def test_all_image_sources_apply_compose_derivation(tmp_path: Path, source: str,
         # Harbor's main_build override replaces main's image when a Dockerfile exists.
         (path / "environment/Dockerfile").unlink()
     runtime_digest = "sha256:" + "ef" * 32
-    builder = FakeBuilder(digests=[DIGEST, DIGEST2, runtime_digest] if source == "build" else [DIGEST2, runtime_digest])
-    ctx = _ctx(builder=builder, registry=FakeRegistry(user="1000:1001"))
+    builder = FakeBuilder(digests=[DIGEST, runtime_digest] if source == "build" else [runtime_digest])
+    ctx = _ctx(builder=builder, registry=FakeRegistry(user="1000:1001", published=builder.published))
     if source == "prebuilt":
         (path / "task.toml").write_text('[environment]\ndocker_image="r.io/base:1"\n')
     outcome = build_task(load_task(path), tmp_path / "out", ctx)
     manifest = _manifest(outcome)
-    assert len(builder.requests) == (3 if source == "build" else 2)
-    last = builder.requests[-2]
-    text = last.dockerfile_text
+    assert len(builder.requests) == (2 if source == "build" else 1)
+    text = builder.requests[-1].dockerfile_text
     assert text is not None and f"@{DIGEST}" in text.splitlines()[0]
-    assert text.splitlines()[1] == "USER 0:0" and text.splitlines()[-1] == "USER 1000:1001"
-    if mount == "bind":
-        assert 'COPY ["payload", "/data"]' in text
-    else:
-        assert "rm -rf /data/*" in text
+    assert "COPY " not in text and "rm -rf" not in text
     assert manifest.units["main"].image == f"r.io/ns/out@{runtime_digest}"
-    assert builder.requests[-1].dockerfile_text == f"FROM r.io/ns/out@{DIGEST2}\nUSER 0:0\n"
-    assert manifest.units["main"].mounts == []
-    assert not outcome.needs_publish
+    assert len(manifest.units["main"].mounts) == 1
+    assert manifest.units["main"].mounts[0].scope == "trial"
+    assert outcome.needs_publish == (mount == "bind")
     assert manifest.units["main"].context.uid == 1000
-    assert manifest.units["main"].command == ["sh", "-c", "sleep infinity"]  # keep Harbor's agent command override
+    assert manifest.units["main"].command == ["sh", "-c", "sleep infinity"]
     assert "CMD " not in text and "ENTRYPOINT " not in text
+    # The app build (source=build) publishes to the target repo; the USER0 layer is
+    # derived from that published digest, not from the unpinned source tag.
+    if source == "build":
+        assert builder.requests[0].dockerfile == "Dockerfile"
+        assert text is not None and text.splitlines()[0] == f"FROM r.io/ns/out@{DIGEST}"
 
 
 @pytest.mark.parametrize("mirror", [False, True])

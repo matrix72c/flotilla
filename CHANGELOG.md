@@ -34,6 +34,8 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Fixed
 
+- Recover transient or unknown transport responses for read-only anchor `stat` within five attempts and a 30-second retry-admission window. Preserve metadata results during recovery without replaying their helper, writes or workloads; retain existing bounded HTTP download retries without adding an outer retry layer.
+- Recover bounded native Harbor metadata reads after `ESTALE`, using fresh parsing and a shared request wait budget without replaying copies, Compose/build commands or workloads. Surface tree-enumeration errors instead of silently validating incomplete trees; preserve all-or-nothing metadata publication and original failures on exhaustion.
 - Healthchecks propagate non-retryable execution errors, including unknown outcomes, instead of running another check and potentially declaring the environment healthy. Public foreground/background calls preserve environments after an explicit `CommandBusy` rejection.
 - Services with both `service_healthy` and `service_completed_successfully` dependents now drive both conditions independently.
 - Shared named-volume seeds retain root-directory ownership and permissions, including for empty image directories. Nested runtime defaults and alternatives retain referenced `.env` values. Reprepare affected tasks to regenerate their files and expressions.

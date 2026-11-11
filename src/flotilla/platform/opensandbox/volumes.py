@@ -30,24 +30,51 @@ def check_claim_name(claim_name: str) -> None:
         raise ValueError(f"storage.claim_name must be a DNS label (lowercase letters, digits, and -): {claim_name!r}")
 
 
-def compile_host_volumes(volumes: Sequence[SharedVolume], host_path: str) -> list[dict[str, Any]]:
-    if not posixpath.isabs(host_path):
-        raise ValueError(f"storage.host_path must be absolute: {host_path!r}")
-    return [_entry(i, vol, {"host": {"path": host_path}}, vol.key) for i, vol in enumerate(volumes)]
+def check_host_path(host_path: str) -> None:
+    """The host root is opaque: an absolute path or a platform-defined identifier, passed through verbatim."""
+    if not host_path or host_path != host_path.strip() or any(ord(c) < 32 or ord(c) == 127 for c in host_path):
+        raise ValueError(
+            f"storage.host_path must be a non-empty path or platform identifier without whitespace: {host_path!r}"
+        )
 
 
-def compile_pvc_volumes(volumes: Sequence[SharedVolume], claim_name: str, root_subpath: str) -> list[dict[str, Any]]:
-    """`createIfNotExists` is always false: a mistyped claim fails creation instead of mounting a new empty volume."""
-    check_claim_name(claim_name)
+def check_root_subpath(root_subpath: str) -> None:
     try:
         check_key(root_subpath)
     except ValueError:
         raise ValueError(f"storage.root_subpath is not a valid relative path: {root_subpath!r}") from None
+
+
+def compile_host_volumes(
+    volumes: Sequence[SharedVolume], host_path: str, root_subpath: str = ""
+) -> list[dict[str, Any]]:
+    check_host_path(host_path)
+    check_root_subpath(root_subpath)
+    return [host_entry(i, vol, host_path, root_subpath) for i, vol in enumerate(volumes)]
+
+
+def host_entry(i: int, vol: SharedVolume, host_path: str, root_subpath: str = "") -> dict[str, Any]:
+    return _entry(i, vol, {"host": {"path": host_path}}, _under(root_subpath, vol.key))
+
+
+def check_pvc(claim_name: str, root_subpath: str) -> None:
+    check_claim_name(claim_name)
+    check_root_subpath(root_subpath)
+
+
+def compile_pvc_volumes(volumes: Sequence[SharedVolume], claim_name: str, root_subpath: str) -> list[dict[str, Any]]:
+    """`createIfNotExists` is always false: a mistyped claim fails creation instead of mounting a new empty volume."""
+    check_pvc(claim_name, root_subpath)
+    return [pvc_entry(i, vol, claim_name, root_subpath) for i, vol in enumerate(volumes)]
+
+
+def pvc_entry(i: int, vol: SharedVolume, claim_name: str, root_subpath: str) -> dict[str, Any]:
     backend = {"pvc": {"claimName": claim_name, "createIfNotExists": False}}
-    return [
-        _entry(i, vol, backend, posixpath.join(root_subpath, vol.key) if vol.key else root_subpath)
-        for i, vol in enumerate(volumes)
-    ]
+    return _entry(i, vol, backend, _under(root_subpath, vol.key))
+
+
+def _under(root_subpath: str, key: str) -> str:
+    return posixpath.join(root_subpath, key) if root_subpath and key else root_subpath or key
 
 
 def _entry(i: int, vol: SharedVolume, backend: dict[str, Any], sub_path: str) -> dict[str, Any]:

@@ -9,7 +9,7 @@ import pytest
 from flotilla import CleanupError, Flotilla
 from flotilla.config import FlotillaConfig, Resource, ResourceDefaults
 from flotilla.core import labels
-from flotilla.platform.base import ErrorCategory, FlotillaError
+from flotilla.platform.base import ErrorCategory, ExecResult, FlotillaError, ProcessSpec
 from flotilla.runtime.manager import Manager
 from flotilla.runtime.types import Task
 from flotilla.testing.environments import FixtureRequest as RunRequest
@@ -84,6 +84,58 @@ async def test_failed_deletion_is_reported_and_retried(
         fail = False
         assert (await env.release(2)).clean
     assert fleet.cleanup_report is not None and fleet.cleanup_report.clean
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recovered", [False, True])
+async def test_close_retries_owned_directory_cleanup_without_hiding_persistent_failure(
+    deployment: tuple[FlotillaConfig, FakePlatform, SharedTree], recovered: bool
+) -> None:
+    cfg, platform, tree = deployment
+    execute = platform.exec_handler
+    busy = True
+    removals = 0
+
+    def remove(iid: str, proc: ProcessSpec) -> ExecResult:
+        nonlocal removals
+        if proc.argv[0] == "rm" and proc.argv[-1].endswith("owned-directory"):
+            removals += 1
+            if busy:
+                return ExecResult(1, b"", b".nfs: Device or resource busy")
+        return execute(iid, proc)
+
+    fleet = Flotilla(deployment=cfg)
+    try:
+        await fleet.start()
+        env = await open_fixture(fleet, RunRequest(task(), "busy-directory"))
+
+        async def add_directory(manager: Manager) -> str:
+            key = f"launches/{manager.launch_id}/{env.id}/owned-directory"
+            manager.reaper.add_dir(env.id, key)
+            await manager.anchor.mkdir(key, stage="prepare")
+            return key
+
+        key = await fleet._call(add_directory)
+        platform.set_exec_handler(remove)
+        with pytest.raises(CleanupError) as failed:
+            await env.release()
+        assert failed.value.report.remaining[0].directories == (key,)
+        assert key in tree.dirs
+        assert removals == 1
+        busy = not recovered
+    finally:
+        report = await fleet.close()
+    assert removals == 2
+    assert report.clean is recovered
+    assert (key in tree.dirs) is (not recovered)
+    if recovered:
+        assert report.cleaned == 1
+        assert not report.remaining and not report.launch_directories
+    else:
+        assert report.remaining[0].directories == (key,)
+        assert report.remaining[0].reason == "directory_remove_failed"
+        assert report.launch_directories
+    assert not platform.instances()
 
 
 @pytest.mark.asyncio

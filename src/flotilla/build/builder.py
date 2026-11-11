@@ -86,7 +86,7 @@ def build_contexts(dockerfile_text: str, settings: BuildSettings) -> dict[str, s
 class BuildRequest:
     """A single image build.
 
-    `context` is the build context directory; for derive it holds only the bind sources to bake in (may be empty).
+    `context` is the build context directory; directory-only derivations do not copy mounted data.
     Exactly one of `dockerfile` (a path inside the context, for build) or `dockerfile_text` (synthesized, for derive).
     """
 
@@ -112,30 +112,15 @@ class Builder(Protocol):
 def derive_dockerfile(
     base: str,
     *,
-    copy: Sequence[tuple[str, str]] = (),
-    clear: Sequence[str] = (),
     directories: Sequence[str] = (),
     user: str = "0:0",
 ) -> str:
-    """Dockerfile for the derived layer.
-
-    - `clear`: `nocopy` volume mount points; empties existing image content under the path, keeping the directory;
-    - `copy`: (source in context, target in image); bakes a bind into the image target. Existing target content is
-      removed first so that directory shadowing also holds.
-
-    Derived file preparation runs as root and requires the source image to provide `/bin/sh`.
-    """
+    """Prepare empty mount-point directories as root; never bake mounted data into an image."""
     if not re.fullmatch(r"[A-Za-z0-9_.-]+(?::[A-Za-z0-9_.-]+)?", user):
         raise ImageError(f"invalid USER for derived image: {user!r}")
     # File preparation needs root, but the final USER must be restored; other config is inherited via FROM.
     # An explicit gid avoids BuildKit failing to look up uid 0's group on minimal images without /etc/passwd.
     lines = [f"FROM {base}", "USER 0:0"]
-    for target in clear:
-        quoted = shlex.quote(target)
-        lines.append(_run(f"mkdir -p {quoted} && rm -rf {quoted}/* {quoted}/.[!.]* {quoted}/..?*"))
-    for source, target in copy:
-        lines.append(_run(f"rm -rf {shlex.quote(target)}"))
-        lines.append(f"COPY [{json.dumps(source)}, {json.dumps(target)}]")
     for target in directories:
         # Reject symlink components: the mounted directory must be the declared path,
         # not an alias of a protected location such as /run.
