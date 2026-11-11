@@ -130,7 +130,6 @@ def select(
     report: str | Path | None = None,
     compose_adapter: ComposeConfigAdapter | None = None,
     require_prebuilt_images: bool = False,
-    single_step_only: bool = False,
     runtime_params: Mapping[str, str] | None = None,
 ) -> SelectionResult:
     """Select supported host tasks without Docker image access or platform credentials.
@@ -154,7 +153,6 @@ def select(
                 caps=caps,
                 compose_adapter=adapter,
                 require_prebuilt_images=require_prebuilt_images,
-                single_step_only=single_step_only,
             )
             rows.append(row)
             reports.append(
@@ -339,7 +337,6 @@ def prepare(
     resume: bool = False,
     work_dir: str | Path | None = None,
     require_prebuilt_images: bool = False,
-    single_step_only: bool = False,
     context: BuildContext | None = None,
     compose_adapter: ComposeConfigAdapter | None = None,
 ) -> PrepareResult:
@@ -432,7 +429,6 @@ def prepare(
                 caps=context.caps,
                 compose_adapter=adapter,
                 require_prebuilt_images=require_prebuilt_images,
-                single_step_only=single_step_only,
             )
             fingerprint = metrics.call("fingerprint", _fingerprint, imported, context)
             imported_rows.append(imported)
