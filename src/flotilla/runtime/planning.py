@@ -18,7 +18,7 @@ from flotilla.core.plan import (
 )
 from flotilla.manifest import Manifest
 from flotilla.manifest import Unit as ManifestUnit
-from flotilla.platform.base import Resources, SharedVolume, TmpfsMount
+from flotilla.platform.base import Resources, SharedVolume, StorageRoot, TmpfsMount
 from flotilla.platform.filesystem import unsized_tmpfs_bytes
 from flotilla.runtime.values import evaluate
 
@@ -52,6 +52,7 @@ def to_plan(
     external_mounts: Mapping[str, tuple[SharedVolume, ...]] | None = None,
     workspace_mounts: Mapping[str, tuple[SharedVolume, ...]] | None = None,
     workspace_root: str | None = None,
+    task_files_root: StorageRoot = "work",
 ) -> TrialPlan:
     """Turn a manifest into core trial input (see module docs). The result is already `validate()`d."""
     env_by_unit = {name: dict(u.context.env) for name, u in manifest.units.items()}
@@ -89,6 +90,7 @@ def to_plan(
         external_mounts={name: tuple(mounts) for name, mounts in (external_mounts or {}).items()},
         workspace_mounts={name: tuple(mounts) for name, mounts in (workspace_mounts or {}).items()},
         workspace_root=workspace_root,
+        task_files_root=task_files_root,
     )
     try:
         plan.validate()

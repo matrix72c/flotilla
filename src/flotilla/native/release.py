@@ -236,6 +236,7 @@ def read_dataset(path: str | Path) -> list[DatasetRow]:
 class ReleaseBinding(Model):
     local_root: Path
     platform_root: str
+    root: str = "work"  # storage root holding the platform copy: "work" or a named input root
 
     @field_validator("platform_root")
     @classmethod
@@ -251,27 +252,37 @@ class BoundTask:
     task: Task
     reader: ReleaseReader
     platform_key: str
+    root: str = "work"
 
     def instruction(self) -> str:
         return self.reader.instruction(self.row)
 
 
 class ReleaseBindings:
-    def __init__(self, bindings: Mapping[str, ReleaseBinding | Mapping[str, Any]], *, storage: Any) -> None:
-        self._readers: dict[str, tuple[ReleaseReader, str]] = {}
+    def __init__(
+        self,
+        bindings: Mapping[str, ReleaseBinding | Mapping[str, Any]],
+        *,
+        storage: Any,
+        inputs: Mapping[str, Any] | None = None,
+    ) -> None:
+        self._readers: dict[str, tuple[ReleaseReader, str, str]] = {}
         local_roots: set[Path] = set()
-        platform_keys: set[str] = set()
+        platform_keys: set[tuple[str, str]] = set()
+        inputs = inputs or {}
         for value in bindings.values():
             binding = value if isinstance(value, ReleaseBinding) else ReleaseBinding.model_validate(value)
-            key = platform_key(binding.platform_root, storage)
+            if binding.root != "work" and binding.root not in inputs:
+                raise ValueError(f"release bound to unconfigured storage root {binding.root!r}")
+            key = platform_key(binding.platform_root, storage if binding.root == "work" else inputs[binding.root])
             reader = ReleaseReader(binding.local_root)
             identity = reader.manifest.release_id
             root = reader.root.resolve()
-            if identity in self._readers or root in local_roots or key in platform_keys:
+            if identity in self._readers or root in local_roots or (binding.root, key) in platform_keys:
                 raise ValueError("conflicting or duplicate release bindings")
-            self._readers[identity] = reader, key
+            self._readers[identity] = reader, key, binding.root
             local_roots.add(root)
-            platform_keys.add(key)
+            platform_keys.add((binding.root, key))
 
     def read_dataset(self, path: str | Path) -> list[DatasetRow]:
         rows = read_dataset(path)
@@ -283,8 +294,8 @@ class ReleaseBindings:
         row = row if isinstance(row, DatasetRow) else DatasetRow.model_validate(row)
         if row.release_id not in self._readers:
             raise ValueError("release is not explicitly bound")
-        reader, key = self._readers[row.release_id]
-        return BoundTask(row, reader.read_task(row), reader, key)
+        reader, key, root = self._readers[row.release_id]
+        return BoundTask(row, reader.read_task(row), reader, key, root)
 
 
 def platform_key(value: str, storage: Any) -> str:
@@ -294,8 +305,12 @@ def platform_key(value: str, storage: Any) -> str:
             raise ValueError("host storage requires an explicit host path, not a PVC identity")
         if not value.startswith("/"):
             key = value
+        elif not storage.host_path.startswith("/"):
+            raise ValueError(
+                "storage host path is a platform identifier, not a filesystem path; use a relative platform root"
+            )
         else:
-            root, path = PurePosixPath(storage.host_path), PurePosixPath(value)
+            root, path = PurePosixPath(storage.host_path, storage.root_subpath), PurePosixPath(value)
             if str(path) != value or ".." in path.parts:
                 raise ValueError("noncanonical platform root")
             try:

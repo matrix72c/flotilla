@@ -35,7 +35,7 @@ async def _validate(manager: Manager, bound: BoundTask) -> dict[str, PreparedEnv
     store = manager.workspaces
     root = bound.platform_key
     identity = bound.row.release_id
-    key = root, identity, bound.row.task_digest
+    key = bound.root, root, identity, bound.row.task_digest
     async with store.native_lock:
         if key not in store.native_tasks:
             directory = f"launches/{manager.launch_id}/native-checks/{uuid.uuid4().hex}"
@@ -45,9 +45,9 @@ async def _validate(manager: Manager, bound: BoundTask) -> dict[str, PreparedEnv
             try:
                 await manager.anchor.mkdir(directory, stage="prepare")
                 request = {
-                    "root": manager.anchor.path(root),
+                    "root": manager.anchor.path(root, root=bound.root),
                     "row": bound.row.model_dump(mode="json"),
-                    "validated_assets": sorted(store.native_assets.get((root, identity), set())),
+                    "validated_assets": sorted(store.native_assets.get((bound.root, root, identity), set())),
                     "result": manager.anchor.path(result_key),
                 }
                 await manager.anchor.upload(
@@ -66,7 +66,7 @@ async def _validate(manager: Manager, bound: BoundTask) -> dict[str, PreparedEnv
                 assets = set(payload.get("assets", ()))
                 if not set(bound.task.assets) <= assets or assets - set(bound.reader.manifest.assets):
                     raise ValueError("platform native asset verification incomplete")
-                store.native_assets.setdefault((root, identity), set()).update(assets)
+                store.native_assets.setdefault((bound.root, root, identity), set()).update(assets)
                 store.native_tasks.add(key)
             except BaseException as exc:
                 primary = exc
@@ -83,7 +83,7 @@ async def _validate(manager: Manager, bound: BoundTask) -> dict[str, PreparedEnv
             for role, manifest in bound.task.roles.items()
         }
         for prepared in environments.values():
-            store.native_environments[prepared.digest] = root
+            store.native_environments[prepared.digest] = root, bound.root
         return environments
 
 
@@ -241,7 +241,10 @@ class NativeAttempt:
                     raise RuntimeError("could not clear verification output directory")
                 if verification.tests:
                     await manager.anchor.copy_contents(
-                        f"{self.bound.platform_key}/{verification.tests}", f"{info.key}/tests", stage="prepare"
+                        f"{self.bound.platform_key}/{verification.tests}",
+                        f"{info.key}/tests",
+                        stage="prepare",
+                        src_root=self.bound.root,
                     )
                 if verification.role == "verifier":
                     for artifact in self.task.artifacts:

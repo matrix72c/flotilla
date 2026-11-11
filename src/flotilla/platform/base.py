@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -190,6 +191,19 @@ class Resources:
     memory: str  # e.g. "4Gi"
 
 
+#: Which configured storage root a volume key is relative to: `"work"` (the writable `[storage]` root: launches,
+#: share, anchor state) or the name of a read-only `[inputs.<name>]` root (published task releases, external
+#: read-only payloads).
+StorageRoot = str
+WORK_ROOT = "work"
+_ROOT_NAME = re.compile(r"[a-z][a-z0-9_-]{0,62}")
+
+
+def check_root_name(name: str) -> None:
+    if not isinstance(name, str) or not _ROOT_NAME.fullmatch(name):
+        raise ValueError(f"storage root names are lowercase identifiers: {name!r}")
+
+
 @dataclass(frozen=True)
 class SharedVolume:
     """A subdirectory mount on shared storage."""
@@ -197,6 +211,12 @@ class SharedVolume:
     key: str  # path relative to the shared root, no ".."; the anchor key is "" (the shared root itself)
     mount_path: str
     read_only: bool
+    root: StorageRoot = WORK_ROOT
+
+    def __post_init__(self) -> None:
+        check_root_name(self.root)
+        if self.root != WORK_ROOT and not self.read_only:
+            raise ValueError("input storage volumes must be read-only")
 
 
 @dataclass(frozen=True)

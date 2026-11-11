@@ -77,7 +77,30 @@ local_root = "./releases/example"
 platform_root = "/shared/releases/example"
 ```
 
-For host storage, the platform root is confined under `storage.host_path`. PVC deployments require an explicit `pvc:<claim>/<configured-root-subpath>/<release-key>` binding; bare relative roots are rejected. Preserve required metadata and symlinks during publication; both local and platform consumed files are verified. Releases must remain immutable while selected by any running job. Task upload is not a Flotilla backend feature.
+For host storage, the platform root is confined under the release's root (`[inputs.<input>]` if the binding names one, otherwise `[storage]`). PVC deployments require an explicit `pvc:<claim>/<configured-root-subpath>/<release-key>` binding; bare relative roots are rejected. Preserve required metadata and symlinks during publication; both local and platform consumed files are verified. Releases must remain immutable while selected by any running job. Task upload is not a Flotilla backend feature.
+
+To consume releases published in another owner's storage, keep `[storage]` on storage this deployment owns and declare the owner's read-only shares as named input roots; publish a shared-tools release in the work root with `flotilla share publish`. Different payloads may come from different roots. For example, with platform storage identifiers:
+
+```toml
+[storage]                      # this team's writable root
+host_path = "@user"
+root_subpath = "flotilla-work"
+
+[inputs.datasets]              # owner's directory, shared read-only
+host_path = "@user:owner"
+root_subpath = "datasets"
+
+[inputs.runtimes]
+host_path = "@user:owner"
+root_subpath = "runtimes"
+
+[task_releases.example]
+input = "datasets"
+local_root = "/data/releases/example"
+platform_root = "example/r1"
+```
+
+The owner uploads releases into those directories with their own storage tools. Read-only enforcement for other consumers is the platform's sharing permission; Flotilla only ever mounts input roots read-only.
 
 Configure instance budgets, concurrency, creation/exec rates and timeouts from measured quotas. Admission includes replacement capacity and Anchor overhead. Private writable task state is allocated per attempt; immutable assets may be shared. Compose/build inputs cannot be changed through runtime overrides.
 

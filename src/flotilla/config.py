@@ -24,6 +24,7 @@ from flotilla.core.runtime import MonitorSettings
 from flotilla.core.trial import TrialSettings
 from flotilla.manifest import Manifest
 from flotilla.platform.base import (
+    WORK_ROOT,
     Capabilities,
     Clock,
     ExternalPolicy,
@@ -31,6 +32,7 @@ from flotilla.platform.base import (
     Platform,
     Resources,
     SharedVolume,
+    check_root_name,
 )
 from flotilla.platform.opensandbox import ExecdSettings, NetworkSettings, StorageSettings
 from flotilla.platform.opensandbox import build as build_opensandbox
@@ -399,6 +401,8 @@ class TaskRelease(_Model):
 
     local_root: Path
     platform_root: str = Field(min_length=1)
+    # Name of the [inputs.<name>] root holding the release; None means the work root ([storage]).
+    input: str | None = None
 
 
 class FlotillaConfig(_Model):
@@ -406,6 +410,9 @@ class FlotillaConfig(_Model):
     opensandbox: OpenSandbox | None = None  # built-in backend table
     backends: dict[str, dict[str, Any]] = {}  # third-party backend tables, validated by the selected backend
     storage: Storage
+    # Named read-only roots for published task releases and external read-only payloads (e.g. an owner's
+    # storage shared read-only with this deployment). Launch, attempt and share state always stay on `storage`.
+    inputs: dict[str, Storage] = Field(default_factory=dict)
     task_releases: dict[str, TaskRelease] = Field(default_factory=dict)
     # Opaque consumer namespace: validated by Voyager, never interpreted by Flotilla.
     voyager: dict[str, Any] = Field(default_factory=dict)
@@ -439,6 +446,13 @@ class FlotillaConfig(_Model):
 
     @model_validator(mode="after")
     def _local(self) -> FlotillaConfig:
+        for name in self.inputs:
+            check_root_name(name)
+            if name == WORK_ROOT:
+                raise ValueError(f"[inputs.{WORK_ROOT}] is reserved for [storage]")
+        for label, release in self.task_releases.items():
+            if release.input is not None and release.input not in self.inputs:
+                raise ValueError(f"task_releases.{label}.input names no [inputs.{release.input}]")
         backend = load_backend(self.backend)
         if self.backend == BUILTIN:
             if self.backends:
@@ -516,8 +530,10 @@ class FlotillaConfig(_Model):
             root = binding.local_root
             if not root.is_absolute() and self.base_dir is not None:
                 root = self.base_dir / root
-            bindings[name] = ReleaseBinding(local_root=root, platform_root=binding.platform_root)
-        return ReleaseBindings(bindings, storage=self.storage.settings())
+            bindings[name] = ReleaseBinding(
+                local_root=root, platform_root=binding.platform_root, root=binding.input or WORK_ROOT
+            )
+        return ReleaseBindings(bindings, storage=self.storage.settings(), inputs=self.input_settings())
 
     def capabilities_path(self) -> Path:
         path = Path(self.backend_settings.capabilities)
@@ -575,6 +591,11 @@ class FlotillaConfig(_Model):
             "backend": self.backend,
             "settings": settings,
             "storage": self.storage.model_dump(mode="json"),
+            **(
+                {"inputs": {name: root.model_dump(mode="json") for name, root in sorted(self.inputs.items())}}
+                if self.inputs
+                else {}
+            ),
             "share": self.share.model_dump(mode="json"),
             "network": self.network.model_dump(mode="json"),
             "anchor_image": self.reaper.anchor_image,
@@ -697,6 +718,7 @@ class FlotillaConfig(_Model):
             management_mounts=self.prepare.management_mounts if workspace else (),
             management_env=dict(self.prepare.management_env) if workspace else {},
             profile=self.prepare.management_profile if workspace else "default",
+            inputs=tuple(sorted(self.inputs)),
         )
         if workspace and self.prepare.management_resources is not None:
             settings = replace(settings, resources=Resources(**self.prepare.management_resources.model_dump()))
@@ -749,6 +771,17 @@ class FlotillaConfig(_Model):
 
     def storage_settings(self) -> StorageSettings:
         return self.storage.settings()
+
+    def input_settings(self) -> dict[str, StorageSettings]:
+        return {name: root.settings() for name, root in self.inputs.items()}
+
+    def storage_settings_for(self, root: str | None) -> StorageSettings:
+        """Settings of the work root (`None`/`"work"`) or of a named read-only input root."""
+        if root is None or root == WORK_ROOT:
+            return self.storage.settings()
+        if root not in self.inputs:
+            raise ConfigError([f"no [inputs.{root}] storage root is configured"])
+        return self.inputs[root].settings()
 
     def execd_settings(self) -> ExecdSettings:
         e = self.opensandbox_settings().execd
@@ -835,6 +868,7 @@ class OpenSandboxBackend(Backend[OpenSandbox]):
             clock=clock,
             settings=cfg.network_settings(),
             storage=cfg.storage_settings(),
+            inputs=cfg.input_settings(),
             caps=caps,
             execd=cfg.execd_settings(),
             filesystem=cfg.filesystem_settings(),

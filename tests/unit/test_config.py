@@ -349,6 +349,7 @@ def test_ingress_extension_is_explicit_and_requires_sandbox_id_linking() -> None
         ("storage", {"host_path": "/other"}),
         ("share", {"release": "other", "release_sha256": SHA}),
         ("network", {"external": []}),
+        ("inputs", {"datasets": {"host_path": "@user:owner"}}),
     ],
 )
 def test_relevant_config_changes_reject_stale_evidence(section: str, value: dict[str, Any]) -> None:
@@ -464,3 +465,53 @@ def test_serialized_config_keeps_evidence_binding(tmp_path: Path) -> None:
     cfg = config()
     restored = FlotillaConfig.from_mapping(cfg.to_mapping(), base_dir=tmp_path)
     assert restored.evidence_profile() == cfg.evidence_profile()
+
+
+def test_releases_default_to_the_work_root(tmp_path: Path) -> None:
+    cfg = config(task_releases={"tb": {"local_root": str(tmp_path), "platform_root": "releases/tb"}})
+    assert cfg.inputs == {} and cfg.task_releases["tb"].input is None
+    assert cfg.storage_settings_for("work") == cfg.storage_settings()
+    assert cfg.anchor_settings().inputs == ()
+    assert "inputs" not in cfg.evidence_profile()
+
+
+def test_named_inputs_bind_releases_and_the_anchor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import flotilla.native
+
+    cfg = config(
+        storage={"host_path": "@user", "root_subpath": "work"},
+        inputs={
+            "datasets": {"host_path": "@user:owner", "root_subpath": "datasets"},
+            "runtimes": {"host_path": "@user:owner", "root_subpath": "runtimes"},
+        },
+        task_releases={
+            "tb": {"local_root": str(tmp_path), "platform_root": "tb/r1", "input": "datasets"},
+            "local": {"local_root": str(tmp_path), "platform_root": "releases/r2"},
+        },
+    )
+    assert cfg.storage_settings().root == "host:@user/work"
+    assert cfg.storage_settings_for("datasets").root == "host:@user:owner/datasets"
+    assert set(cfg.input_settings()) == {"datasets", "runtimes"}
+    seen: list[Any] = []
+
+    def capture(bindings, *, storage, inputs):
+        seen.append(({name: b.root for name, b in bindings.items()}, storage, inputs))
+
+    monkeypatch.setattr(flotilla.native, "ReleaseBindings", capture)
+    cfg.release_bindings()
+    assert seen == [({"tb": "datasets", "local": "work"}, cfg.storage_settings(), cfg.input_settings())]
+    assert cfg.anchor_settings().inputs == ("datasets", "runtimes")
+    assert cfg.anchor_settings(workspace=True).inputs == ("datasets", "runtimes")
+
+
+@pytest.mark.parametrize(
+    "update,match",
+    [
+        ({"inputs": {"work": {"host_path": "@user"}}}, "work"),
+        ({"inputs": {"Bad": {"host_path": "@user"}}}, "name"),
+        ({"task_releases": {"tb": {"local_root": "/r", "platform_root": "tb/r1", "input": "missing"}}}, "missing"),
+    ],
+)
+def test_input_names_are_checked(update: dict[str, Any], match: str) -> None:
+    with pytest.raises(ValidationError, match=match):
+        config(**update)

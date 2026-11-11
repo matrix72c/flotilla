@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from flotilla import Flotilla
+from flotilla.capabilities import CapabilityReport
 from flotilla.config import Storage
 from flotilla.core import labels
 from flotilla.manifest import Context, Manifest, Mount, Resources, Unit
@@ -152,9 +153,9 @@ class NativeHarness:
     # anchor-side emulation
 
     def _helper(self, argv: tuple[str, ...]) -> ExecResult:
-        mount = self.tree.mount
+        rel = self.tree._rel
         if "--clear-directory" in argv:
-            key = argv[5][len(mount) :]
+            key = rel(argv[5], write=True)
             for entries in (self.tree.dirs, self.tree.files):
                 entries.difference_update(k for k in entries if k.startswith(key + "/"))
             for book in (self.tree.modes, self.tree.owners, self.platform.tree_contents):
@@ -162,25 +163,24 @@ class NativeHarness:
                     del book[key_part]
             return ExecResult(0, b"", b"")
         self.verify_calls += 1
-        request = json.loads(self.platform.tree_contents[argv[4][len(mount) :]])
+        request = json.loads(self.platform.tree_contents[rel(argv[4])])
         try:
             result = run_platform_verify(
                 {
-                    "root": str(self.platform_copies[request["root"][len(mount) :]]),
+                    "root": str(self.platform_copies[rel(request["root"])]),
                     "row": request["row"],
                     "validated_assets": request.get("validated_assets", ()),
                 }
             )
         except ValueError as exc:
             return ExecResult(1, b"", f"native release verification failed: {exc}".encode())
-        result_key = request["result"][len(mount) :]
+        result_key = rel(request["result"], write=True)
         self.platform.tree_contents[result_key] = json.dumps(result).encode()
         self.tree.files.add(result_key)
         return ExecResult(0, b"", b"")
 
     def _copy_contents(self, argv: tuple[str, ...]) -> ExecResult:
-        mount = self.tree.mount
-        src, dst = argv[-2][len(mount) : -2], argv[-1][len(mount) :]
+        src, dst = self.tree._rel(argv[-2].removesuffix("/.")), self.tree._rel(argv[-1], write=True)
         for entries in (self.tree.dirs, self.tree.files):
             entries.update(dst + p[len(src) :] for p in list(entries) if p.startswith(src + "/"))
         for book in (self.tree.modes, self.tree.owners, self.platform.tree_contents):
@@ -419,3 +419,68 @@ async def test_unvalidated_native_task_files_rejected_until_launch_validates(tmp
         plan = await fleet._call(plan_of)
         assert plan.task_files == bound.platform_key
         await attempt.close()
+
+
+@pytest.mark.asyncio
+async def test_releases_on_named_read_only_input_roots(tmp_path, deployment, monkeypatch) -> None:
+    """Releases come from two named read-only input roots; attempt state stays on the work root."""
+    cfg, platform, tree = deployment
+    inputs = {"datasets": Storage(host_path="@user:owner"), "extra": Storage(host_path="@user:other")}
+    cfg = cfg.model_copy(update={"inputs": inputs})
+    report_path = cfg.capabilities_path()
+    caps = CapabilityReport.load_json(report_path.read_bytes()).model_copy(
+        update={"evidence_profile": cfg.evidence_profile()}
+    )
+    report_path.write_text(caps.dump_json())
+    tree.dirs.update({tree.input_key("datasets"), tree.input_key("extra")})
+    root, task = build_release(tmp_path / "build", verifier=True)
+    platform_copy = tmp_path / "platform-copy"
+    shutil.copytree(root, platform_copy, symlinks=True)
+    harness = NativeHarness((cfg, platform, tree), monkeypatch)
+    # The same release content on both roots: caches must keep the roots apart.
+    harness.stage_release(tree.input_key("datasets", "tb/r1"), platform_copy)
+    harness.stage_release(tree.input_key("extra", "tb/r1"), platform_copy)
+    # The same release (one release id) bound on each root, through separate binding sets.
+    record = read_dataset(root / "dataset.jsonl")[0]
+    bound = {
+        name: ReleaseBindings(
+            {name: ReleaseBinding(local_root=root, platform_root="tb/r1", root=name)},
+            storage=cfg.storage_settings(),
+            inputs=cfg.input_settings(),
+        ).resolve(record)
+        for name in ("datasets", "extra")
+    }
+    assert {name: b.root for name, b in bound.items()} == {"datasets": "datasets", "extra": "extra"}
+    inputs_before = {k: v for k, v in platform.tree_contents.items() if k.startswith("@")}
+
+    async with Flotilla(deployment=cfg) as fleet:
+        anchors = [i for i in platform.iids() if platform.spec_of(i).labels.get(labels.ROLE) == labels.ROLE_ANCHOR]
+        anchor_inputs = [v for v in platform.spec_of(anchors[0]).volumes if v.root != "work"]
+        assert [(v.root, v.key, v.mount_path, v.read_only) for v in anchor_inputs] == [
+            ("datasets", "", "/flotilla-inputs/datasets", True),
+            ("extra", "", "/flotilla-inputs/extra", True),
+        ]
+        for name in ("datasets", "extra"):
+            attempt = await NativeAttempt.create(fleet, bound[name])
+            harness.workspace_key = attempt.workspace.key
+            await attempt.open("main")
+            (unit,) = [i for i in platform.iids() if platform.spec_of(i).labels.get(labels.ROLE) == labels.ROLE_UNIT]
+            main_spec = platform.spec_of(unit)
+            source = volume_of(main_spec, "/input")
+            assert source is not None and source.read_only and source.root == name
+            assert source.key == f"tb/r1/{task.assets[0]}"
+            assert volume_of(main_spec, "/logs/agent").root == "work"
+            assert volume_of(main_spec, "/.flotilla").root == "work"  # share tools stay on the work root
+
+            answer = f"{attempt.workspace.key}/artifacts/agent/answer.txt"
+            tree.files.add(answer)
+            platform.tree_contents[answer] = b"answer"
+            result = await attempt.verify()
+            assert result.exit_code == 0
+            # Hidden tests were copied from the input root into the attempt's work-root directory.
+            assert platform.tree_contents.get(f"{attempt.workspace.key}/tests/check.sh") is not None
+            await attempt.close()
+        assert harness.verify_calls == 2  # each root's copy is verified on its own
+    # Nothing on an input root was written; SharedTree also fails any write attempt there.
+    assert {k: v for k, v in platform.tree_contents.items() if k.startswith("@")} == inputs_before
+    assert platform.instances() == []

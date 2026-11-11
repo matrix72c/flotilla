@@ -56,9 +56,17 @@ Filesystem checks run when the explicitly selected backend protocol can express 
 | Key | Default | Meaning |
 |---|---|---|
 | `volumes` | `"host"` | `"host"`: a host path backed by the same shared storage on every worker. `"pvc"`: an existing volume every worker can mount read-write |
-| `host_path` | `""` | Shared root for `volumes = "host"` |
+| `host_path` | `""` | Shared root for `volumes = "host"`: an absolute host path or a platform-defined identifier, passed to the platform verbatim |
 | `claim_name` | `""` | Volume claim for `volumes = "pvc"` |
-| `root_subpath` | `""` | Subdirectory of the claim used as the shared root |
+| `root_subpath` | `""` | Subdirectory of the host path or claim used as the shared root; every mount, including the Anchor's, stays inside it |
+
+`[storage]` is the writable work root: launch and attempt state, the shared-tools release (`[share]`), Anchor operations and GC.
+
+### `[inputs.<name>]` (optional)
+
+Same keys as `[storage]`. Each section declares a named read-only root for published task releases or external read-only payloads such as an Agent runtime, for example an owner's storage shared read-only with this deployment. Names match `[a-z][a-z0-9_-]*`; `work` is reserved for `[storage]`. A release selects its root with `input`; other consumers name the root on their mounts. Task instances mount files from an input root read-only; the Anchor mounts every input root read-only at `/flotilla-inputs/<name>` and only reads from it (release verification, seed/copy sources, hidden tests). Nothing is written, cleaned or garbage-collected there, and Flotilla checks at startup that each input root exists.
+
+Publishing tools (`share publish`) always write the work root of the deployment they are given; release and runtime upload is outside Flotilla. Changing these sections invalidates capability evidence.
 
 ### `[task_releases.<name>]`
 
@@ -67,7 +75,8 @@ Explicit bindings for native task consumption. Probe/select/prepare can load a d
 | Key | Meaning |
 |---|---|
 | `local_root` | Local native release directory; relative to deployment.toml |
-| `platform_root` | Published host root confined beneath `storage.host_path`, or explicit `pvc:<claim>/<root_subpath>/<release-key>` / relative storage key for PVC |
+| `input` | Optional `[inputs.<name>]` holding the release; omitted means the work root `[storage]` |
+| `platform_root` | Release location on its root: a relative storage key, an absolute host root confined beneath an absolute `host_path`/`root_subpath`, or explicit `pvc:<claim>/<root_subpath>/<release-key>` for PVC. Platform-identifier host paths require relative keys |
 
 The binding name is a configuration label, not a guessed task identity. Dataset rows carry release ID, task reference and digest; every selected release must be bound. Do not upload partial releases or mutate an active release. See [Native tasks](Native_Tasks.md).
 

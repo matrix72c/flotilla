@@ -36,7 +36,7 @@ from flotilla.platform.opensandbox.filesystem import SHM_SIZE_EXTENSION, UPSTREA
 from flotilla.platform.opensandbox.http import DEFAULT_RETRY, Http, RetryPolicy
 from flotilla.platform.opensandbox.lifecycle import Lifecycle
 from flotilla.platform.opensandbox.network import NetworkSettings, compile_policy
-from flotilla.platform.opensandbox.storage import StorageSettings
+from flotilla.platform.opensandbox.storage import StorageSettings, compile_volumes
 
 CREDENTIAL_HEADER = "OPEN-SANDBOX-API-KEY"  # credentials only go in request headers
 EXECD_PORT = 44772  # exec channel port
@@ -101,6 +101,7 @@ class OpenSandboxPlatform:
         settings: NetworkSettings,
         storage: StorageSettings,
         caps: Capabilities,
+        inputs: Mapping[str, StorageSettings] | None = None,
         filesystem: FilesystemSettings = UPSTREAM_FILESYSTEM,
         execd: ExecdSettings | None = None,
         workload_http: Callable[[str], Http] | None = None,
@@ -133,6 +134,7 @@ class OpenSandboxPlatform:
         self._command_gate = command_gate
         self._settings = settings
         self._storage = storage
+        self._inputs = dict(inputs or {})
         self._execd = execd or ExecdSettings()
         self._create_fields = dict(create_fields or {})
         self._extensions = dict(extensions or {})
@@ -358,7 +360,7 @@ class OpenSandboxPlatform:
             "timeout": max(int(spec.timeout_seconds), MIN_TTL_SECONDS),
             "resourceLimits": resources,
             "resourceRequests": dict(resources),
-            "volumes": self._storage.compile(spec.volumes),
+            "volumes": compile_volumes(spec.volumes, self._storage, self._inputs),
             "networkPolicy": compile_policy(spec.external, [], self._settings),
             "env": {EXECD_TOKEN_ENV: token},
             **self._filesystem.compile(spec),
@@ -417,6 +419,7 @@ def build(
     settings: NetworkSettings,
     storage: StorageSettings,
     caps: Capabilities,
+    inputs: Mapping[str, StorageSettings] | None = None,
     filesystem: FilesystemSettings = UPSTREAM_FILESYSTEM,
     execd: ExecdSettings | None = None,
     extensions: Mapping[str, Any] | None = None,
@@ -469,6 +472,7 @@ def build(
         execd_http,
         settings=settings,
         storage=storage,
+        inputs=inputs,
         caps=caps,
         filesystem=filesystem,
         execd=execd,

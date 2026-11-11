@@ -129,6 +129,9 @@ class Manager:
         await self.anchor.start()
         if not await self.anchor.exists("", stage="prepare"):
             raise invalid("shared storage root does not exist")
+        for name in sorted(self.cfg.inputs):
+            if not await self.anchor.exists("", stage="prepare", root=name):
+                raise invalid(f"input storage root {name!r} does not exist")
         try:
             await check_release(self.anchor, self.cfg.share.release, expected_sha256=self.cfg.share.release_sha256)
         except ReleaseError as exc:
@@ -142,8 +145,8 @@ class Manager:
 
     def plan(self, request: RunRequest) -> TrialPlan:
         manifest = request.task.manifest()
-        native_root = self.workspaces.native_environments.get(request.task.digest)
-        validated_native = native_root is not None and native_root == manifest.task_files
+        native = self.workspaces.native_environments.get(request.task.digest)
+        validated_native = native is not None and native[0] == manifest.task_files
         workspace_root = None
         if request.workspace_id is not None:
             workspace_root = self.workspaces.owned(request.workspace_id).info.key
@@ -183,6 +186,7 @@ class Manager:
             external_mounts=request.external_mounts,
             workspace_mounts=request.workspace_mounts,
             workspace_root=workspace_root,
+            task_files_root=native[1] if validated_native and native is not None else "work",
             overlay=AgentOverlay(
                 env=overlay.env,
                 services=None if overlay.services is None else frozenset(overlay.services),

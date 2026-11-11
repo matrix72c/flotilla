@@ -34,7 +34,12 @@ def unit_volumes(
     """All shared volumes of a unit: share first, then manifest order (outer nested mounts first)."""
     out = [SharedVolume(key=share_key(share_release), mount_path=SHARE_MOUNT, read_only=True)]
     for m in plan.units[unit].mounts:
-        out.append(SharedVolume(key=_resolve(plan, m, launch_id, trial_id), mount_path=m.target, read_only=m.read_only))
+        root = plan.task_files_root if m.scope == "task" else "work"
+        out.append(
+            SharedVolume(
+                key=_resolve(plan, m, launch_id, trial_id), mount_path=m.target, read_only=m.read_only, root=root
+            )
+        )
     out.extend(plan.external_mounts.get(unit, ()))
     out.extend(plan.workspace_mounts.get(unit, ()))
     return tuple(out)

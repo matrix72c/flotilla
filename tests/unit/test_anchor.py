@@ -17,6 +17,7 @@ from flotilla.platform.base import (
     InstanceHandle,
     InstanceStatus,
     ProcessSpec,
+    SharedVolume,
 )
 from flotilla.testing.platform import FakePlatform, ManualClock, SharedTree
 
@@ -739,3 +740,63 @@ async def test_directory_op_in_flight_is_cancelled_on_deactivation(platform: Fak
     with pytest.raises(FlotillaError) as exc:
         await op
     assert exc.value.category is ErrorCategory.LOST and exc.value.stage == "prepare"
+
+
+# ───────────────────────────── Read-only input root ─────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_named_input_roots_are_mounted_read_only_and_only_read(
+    platform: FakePlatform, clock: ManualClock
+) -> None:
+    settings = AnchorSettings(image="anchor@sha256:abc", inputs=("datasets", "runtimes"))
+    anchor = await _started(platform, clock, settings)
+    volumes = platform.spec_of(anchor.iid).volumes
+    assert [(v.key, v.mount_path, v.read_only, v.root) for v in volumes] == [
+        ("", "/flotilla-root", False, "work"),
+        ("", "/flotilla-inputs/datasets", True, "datasets"),
+        ("", "/flotilla-inputs/runtimes", True, "runtimes"),
+    ]
+    seen: list[tuple[str, ...]] = []
+
+    def handler(iid: str, proc: ProcessSpec) -> ExecResult:
+        seen.append(proc.argv)
+        return ExecResult(exit_code=0, stdout=b"", stderr=b"")
+
+    platform.set_exec_handler(handler)
+    assert anchor.path("releases/r", root="datasets") == "/flotilla-inputs/datasets/releases/r"
+    await anchor.unpack("releases/r/seed.tar", "launches/L1/t/v", stage="prepare", src_root="datasets")
+    await anchor.copy_tree("releases/r/src", "launches/L1/t/w", stage="prepare", src_root="datasets")
+    await anchor.copy_contents("releases/r/tests", "launches/L1/a/tests", stage="prepare", src_root="datasets")
+    assert await anchor.exists("", stage="prepare", root="runtimes")
+    assert seen == [
+        (
+            "tar",
+            "-xpf",
+            "/flotilla-inputs/datasets/releases/r/seed.tar",
+            "--numeric-owner",
+            "-C",
+            "/flotilla-root/launches/L1/t/v",
+        ),
+        ("mkdir", "-p", "--", "/flotilla-root/launches/L1/t"),
+        ("cp", "-a", "--", "/flotilla-inputs/datasets/releases/r/src", "/flotilla-root/launches/L1/t/w"),
+        ("mkdir", "-p", "--", "/flotilla-root/launches/L1/a/tests"),
+        ("cp", "-a", "--", "/flotilla-inputs/datasets/releases/r/tests/.", "/flotilla-root/launches/L1/a/tests"),
+        ("ls", "-d", "--", "/flotilla-inputs/runtimes"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_unconfigured_input_root_is_refused(platform: FakePlatform, clock: ManualClock) -> None:
+    anchor = await _started(platform, clock)
+    assert [v.root for v in platform.spec_of(anchor.iid).volumes] == ["work"]
+    assert anchor.path("releases/r", root="work") == "/flotilla-root/releases/r"
+    with pytest.raises(ValueError, match="datasets"):
+        anchor.path("releases/r", root="datasets")
+
+
+def test_management_mounts_must_not_overlap_the_inputs_mount() -> None:
+    mount = SharedVolume(key="creds", mount_path="/flotilla-inputs/creds", read_only=True)
+    AnchorSettings(image="x", management_mounts=(mount,))  # no input roots: path is free
+    with pytest.raises(ValueError, match="overlap"):
+        AnchorSettings(image="x", management_mounts=(mount,), inputs=("datasets",))

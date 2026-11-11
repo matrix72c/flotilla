@@ -12,6 +12,7 @@ from flotilla.core import labels
 from flotilla.core.errors import at_stage
 from flotilla.core.waiting import Aborted, Backoff, Expired, step_towards, wait_running, within
 from flotilla.platform.base import (
+    WORK_ROOT,
     Clock,
     ErrorCategory,
     ExecOutcomeUnknown,
@@ -26,6 +27,8 @@ from flotilla.platform.base import (
     Resources,
     SharedVolume,
     Stage,
+    StorageRoot,
+    check_root_name,
     overlaps,
 )
 
@@ -55,6 +58,9 @@ class AnchorSettings:
     # the wrapper path is deployment-wide config shared by all instances.
     entrypoint: tuple[str, ...] = ("/bin/sleep", "2147483647")
     mount_path: str = "/flotilla-root"  # mount point of the shared root inside the anchor
+    # Named read-only input roots, each mounted at `<inputs_mount_path>/<name>`.
+    inputs: tuple[str, ...] = ()
+    inputs_mount_path: str = "/flotilla-inputs"
     resources: Resources = field(default_factory=lambda: Resources(cpu="0.5", memory="512Mi"))
     ttl_s: int = 600
     renew_interval_s: float = 30.0
@@ -74,6 +80,14 @@ class AnchorSettings:
         if not posixpath.isabs(self.mount_path):
             raise ValueError(f"mount_path must be absolute: {self.mount_path!r}")
         occupied = [self.mount_path, "/.flotilla"]
+        if self.inputs:
+            for name in self.inputs:
+                check_root_name(name)
+                if name == WORK_ROOT:
+                    raise ValueError("the work root is not an input root")
+            if not posixpath.isabs(self.inputs_mount_path) or overlaps(self.inputs_mount_path, self.mount_path):
+                raise ValueError("inputs_mount_path must be absolute and separate from mount_path")
+            occupied.append(self.inputs_mount_path)
         for mount in self.management_mounts:
             if not mount.read_only or not mount.key or any(p in ("", ".", "..") for p in mount.key.split("/")):
                 raise ValueError("management mounts require a relative storage key and read_only=true")
@@ -189,12 +203,14 @@ class Anchor:
         manifest owner)."""
         await self._run(("chown", f"{uid}:{gid}", "--", self._path(key)), stage)
 
-    async def unpack(self, tar_key: str, dest_key: str, *, stage: Stage) -> None:
+    async def unpack(self, tar_key: str, dest_key: str, *, stage: Stage, src_root: StorageRoot = "work") -> None:
         """Unpack a tar on shared storage into a directory, keeping owners and modes (volume initial content).
-        `dest_key` must exist."""
-        await self._run(("tar", "-xpf", self._path(tar_key), "--numeric-owner", "-C", self._path(dest_key)), stage)
+        `dest_key` must exist; the destination is always on the work root."""
+        await self._run(
+            ("tar", "-xpf", self._path(tar_key, src_root), "--numeric-owner", "-C", self._path(dest_key)), stage
+        )
 
-    async def copy_tree(self, src_key: str, dest_key: str, *, stage: Stage) -> None:
+    async def copy_tree(self, src_key: str, dest_key: str, *, stage: Stage, src_root: StorageRoot = "work") -> None:
         """Copy directory `src_key` to `dest_key`, keeping owners, modes, and symlinks (multi-reference bind sources
         with a writer).
 
@@ -204,7 +220,7 @@ class Anchor:
         parent = posixpath.dirname(dest_key)
         if parent:
             await self.mkdir(parent, stage=stage)
-        await self._run(("cp", "-a", "--", self._path(src_key), self._path(dest_key)), stage)
+        await self._run(("cp", "-a", "--", self._path(src_key, src_root), self._path(dest_key)), stage)
 
     async def copy_source_tree(self, src_key: str, dest_key: str, *, stage: Stage) -> None:
         """Copy a dataset directory, never a symlink to another namespace.
@@ -225,14 +241,14 @@ class Anchor:
             raise ValueError("workspace copy destination already exists")
         await self.copy_tree(src_key, dest_key, stage=stage)
 
-    async def copy_contents(self, src_key: str, dest_key: str, *, stage: Stage) -> None:
+    async def copy_contents(self, src_key: str, dest_key: str, *, stage: Stage, src_root: StorageRoot = "work") -> None:
         """Copy directory contents, including dotfiles, into an owned directory."""
         await self.mkdir(dest_key, stage=stage)
-        await self._run(("cp", "-a", "--", self._path(src_key) + "/.", self._path(dest_key)), stage)
+        await self._run(("cp", "-a", "--", self._path(src_key, src_root) + "/.", self._path(dest_key)), stage)
 
-    def path(self, key: str) -> str:
+    def path(self, key: str, *, root: StorageRoot = "work") -> str:
         """Path in the trusted management instance, not a workload-visible path."""
-        return self._path(key)
+        return self._path(key, root)
 
     async def execute(self, argv: tuple[str, ...], *, timeout_s: float, stage: Stage) -> ExecResult:
         """Run a configured management tool with an explicit, bounded lifetime."""
@@ -283,7 +299,7 @@ class Anchor:
                 retryable=False,
             )
 
-    async def exists(self, key: str, *, stage: Stage) -> bool:
+    async def exists(self, key: str, *, stage: Stage, root: StorageRoot = "work") -> bool:
         """Whether `key` exists.
 
         Uses `ls -d` (an applet in the anchor image) rather than `test`: the latter is not in the image, and 127 would
@@ -293,7 +309,7 @@ class Anchor:
         self.ensure_alive(stage)
         assert self._handle is not None
         proc = ProcessSpec(
-            argv=("ls", "-d", "--", self._path(key)),
+            argv=("ls", "-d", "--", self._path(key, root)),
             uid=0,
             gid=0,
             cwd="/",
@@ -345,13 +361,18 @@ class Anchor:
         result = await self._run(("ls", "-1A", "--", self._path(key)), stage)
         return result.stdout.decode().splitlines()
 
-    def _path(self, key: str) -> str:
+    def _path(self, key: str, root: StorageRoot = "work") -> str:
         """Volume key -> absolute path inside the anchor. Keys are relative to the shared root without `..`;
-        the empty string is the shared root."""
+        the empty string is the shared root. Only reads may address the read-only input root."""
         parts = key.split("/") if key else []
         if any(p in ("", ".", "..") for p in parts):
             raise ValueError(f"invalid volume key: {key!r}")
-        return posixpath.join(self._settings.mount_path, *parts)
+        s = self._settings
+        if root == WORK_ROOT:
+            return posixpath.join(s.mount_path, *parts)
+        if root not in s.inputs:
+            raise ValueError(f"the anchor does not mount storage root {root!r}")
+        return posixpath.join(s.inputs_mount_path, root, *parts)
 
     async def _run(
         self,
@@ -425,7 +446,16 @@ class Anchor:
             labels=labels.anchor_labels(self.launch_id),
             timeout_seconds=s.ttl_s,
             resources=s.resources,
-            volumes=(SharedVolume(key="", mount_path=s.mount_path, read_only=False), *s.management_mounts),
+            volumes=(
+                SharedVolume(key="", mount_path=s.mount_path, read_only=False),
+                *(
+                    SharedVolume(
+                        key="", mount_path=posixpath.join(s.inputs_mount_path, name), read_only=True, root=name
+                    )
+                    for name in s.inputs
+                ),
+                *s.management_mounts,
+            ),
             external=s.external,
             profile=s.profile,
         )

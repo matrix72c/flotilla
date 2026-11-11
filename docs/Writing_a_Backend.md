@@ -82,7 +82,7 @@ class MyCloudSettings(BackendSettings):
 
 Validation errors are reported with the TOML path (`backends.mycloud.region: Field required`) and never echo input values. Keep it that way: a pasted credential in the wrong key must not reach logs.
 
-`[storage]` is shared by all backends. `cfg.storage_settings()` returns its `volumes` (`"host"` or `"pvc"`), `host_path`, `claim_name`, and `root_subpath`. Map them to whatever your platform calls a shared mount. If your platform has a different storage model, add your own keys to the settings model and document how they relate to `[storage]`.
+`[storage]` is shared by all backends. `cfg.storage_settings()` (and `cfg.input_settings()` for the named read-only input roots) returns its `volumes` (`"host"` or `"pvc"`), `host_path`, `claim_name`, and `root_subpath`. Map them to whatever your platform calls a shared mount. If your platform has a different storage model, add your own keys to the settings model and document how they relate to `[storage]`.
 
 ## The `Backend` class
 
@@ -168,7 +168,7 @@ Never include raw response bodies, credentials, environment values, or command o
 
 **Files.** `write_file` creates the file with the given numeric `uid`, `gid`, and `mode`, and `read_file` returns raw bytes. Both are binary-safe.
 
-**Storage.** `spec.volumes` is a tuple of `SharedVolume(key, mount_path, read_only)`. `key` is a path relative to the shared root (`""` means the root itself, used only by the anchor). Mount exactly these and nothing else: anything extra is a `no_auto_mount` security gap.
+**Storage.** `spec.volumes` is a tuple of `SharedVolume(key, mount_path, read_only, root)`. `key` is a path relative to the shared root (`""` means the root itself, used only by the anchor). `root` is `"work"` (`[storage]`) or the name of an `[inputs.<name>]` root; input volumes are always read-only. Compile each volume against its root's settings and reject unknown names. Mount exactly these and nothing else: anything extra is a `no_auto_mount` security gap.
 
 **Network.**
 

@@ -7,7 +7,15 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Literal
 
-from flotilla.platform.base import RESERVED_MOUNTS, Resources, SharedVolume, TmpfsMount, overlaps, validate_mounts
+from flotilla.platform.base import (
+    RESERVED_MOUNTS,
+    Resources,
+    SharedVolume,
+    StorageRoot,
+    TmpfsMount,
+    overlaps,
+    validate_mounts,
+)
 
 Condition = Literal["service_started", "service_healthy", "service_completed_successfully"]
 RestartPolicy = Literal["no", "always", "unless-stopped", "on-failure"]
@@ -129,6 +137,8 @@ class TrialPlan:
     external_mounts: Mapping[str, tuple[SharedVolume, ...]] = field(default_factory=dict)
     # Workspace lifetime spans multiple environments; only its owner may delete it.
     workspace_root: str | None = None
+    # Storage root that `task_files` is relative to: validated native releases live on the read-only input root.
+    task_files_root: StorageRoot = "work"
     workspace_mounts: Mapping[str, tuple[SharedVolume, ...]] = field(default_factory=dict)
 
     def validate(self) -> None:
