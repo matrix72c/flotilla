@@ -62,7 +62,7 @@ Local relative paths resolve against the deployment TOML, not the caller's worki
 
 Loading configuration for probe/select/prepare does not open future release paths. Consumption opens the selected releases, verifies local task and asset contents, verifies the platform copies, and refuses missing files, mismatched identities, partial uploads and unsupported protocol versions. Selection across several releases requires every release to be explicitly bound. Large immutable assets are verified once per launch, not once per attempt. Releases must be maintained by a trusted publisher and read-only to workloads; checksums are not a promise of TOCTOU protection for an adversarially writable directory.
 
-The optional `[voyager]` namespace is retained opaquely by Flotilla and validated by Voyager. Flotilla does not interpret Agent types, GPU resources, reward or training configuration.
+An optional typed `[agent_runtime]` section binds a consumer's runtime layers (arbitrary names, each with local/platform roots); Flotilla validates shape and roots but not which layers exist — that contract belongs to the consumer. Flotilla does not interpret Agent types, GPU resources, reward or training configuration.
 
 ## Public native consumption API
 

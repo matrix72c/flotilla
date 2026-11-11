@@ -80,9 +80,17 @@ Explicit bindings for native task consumption. Probe/select/prepare can load a d
 
 The binding name is a configuration label, not a guessed task identity. Dataset rows carry release ID, task reference and digest; every selected release must be bound. Do not upload partial releases or mutate an active release. See [Native tasks](Native_Tasks.md).
 
-### `[voyager]`
+### `[agent_runtime]` (optional)
 
-Optional consumer-owned namespace, retained opaquely by Flotilla. Voyager validates its Agent choice and Agent runtime location; Flotilla does not interpret GPU, training or reward settings. Secrets must not be embedded in this namespace or task definitions.
+Typed, layer-agnostic bindings for a consumer's agent runtime. Flotilla validates the shape, layer names and roots, and mounts each layer read-only; **which layers must exist is the consumer's contract** — Flotilla does not count layers, interpret their names, or learn anything about the agent. Layer names match `[a-z][a-z0-9_-]*`.
+
+| Key | Meaning |
+|---|---|
+| `input` | Optional `[inputs.<name>]` holding the layers; omitted means the work root `[storage]` |
+| `layers.<name>.local_root` | Local directory of the layer (resolved against the deployment TOML) |
+| `layers.<name>.platform_root` | Layer location on its root, same forms as a release's `platform_root` |
+
+Agent identity, runtime mount paths and timeouts belong to the consumer's recipe, not to this section. The former opaque `[voyager]` namespace was removed; loading a deployment that still declares it fails with a migration error. Secrets must not be embedded here or in task definitions.
 
 ### `[share]` (required)
 

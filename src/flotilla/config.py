@@ -405,6 +405,24 @@ class TaskRelease(_Model):
     input: str | None = None
 
 
+class RuntimeLayerBinding(_Model):
+    """Deployment locations of one agent runtime layer; Flotilla mounts it read-only, nothing more."""
+
+    local_root: Path
+    platform_root: str = Field(min_length=1)
+
+
+class AgentRuntime(_Model):
+    """Typed agent runtime bindings: which layers must exist stays the consumer's contract.
+
+    Flotilla validates the shape, layer names and that `input` names a declared read-only root;
+    it does not interpret layer names, count layers, or learn anything about the agent.
+    """
+
+    input: str | None = None  # name of the [inputs.<name>] root holding the layers; None means the work root
+    layers: dict[str, RuntimeLayerBinding] = Field(default_factory=dict)
+
+
 class FlotillaConfig(_Model):
     backend: str = BUILTIN
     opensandbox: OpenSandbox | None = None  # built-in backend table
@@ -414,8 +432,8 @@ class FlotillaConfig(_Model):
     # storage shared read-only with this deployment). Launch, attempt and share state always stay on `storage`.
     inputs: dict[str, Storage] = Field(default_factory=dict)
     task_releases: dict[str, TaskRelease] = Field(default_factory=dict)
-    # Opaque consumer namespace: validated by Voyager, never interpreted by Flotilla.
-    voyager: dict[str, Any] = Field(default_factory=dict)
+    # Typed agent runtime layer bindings (see AgentRuntime); never interpreted beyond shape and roots.
+    agent_runtime: AgentRuntime | None = None
     build: Build = Build()
     prepare: Prepare = Prepare()
     probe: Probe = Probe()
@@ -442,6 +460,12 @@ class FlotillaConfig(_Model):
                 "[preparation] was removed: open no longer builds images. Move docker_command/concurrency to "
                 "[prepare] (used by `flotilla prepare`) and timeout_s to runtime.startup_timeout_s"
             )
+        if isinstance(data, Mapping) and "voyager" in data:
+            raise ValueError(
+                "[voyager] was replaced by the typed [agent_runtime] section: move runtime layer bindings to "
+                "[agent_runtime.layers.<name>] with `input` naming an [inputs.<name>] root; agent identity and "
+                "runtime paths belong to the consumer, not the deployment"
+            )
         return data
 
     @model_validator(mode="after")
@@ -453,6 +477,12 @@ class FlotillaConfig(_Model):
         for label, release in self.task_releases.items():
             if release.input is not None and release.input not in self.inputs:
                 raise ValueError(f"task_releases.{label}.input names no [inputs.{release.input}]")
+        if self.agent_runtime is not None:
+            for name in self.agent_runtime.layers:
+                check_root_name(name)
+            selected = self.agent_runtime.input
+            if selected is not None and selected not in self.inputs:
+                raise ValueError(f"agent_runtime.input names no [inputs.{selected}]")
         backend = load_backend(self.backend)
         if self.backend == BUILTIN:
             if self.backends:
@@ -519,6 +549,12 @@ class FlotillaConfig(_Model):
             if not root.is_absolute() and self.base_dir is not None:
                 root = self.base_dir / root
             data["task_releases"][name]["local_root"] = str(root.absolute())
+        if self.agent_runtime is not None:
+            for layer_name, layer in self.agent_runtime.layers.items():
+                root = layer.local_root
+                if not root.is_absolute() and self.base_dir is not None:
+                    root = self.base_dir / root
+                data["agent_runtime"]["layers"][layer_name]["local_root"] = str(root.absolute())
         return data
 
     def release_bindings(self) -> ReleaseBindings:

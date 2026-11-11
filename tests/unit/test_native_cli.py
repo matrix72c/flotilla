@@ -25,9 +25,10 @@ def test_probe_cleanup_is_required() -> None:
 def test_deployment_loading_does_not_open_releases(tmp_path: Path) -> None:
     data = config().model_dump(exclude={"base_dir"})
     data["task_releases"] = {"future": {"local_root": "not-created", "platform_root": "releases/future"}}
-    data["voyager"] = {"agent": "claude_code"}
+    data["agent_runtime"] = {"layers": {"lagent": {"local_root": "not-created", "platform_root": "runtimes/l1"}}}
     cfg = FlotillaConfig.from_mapping(data, base_dir=tmp_path)
     assert cfg.task_releases["future"].local_root == Path("not-created")
+    assert cfg.agent_runtime is not None and cfg.agent_runtime.layers["lagent"].local_root == Path("not-created")
     assert cfg.to_mapping()["task_releases"]["future"]["local_root"] == str(tmp_path / "not-created")
     with pytest.raises((ValueError, OSError)):
         cfg.release_bindings()
