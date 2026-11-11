@@ -121,13 +121,14 @@ def test_select_require_prebuilt_images_rejects_dockerfile_services(tmp_path: Pa
     assert [row.task_key for row in result.rows] == ["src"]
 
 
-def test_select_single_step_policy_is_a_distinct_rejection(tmp_path: Path) -> None:
+def test_select_rejects_multi_step_tasks_as_a_protocol_constraint(tmp_path: Path) -> None:
     root = tmp_path / "harbor"
     harbor_task(root, "multi", extra_toml='[[steps]]\nname = "one"\n')
     report = tmp_path / "r.json"
     with pytest.raises(PreparationError, match="zero tasks"):  # rejection empties the selection
-        select(root, caps=_caps(), report=report, compose_adapter=ADAPTER(), single_step_only=True)
-    assert "single-step" in json.loads(report.read_text())[0]["reason"]
+        select(root, caps=_caps(), report=report, compose_adapter=ADAPTER())
+    reason = json.loads(report.read_text())[0]["reason"]
+    assert "multi-step" in reason and "native protocol" in reason
 
 
 # ───────────────────────────── prepare: happy path ─────────────────────────────

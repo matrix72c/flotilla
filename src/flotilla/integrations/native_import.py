@@ -72,7 +72,6 @@ def import_task(
     caps: Capabilities,
     compose_adapter: ComposeConfigAdapter,
     require_prebuilt_images: bool = False,
-    single_step_only: bool = False,
 ) -> ImportedTask:
     """Resolve every role through Harbor's inheritance and the official Compose adapter."""
     from harbor.models.task.config import TaskConfig
@@ -83,9 +82,9 @@ def import_task(
     path = row.task_path.expanduser().resolve(strict=True)
     config = TaskConfig.model_validate(tomllib.loads(confined(path, "task.toml").read_text()))
     if config.steps:
-        if single_step_only:
-            raise UnsupportedTask("consumer.single_step: Voyager requires single-step tasks")
-        raise UnsupportedTask("native importer does not yet encode multi-step verification")
+        raise UnsupportedTask(
+            "multi-step Harbor tasks are outside the consume-only native protocol: one agent run, one verification"
+        )
     if config.artifacts:
         raise UnsupportedTask("native importer does not yet encode arbitrary Harbor artifact collection")
     if config.verifier.collect:
