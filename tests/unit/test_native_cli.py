@@ -5,6 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from flotilla.anchor_build import AnchorBuildOptions, AnchorBuildResult
+from flotilla.capabilities import CapabilityReport
 from flotilla.cli import _build_parser, main
 from flotilla.config import ConfigError, FlotillaConfig
 from flotilla.environment import load_env_file
@@ -12,7 +14,7 @@ from flotilla.testing.config import config
 from flotilla.testing.reports import no, report
 
 
-def test_probe_cleanup_is_required():
+def test_probe_cleanup_is_required() -> None:
     cfg = config()
     evidence = report(cleanup=no())
     assert "confirmed cleanup" in evidence.missing_required()
@@ -20,7 +22,7 @@ def test_probe_cleanup_is_required():
         cfg.check_against(evidence)
 
 
-def test_deployment_loading_does_not_open_releases(tmp_path):
+def test_deployment_loading_does_not_open_releases(tmp_path: Path) -> None:
     data = config().model_dump(exclude={"base_dir"})
     data["task_releases"] = {"future": {"local_root": "not-created", "platform_root": "releases/future"}}
     data["voyager"] = {"agent": "claude_code"}
@@ -31,7 +33,7 @@ def test_deployment_loading_does_not_open_releases(tmp_path):
         cfg.release_bindings()
 
 
-def test_env_is_literal_and_errors_never_echo_values(tmp_path, monkeypatch):
+def test_env_is_literal_and_errors_never_echo_values(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("TEST_NATIVE_SECRET", raising=False)
     path = tmp_path / "prepare.env"
     path.write_text("export TEST_NATIVE_SECRET='literal $HOME $(id)'\n")
@@ -45,20 +47,23 @@ def test_env_is_literal_and_errors_never_echo_values(tmp_path, monkeypatch):
     assert "hidden secret" not in str(error.value)
 
 
-def test_legacy_prepare_is_not_silently_warmup():
+def test_legacy_prepare_is_not_silently_warmup() -> None:
     with pytest.raises(SystemExit):
         _build_parser().parse_args(["prepare", "task-key", "--deployment", "d.toml"])
 
 
-def test_anchor_defaults_to_build_only(monkeypatch, capsys):
+def test_anchor_defaults_to_build_only(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     import flotilla.anchor_build as builder
 
-    seen = []
-    monkeypatch.setattr(
-        builder,
-        "build_anchor",
-        lambda options: seen.append(options) or SimpleNamespace(deployment_toml=None, image_id="sha256:test"),
-    )
+    seen: list[AnchorBuildOptions] = []
+
+    def build(options: AnchorBuildOptions) -> AnchorBuildResult:
+        seen.append(options)
+        return AnchorBuildResult(
+            image="reg/anchor:v1", version="0", image_id="sha256:test", remote_digest=None, published_image=None
+        )
+
+    monkeypatch.setattr(builder, "build_anchor", build)
     assert main(["anchor", "build", "--image", "reg/anchor:v1", "--python-image", "reg/python@sha256:" + "a" * 64]) == 0
     assert not seen[0].push
     assert "not published" in capsys.readouterr().out
@@ -66,7 +71,9 @@ def test_anchor_defaults_to_build_only(monkeypatch, capsys):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("broken", ["remove", "close", "platform"])
-async def test_probe_anchor_cleanup_failure_is_persisted_not_admitted(tmp_path, monkeypatch, broken):
+async def test_probe_anchor_cleanup_failure_is_persisted_not_admitted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, broken: str
+) -> None:
     import importlib
 
     module = importlib.import_module("flotilla.probe")
@@ -76,28 +83,28 @@ async def test_probe_anchor_cleanup_failure_is_persisted_not_admitted(tmp_path, 
     class FakeAnchor:
         launch_id = "probe-test"
 
-        def __init__(self, *args):
+        def __init__(self, *args: object) -> None:
             pass
 
-        async def start(self):
+        async def start(self) -> None:
             pass
 
-        async def mkdir(self, *args, **kwargs):
+        async def mkdir(self, *args: object, **kwargs: object) -> None:
             pass
 
-        async def remove(self, *args, **kwargs):
+        async def remove(self, *args: object, **kwargs: object) -> None:
             if broken == "remove":
                 raise RuntimeError("private details must not enter evidence")
 
-        async def close(self):
+        async def close(self) -> None:
             if broken == "close":
                 raise RuntimeError("private details must not enter evidence")
 
-    async def close_platform():
+    async def close_platform() -> None:
         if broken == "platform":
             raise RuntimeError("private details must not enter evidence")
 
-    async def measured(*args):
+    async def measured(*args: object) -> CapabilityReport:
         return evidence
 
     monkeypatch.setattr(module, "Anchor", FakeAnchor)
@@ -111,7 +118,7 @@ async def test_probe_anchor_cleanup_failure_is_persisted_not_admitted(tmp_path, 
 
 
 @pytest.mark.asyncio
-async def test_probe_output_mismatch_fails_before_platform(tmp_path, monkeypatch):
+async def test_probe_output_mismatch_fails_before_platform(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from flotilla.probe import probe_deployment
 
     cfg = config().model_copy(update={"base_dir": tmp_path})

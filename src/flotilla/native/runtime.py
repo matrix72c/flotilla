@@ -168,8 +168,8 @@ class NativeAttempt:
                     )
                 )
             elif role == "verifier" and self._handoff:
-                service = self.task.verification.service if self.task.verification else None
-                mounts.setdefault(service or manifest.agent_service, []).append(
+                verifier_service = self.task.verification.service if self.task.verification else None
+                mounts.setdefault(verifier_service or manifest.agent_service, []).append(
                     SharedVolume(
                         key=f"{self.workspace.key}/handoff/{artifact.name}",
                         mount_path=artifact.verifier_target or artifact.target,

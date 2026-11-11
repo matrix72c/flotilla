@@ -6,14 +6,14 @@ import hashlib
 import json
 import posixpath
 import re
-from typing import Any, Literal
+from typing import Any, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from flotilla.manifest import SCHEMA_VERSION, Manifest
 from flotilla.prepared import PreparedEnvironment
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION: Final = 1
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 _IMAGE = re.compile(r"[^\s@]+@sha256:[0-9a-f]{64}")
 

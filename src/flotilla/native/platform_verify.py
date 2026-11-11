@@ -6,12 +6,13 @@ import argparse
 import json
 import tempfile
 from pathlib import Path
+from typing import Any
 
 from .models import DatasetRow, Task
 from .release import ReleaseReader, ReleaseWriter
 
 
-def verify(request: dict) -> dict:
+def verify(request: dict[str, Any]) -> dict[str, Any]:
     reader = ReleaseReader(request["root"], ownership=True)
     row = DatasetRow.model_validate(request["row"])
     # Only the launch manager supplies this set, after earlier successful checks

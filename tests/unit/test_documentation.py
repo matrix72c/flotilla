@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -19,7 +20,11 @@ from flotilla.testing.runtime import deployment as deployment
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def native_example(deployment, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def native_example(
+    deployment: tuple[FlotillaConfig, FakePlatform, SharedTree],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[dict[str, Any]]:
     """Real release reader/writer and lifecycle; fake only platform execution."""
     cfg, platform, tree = deployment
     release = tmp_path / "release"
@@ -47,9 +52,9 @@ def native_example(deployment, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(FlotillaConfig, "load", lambda _: cfg)
     monkeypatch.chdir(tmp_path)
     original = platform.exec
-    checks = []
+    checks: list[dict[str, Any]] = []
 
-    async def execute(handle: InstanceHandle, proc: ProcessSpec, *, attempt: ExecAttempt | None = None):
+    async def execute(handle: InstanceHandle, proc: ProcessSpec, *, attempt: ExecAttempt | None = None) -> ExecResult:
         if proc.argv[:4] == ("python3", "-I", "-m", "flotilla.native.platform_verify"):
             if proc.argv[4] == "--clear-directory":
                 return ExecResult(0, b"", b"")
@@ -80,7 +85,7 @@ async def test_native_documentation_example(
     checks = native_example(deployment, tmp_path, monkeypatch)
     blocks = re.findall(r"```python\n(.*?)```", (ROOT / document).read_text(), re.S)
     [code] = [block for block in blocks if "async def main" in block]
-    namespace = {}
+    namespace: dict[str, Any] = {}
     exec(compile(code.replace("asyncio.run(main())", ""), document, "exec"), namespace)
     await namespace["main"]()
     assert len(checks) == 1

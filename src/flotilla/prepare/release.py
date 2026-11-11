@@ -11,7 +11,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from flotilla.build.builder import Builder, BuildRequest
 from flotilla.build.driver import BuildContext, build_task, preflight_images
@@ -21,6 +21,8 @@ from flotilla.compose.paths import confined
 from flotilla.integrations.native_import import ImportedTask, SelectedTask, UnsupportedTask, discover, import_task
 from flotilla.manifest import Manifest
 from flotilla.platform.base import Capabilities
+
+_T = TypeVar("_T")
 
 
 @dataclass(frozen=True)
@@ -69,7 +71,7 @@ class _Metrics:
         }
         self.counts = {"registry_cache_hits": 0, "seed_cache_hits": 0, "adaptations_resumed": 0}
 
-    def call(self, phase: str, function: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    def call(self, phase: str, function: Callable[..., _T], *args: Any, **kwargs: Any) -> _T:
         observation = self.phases[phase]
         observation["calls"] += 1
         started = time.monotonic()
@@ -420,7 +422,7 @@ def prepare(
         for i, row in enumerate(rows)
     ]
     imported_rows: list[ImportedTask | None] = []
-    fingerprints = []
+    fingerprints: list[str | None] = []
     for i, row in enumerate(rows):
         try:
             imported = metrics.call(
@@ -463,9 +465,9 @@ def prepare(
     if resume and state.get("input_id") != operation:
         raise PreparationError("resume inputs changed; start a new prepare work directory", reports)
     if any(row["status"] == "failed" for row in reports):
-        for row in reports:
-            if row["status"] == "pending":
-                row.update(status="not_run", code="preflight_failed")
+        for report_row in reports:
+            if report_row["status"] == "pending":
+                report_row.update(status="not_run", code="preflight_failed")
         _write(report, {"rows": reports, "images": [], "metrics": metrics.snapshot()})
         raise PreparationError("prepare preflight failed; no release published", reports)
     for key, pinned in state.get("adaptations", {}).items():
@@ -481,10 +483,13 @@ def prepare(
     published_images: set[str] = set(context.adaptations.values())
     try:
         with ReleaseWriter(output) as writer:
-            for i, imported in enumerate(imported_rows):
-                assert imported is not None
+            for i, imported_row in enumerate(imported_rows):
+                assert imported_row is not None
+                imported = imported_row
                 try:
-                    fingerprint = fingerprints[i]
+                    stored = fingerprints[i]
+                    assert stored is not None
+                    fingerprint = stored
                     if fingerprint not in records:
                         roles = {}
                         assets = []
@@ -515,7 +520,7 @@ def prepare(
                                 manifest = _asset_paths(manifest, asset)
                             roles[role] = manifest
                         verification = None
-                        artifacts = ()
+                        artifacts: tuple[Artifact, ...] = ()
                         if imported.tests is not None:
                             if not (imported.tests / "test.sh").is_file():
                                 raise ValueError("Harbor tests directory has no test.sh")

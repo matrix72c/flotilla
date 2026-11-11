@@ -180,6 +180,9 @@ forbidden_modules = [
   "flotilla.platform.opensandbox",
 ]
 
+# prepare is the host pipeline entry: like cli, it drives the Harbor importer in integrations
+# (select/prepare are host-only operations that never run inside a sandbox). Internal packages
+# below stay free of integrations; runtime additionally may not import prepare at all.
 [[tool.importlinter.contracts]]
 name = "integrations, probe, cli, and testing are outermost and not imported by internal packages"
 type = "forbidden"
@@ -193,7 +196,6 @@ source_modules = [
   "flotilla.manifest",
   "flotilla.capabilities",
   "flotilla.config",
-  "flotilla.prepare",
   "flotilla.prepared",
 ]
 forbidden_modules = [

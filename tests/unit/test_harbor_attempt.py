@@ -8,6 +8,8 @@ from typing import Any
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+
+pytest.importorskip("harbor")
 from harbor.models.task.config import TaskConfig
 from harbor.models.trial.paths import TrialPaths
 

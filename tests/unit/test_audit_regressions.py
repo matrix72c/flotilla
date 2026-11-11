@@ -170,7 +170,7 @@ def test_mount_path_inspection_rejects_image_symlink(tmp_path: Path) -> None:
             compose="services:\n  main:\n    image: r.io/a\n    tmpfs: /cache/scratch\n",
         )
     )
-    export = FakeExport(links={"/cache"})
+    export = FakeExport(links=("/cache",))
     ctx = _ctx(image_export=export)
     outcome = build_task(task, tmp_path / "out", replace(ctx, caps=replace(ctx.caps, native_tmpfs=True)))
     assert outcome.status == "failed" and "symlink" in outcome.reason

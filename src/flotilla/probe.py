@@ -78,11 +78,11 @@ async def probe_deployment(
         await anchor.mkdir(directory, stage="prepare")
         report = await probe(platform, clock, anchor, settings)
     finally:
-        for operation in (
-            lambda: anchor.remove(directory, stage="run"),
-            anchor.close,
-            platform.aclose,
-        ):
+
+        async def remove_launch() -> None:
+            await anchor.remove(directory, stage="run")
+
+        for operation in (remove_launch, anchor.close, platform.aclose):
             try:
                 await operation()
             except Exception as exc:

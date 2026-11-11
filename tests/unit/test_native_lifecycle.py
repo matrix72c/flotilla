@@ -7,16 +7,19 @@ import json
 import shutil
 import tarfile
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from flotilla import Flotilla
 from flotilla.capabilities import CapabilityReport
-from flotilla.config import Storage
+from flotilla.config import FlotillaConfig, Storage
 from flotilla.core import labels
+from flotilla.core.plan import TrialPlan
 from flotilla.manifest import Context, Manifest, Mount, Resources, Unit
 from flotilla.native import (
     Artifact,
+    BoundTask,
     NativeAttempt,
     ReleaseBinding,
     ReleaseBindings,
@@ -26,14 +29,24 @@ from flotilla.native import (
     read_dataset,
 )
 from flotilla.native.platform_verify import verify as run_platform_verify
-from flotilla.platform.base import ExecResult, FlotillaError, SharedVolume
+from flotilla.platform.base import (
+    ExecResult,
+    FlotillaError,
+    InstanceHandle,
+    InstanceSpec,
+    ProcessSpec,
+    SharedVolume,
+)
 from flotilla.prepared import PreparedEnvironment
+from flotilla.runtime.manager import Manager
 from flotilla.runtime.types import OpenOptions, RunRequest
+from flotilla.testing.platform import FakePlatform, SharedTree
 from flotilla.testing.runtime import deployment as deployment
 
 IMAGE = "example.invalid/unit@sha256:" + "c" * 64
 VERIFY_COMMAND = ("verify", "run")
 HOST = Storage(volumes="host", host_path="/srv/shared").settings()
+Deployment = tuple[FlotillaConfig, FakePlatform, SharedTree]
 
 
 def unit(mounts: tuple[Mount, ...] = ()) -> Unit:
@@ -85,7 +98,7 @@ def build_release(base: Path, *, verifier: bool = True) -> tuple[Path, Task]:
     return base / "release", task
 
 
-def volume_of(spec, mount_path: str):
+def volume_of(spec: InstanceSpec, mount_path: str) -> SharedVolume | None:
     matches = [v for v in spec.volumes if v.mount_path == mount_path]
     return matches[0] if matches else None
 
@@ -116,11 +129,11 @@ class NativeHarness:
                 self.tree.modes[entry] = oct(info.st_mode & 0o777)
             self.tree.owners[entry] = f"{info.st_uid}:{info.st_gid}"
 
-    def __init__(self, deployment, monkeypatch: pytest.MonkeyPatch) -> None:
+    def __init__(self, deployment: Deployment, monkeypatch: pytest.MonkeyPatch) -> None:
         _, self.platform, self.tree = deployment
         self.platform_copies: dict[str, Path] = {}
         self.unit_files: dict[tuple[str, str], bytes] = {}
-        self.verification_specs = []
+        self.verification_specs: list[ProcessSpec] = []
         self.verify_calls = 0
         self.with_optional = False
         self.workspace_key: str | None = None
@@ -128,7 +141,7 @@ class NativeHarness:
         platform, _tree = self.platform, self.tree
         original_exec, original_read = platform.exec, platform.read_file
 
-        async def execute(handle, proc, **kwargs):
+        async def execute(handle: InstanceHandle, proc: ProcessSpec, **kwargs: Any) -> ExecResult:
             spec = platform.spec_of(handle.iid)
             argv = proc.argv
             if spec.labels.get(labels.ROLE) == labels.ROLE_ANCHOR:
@@ -141,7 +154,7 @@ class NativeHarness:
                 return await original_exec(handle, proc, **kwargs)
             return self._unit_exec(spec, handle.iid, proc)
 
-        async def read(handle, path, **kwargs):
+        async def read(handle: InstanceHandle, path: str, **kwargs: Any) -> bytes:
             data = self.unit_files.get((handle.iid, path))
             if data is not None:
                 return data
@@ -183,13 +196,15 @@ class NativeHarness:
         src, dst = self.tree._rel(argv[-2].removesuffix("/.")), self.tree._rel(argv[-1], write=True)
         for entries in (self.tree.dirs, self.tree.files):
             entries.update(dst + p[len(src) :] for p in list(entries) if p.startswith(src + "/"))
-        for book in (self.tree.modes, self.tree.owners, self.platform.tree_contents):
+        for book in (self.tree.modes, self.tree.owners):
             book.update({dst + k[len(src) :]: v for k, v in list(book.items()) if k.startswith(src + "/")})
+        contents = self.platform.tree_contents
+        contents.update({dst + k[len(src) :]: v for k, v in list(contents.items()) if k.startswith(src + "/")})
         return ExecResult(0, b"", b"")
 
     # unit-side emulation
 
-    def _unit_exec(self, spec, iid: str, proc) -> ExecResult:
+    def _unit_exec(self, spec: InstanceSpec, iid: str, proc: ProcessSpec) -> ExecResult:
         argv = proc.argv
         if argv == ("true",):
             return ExecResult(0, b"", b"")
@@ -229,7 +244,14 @@ class NativeHarness:
         return buffer.getvalue()
 
 
-def prepare(tmp_path: Path, deployment, monkeypatch, name: str = "tb1", *, verifier: bool = True):
+def prepare(
+    tmp_path: Path,
+    deployment: Deployment,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str = "tb1",
+    *,
+    verifier: bool = True,
+) -> tuple[FlotillaConfig, FakePlatform, SharedTree, NativeHarness, BoundTask, Task]:
     """Build a release, stage a separate platform copy, and install the harness."""
     cfg, platform, tree = deployment
     root, task = build_release(tmp_path / "build", verifier=verifier)
@@ -245,7 +267,9 @@ def prepare(tmp_path: Path, deployment, monkeypatch, name: str = "tb1", *, verif
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("with_optional", [False, True])
-async def test_consume_only_lifecycle_handoff_and_cleanup(tmp_path, deployment, monkeypatch, with_optional) -> None:
+async def test_consume_only_lifecycle_handoff_and_cleanup(
+    tmp_path: Path, deployment: Deployment, monkeypatch: pytest.MonkeyPatch, with_optional: bool
+) -> None:
     cfg, platform, tree, harness, bound, task = prepare(tmp_path, deployment, monkeypatch)
     harness.with_optional = with_optional
 
@@ -315,7 +339,9 @@ async def test_consume_only_lifecycle_handoff_and_cleanup(tmp_path, deployment, 
 
 
 @pytest.mark.asyncio
-async def test_attempt_isolation_guards(tmp_path, deployment, monkeypatch) -> None:
+async def test_attempt_isolation_guards(
+    tmp_path: Path, deployment: Deployment, monkeypatch: pytest.MonkeyPatch
+) -> None:
     cfg, _platform, _tree, harness, bound, _ = prepare(tmp_path, deployment, monkeypatch)
     plain_root, _ = build_release(tmp_path / "plain", verifier=False)
     plain_copy = tmp_path / "plain-copy"
@@ -355,7 +381,9 @@ async def test_attempt_isolation_guards(tmp_path, deployment, monkeypatch) -> No
 
 
 @pytest.mark.asyncio
-async def test_verification_runs_once_and_main_stays_closed_after_handoff(tmp_path, deployment, monkeypatch) -> None:
+async def test_verification_runs_once_and_main_stays_closed_after_handoff(
+    tmp_path: Path, deployment: Deployment, monkeypatch: pytest.MonkeyPatch
+) -> None:
     cfg, platform, tree, harness, bound, _ = prepare(tmp_path, deployment, monkeypatch)
 
     async with Flotilla(deployment=cfg) as fleet:
@@ -378,7 +406,9 @@ async def test_verification_runs_once_and_main_stays_closed_after_handoff(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_platform_copy_drift_fails_create_and_cleans_checks(tmp_path, deployment, monkeypatch) -> None:
+async def test_platform_copy_drift_fails_create_and_cleans_checks(
+    tmp_path: Path, deployment: Deployment, monkeypatch: pytest.MonkeyPatch
+) -> None:
     cfg, _platform, tree, harness, bound, task = prepare(tmp_path, deployment, monkeypatch)
     drifted = harness.platform_copies["releases/tb1"]
     (drifted / task.assets[0] / "data.txt").write_text("tampered after publication")
@@ -391,7 +421,9 @@ async def test_platform_copy_drift_fails_create_and_cleans_checks(tmp_path, depl
 
 
 @pytest.mark.asyncio
-async def test_create_failure_releases_attempt_directory(tmp_path, deployment, monkeypatch) -> None:
+async def test_create_failure_releases_attempt_directory(
+    tmp_path: Path, deployment: Deployment, monkeypatch: pytest.MonkeyPatch
+) -> None:
     cfg, _platform, tree, harness, bound, _ = prepare(tmp_path, deployment, monkeypatch)
     harness.fail_chown_of = "artifacts/agent"
 
@@ -402,14 +434,16 @@ async def test_create_failure_releases_attempt_directory(tmp_path, deployment, m
 
 
 @pytest.mark.asyncio
-async def test_unvalidated_native_task_files_rejected_until_launch_validates(tmp_path, deployment, monkeypatch) -> None:
+async def test_unvalidated_native_task_files_rejected_until_launch_validates(
+    tmp_path: Path, deployment: Deployment, monkeypatch: pytest.MonkeyPatch
+) -> None:
     cfg, _platform, _tree, _harness, bound, _ = prepare(tmp_path, deployment, monkeypatch)
     request = RunRequest(
         task=PreparedEnvironment(bound.task.roles["main"].model_copy(update={"task_files": bound.platform_key})),
         request_id="r1",
     )
 
-    async def plan_of(manager):
+    async def plan_of(manager: Manager) -> TrialPlan:
         return manager.plan(request)
 
     async with Flotilla(deployment=cfg) as fleet:
@@ -422,7 +456,9 @@ async def test_unvalidated_native_task_files_rejected_until_launch_validates(tmp
 
 
 @pytest.mark.asyncio
-async def test_releases_on_named_read_only_input_roots(tmp_path, deployment, monkeypatch) -> None:
+async def test_releases_on_named_read_only_input_roots(
+    tmp_path: Path, deployment: Deployment, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Releases come from two named read-only input roots; attempt state stays on the work root."""
     cfg, platform, tree = deployment
     inputs = {"datasets": Storage(host_path="@user:owner"), "extra": Storage(host_path="@user:other")}
@@ -469,8 +505,10 @@ async def test_releases_on_named_read_only_input_roots(tmp_path, deployment, mon
             source = volume_of(main_spec, "/input")
             assert source is not None and source.read_only and source.root == name
             assert source.key == f"tb/r1/{task.assets[0]}"
-            assert volume_of(main_spec, "/logs/agent").root == "work"
-            assert volume_of(main_spec, "/.flotilla").root == "work"  # share tools stay on the work root
+            artifacts = volume_of(main_spec, "/logs/agent")
+            assert artifacts is not None and artifacts.root == "work"
+            share = volume_of(main_spec, "/.flotilla")
+            assert share is not None and share.root == "work"  # share tools stay on the work root
 
             answer = f"{attempt.workspace.key}/artifacts/agent/answer.txt"
             tree.files.add(answer)

@@ -48,14 +48,14 @@ def ownership(workspace: str, task_key: str) -> dict[str, str]:
     return {"launch": parts[1], "workspace": workspace, "task_key": task_key}
 
 
-class NeutralShellAgent(NopAgent):
+class NeutralShellAgent(NopAgent):  # type: ignore[misc]  # harbor ships no type information
     """Actual Harbor agent entry point; fixed shell command, no model/provider."""
 
     @staticmethod
     def name() -> str:
         return "flotilla-neutral-contract"
 
-    async def run(self, instruction, environment, context):
+    async def run(self, instruction: str, environment: Any, context: Any) -> None:
         attempt = environment.runtime_context.attempt
         if attempt is None:
             raise RuntimeError("native runtime has no active attempt")
@@ -125,7 +125,7 @@ async def publish_fixture(anchor: Anchor, local_root: Path, prefix: str, image: 
             await anchor.upload(f"{prefix}/{mode}/{name}", data, mode=permissions, uid=0, gid=0, stage="prepare")
 
 
-def native_job_config(deployment: Path, root: Path, prefix: str, output: Path) -> dict:
+def native_job_config(deployment: Path, root: Path, prefix: str, output: Path) -> dict[str, Any]:
     """Build/validate the exact CLI config without contacting a platform."""
     from harbor.models.job.config import JobConfig
 
@@ -195,11 +195,19 @@ async def run_native(deployment: Path, root: Path, prefix: str, output: Path) ->
     return owners
 
 
-async def run_sandbox(deployment: Path, root: Path, prefix: str, runtime: dict, output: Path) -> list[dict[str, str]]:
-    from sandbox_rl.harbor.provider import HarborEnvironmentProvider
-    from sandbox_rl.harbor.recipe import HarborRecipe
-    from sandbox_rl.harbor.verifier import HarborJudger
-    from sandbox_rl.rollout.execution import ReadFileHook, RolloutStatus, Runner, SandboxStage, ShellEntry
+async def run_sandbox(
+    deployment: Path, root: Path, prefix: str, runtime: dict[str, Any], output: Path
+) -> list[dict[str, str]]:
+    from sandbox_rl.harbor.provider import HarborEnvironmentProvider  # type: ignore[import-not-found]
+    from sandbox_rl.harbor.recipe import HarborRecipe  # type: ignore[import-not-found]
+    from sandbox_rl.harbor.verifier import HarborJudger  # type: ignore[import-not-found]
+    from sandbox_rl.rollout.execution import (  # type: ignore[import-not-found]
+        ReadFileHook,
+        RolloutStatus,
+        Runner,
+        SandboxStage,
+        ShellEntry,
+    )
 
     provider = HarborEnvironmentProvider(
         deployment,
@@ -248,7 +256,7 @@ async def run_sandbox(deployment: Path, root: Path, prefix: str, runtime: dict, 
 
 
 async def run(deployment: Path, image: str, runtime_file: Path, output: Path) -> bool:
-    from sandbox_rl.config.spec.config_groups import AgentRuntimeConfig
+    from sandbox_rl.config.spec.config_groups import AgentRuntimeConfig  # type: ignore[import-not-found]
 
     deployment = deployment.expanduser().resolve(strict=True)
     cfg = FlotillaConfig.load(deployment)

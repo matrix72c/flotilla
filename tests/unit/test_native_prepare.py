@@ -8,6 +8,8 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+
+pytest.importorskip("harbor")
 from harbor.models.task.config import TaskConfig
 
 from flotilla.build.builder import BuildRequest
@@ -15,6 +17,7 @@ from flotilla.build.driver import BuildContext
 from flotilla.build.images import BuildSettings, ImageError
 from flotilla.integrations.native_import import SelectedTask
 from flotilla.native import ReleaseReader, read_dataset
+from flotilla.platform.base import Capabilities
 from flotilla.prepare import PreparationError, prepare, select
 from flotilla.testing.build import DIGEST, FakeBuilder, FakeExport, FakeRegistry, _caps, _ctx
 from flotilla.testing.compose import OfflineComposeAdapter
@@ -56,7 +59,7 @@ def harbor_task(
 ADAPTER = OfflineComposeAdapter
 
 
-def _selection(tmp_path: Path, caps=None) -> Path:
+def _selection(tmp_path: Path, caps: Capabilities | None = None) -> Path:
     out = tmp_path / "selected.jsonl"
     if not out.exists():
         select(tmp_path / "harbor", caps=caps or _caps(), out=out, compose_adapter=ADAPTER())
@@ -196,7 +199,7 @@ volumes:
     assert verification is not None
     assert verification.role == "main" and verification.command == ("bash", "/tests/test.sh")
     assert verification.require_output and verification.env == {} and verification.timeout_s == 600.0
-    assert (out / verification.tests / "test.sh").is_file()  # hidden tests are staged, not mounted
+    assert verification.tests and (out / verification.tests / "test.sh").is_file()  # hidden tests staged
     assert [(a.name, a.role, a.target) for a in seeded_task.artifacts] == [("agent", "main", "/logs/agent")]
     # Volume seed becomes a static asset with preserved ownership metadata.
     asset = next(a for a in seeded_task.assets if (out / a / "seeds").is_dir())
@@ -525,7 +528,9 @@ def test_prepare_resume_reuses_pushed_adaptations(tmp_path: Path) -> None:
     assert set(result.images) == {f"r.io/ns/out@{RUNTIME_A}", f"r.io/ns/out@{RUNTIME_B}"}
 
 
-def test_prepare_metrics_measure_real_calls_not_seed_cache_hits(tmp_path: Path, monkeypatch) -> None:
+def test_prepare_metrics_measure_real_calls_not_seed_cache_hits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from types import SimpleNamespace
 
     import flotilla.prepare.release as module
@@ -534,9 +539,11 @@ def test_prepare_metrics_measure_real_calls_not_seed_cache_hits(tmp_path: Path, 
     monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: clock[0]))
 
     class TimedExport(FakeExport):
-        def extract(self, *args, **kwargs):
+        def extract(
+            self, image: str, path: str, dest: Path, *, identities: dict[str, tuple[int, int, int]] | None = None
+        ) -> bool:
             clock[0] += 3.5
-            return super().extract(*args, **kwargs)
+            return super().extract(image, path, dest, identities=identities)
 
     root = tmp_path / "harbor"
     for name in ("alpha", "beta"):

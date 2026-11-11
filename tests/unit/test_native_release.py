@@ -9,7 +9,9 @@ import shutil
 import subprocess
 import sys
 import tarfile
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -17,6 +19,7 @@ from flotilla.config import Storage
 from flotilla.manifest import Context, Manifest, Mount, Resources, TrialVolume, Unit
 from flotilla.native import (
     Artifact,
+    DatasetRow,
     ReleaseBinding,
     ReleaseBindings,
     ReleaseReader,
@@ -77,11 +80,11 @@ def build_release(base: Path, *, verifier: bool = True, instruction: str = "Solv
     return base / "release", task
 
 
-def row_of(root: Path):
+def row_of(root: Path) -> DatasetRow:
     return read_dataset(root / "dataset.jsonl")[0]
 
 
-def copy_release(root: Path, name: str, change) -> Path:
+def copy_release(root: Path, name: str, change: Callable[[Path], None]) -> Path:
     copy = root.parent / name
     shutil.copytree(root, copy, symlinks=True)
     change(copy)
@@ -180,7 +183,7 @@ def test_dataset_rows_keep_annotations_and_duplicates_in_order(tmp_path: Path) -
         pytest.param([{"task_ref": "tasks/" + "0" * 64 + "/task.json"}], id="missing-digest"),
     ],
 )
-def test_publish_rejects_invalid_selections_and_cleans_staging(tmp_path: Path, rows: list[dict]) -> None:
+def test_publish_rejects_invalid_selections_and_cleans_staging(tmp_path: Path, rows: list[dict[str, Any]]) -> None:
     files = tmp_path / "input"
     files.mkdir()
     (files / "data.txt").write_text("x")
@@ -292,7 +295,7 @@ def test_reader_detects_asset_drift(tmp_path: Path) -> None:
     row = row_of(root)
     asset = task.assets[0]
 
-    def mutated(name: str, change) -> Path:
+    def mutated(name: str, change: Callable[[Path], None]) -> Path:
         return copy_release(root, name, lambda copy: change(copy / asset))
 
     for name, change in [
@@ -338,7 +341,7 @@ def test_reader_rejects_non_directories(tmp_path: Path) -> None:
         pytest.param(lambda d: ((d / "setuid").write_text("x"), (d / "setuid").chmod(0o4755)), id="setuid"),
     ],
 )
-def test_writer_rejects_unsafe_asset_contents(tmp_path: Path, plant) -> None:
+def test_writer_rejects_unsafe_asset_contents(tmp_path: Path, plant: Callable[[Path], None]) -> None:
     source = tmp_path / "input"
     source.mkdir()
     plant(source)
@@ -432,7 +435,9 @@ def test_valid_seed_passes_through_public_api(tmp_path: Path) -> None:
         ),
     ],
 )
-def test_unsafe_seed_archives_rejected_at_publish(tmp_path: Path, members) -> None:
+def test_unsafe_seed_archives_rejected_at_publish(
+    tmp_path: Path, members: list[tuple[str, str, int, str | None]]
+) -> None:
     with pytest.raises(ValueError):
         publish_with_seed(tmp_path, members)
     assert not (tmp_path / "release").exists()
@@ -447,7 +452,7 @@ def test_task_schema_guards() -> None:
     mount = Mount(scope="task", key=good, target="/in", read_only=True)
 
     def manifest(
-        image: str = IMAGE, mounts: tuple[Mount, ...] = (mount,), volumes: tuple[TrialVolume, ...] = (), **extra
+        image: str = IMAGE, mounts: tuple[Mount, ...] = (mount,), volumes: tuple[TrialVolume, ...] = (), **extra: Any
     ) -> Manifest:
         return Manifest(
             task="ds/a",
@@ -465,8 +470,8 @@ def test_task_schema_guards() -> None:
             trial_volumes=list(volumes),
         )
 
-    def task(**kwargs) -> Task:
-        base: dict = {"key": "ds/a", "roles": {"main": manifest()}, "assets": (good,)}
+    def task(**kwargs: Any) -> Task:
+        base: dict[str, Any] = {"key": "ds/a", "roles": {"main": manifest()}, "assets": (good,)}
         base.update(kwargs)
         return Task(**base)
 
@@ -617,7 +622,9 @@ def test_read_dataset_reports_reject_line_numbers(tmp_path: Path) -> None:
 
 
 def helper_process(tmp_path: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    source = Path(__import__("flotilla").__file__).parents[1]
+    module = __import__("flotilla")
+    assert module.__file__ is not None
+    source = Path(module.__file__).parents[1]
     hostile = tmp_path / "cwd"
     (hostile / "flotilla" / "native").mkdir(parents=True, exist_ok=True)
     (hostile / "flotilla" / "__init__.py").write_text("raise SystemExit(9)\n")
@@ -660,7 +667,9 @@ def test_installed_helper_verifies_request_and_writes_result(tmp_path: Path) -> 
 
 
 def test_native_modules_never_import_compose_or_builder(tmp_path: Path) -> None:
-    source = Path(__import__("flotilla").__file__).parents[1]
+    module = __import__("flotilla")
+    assert module.__file__ is not None
+    source = Path(module.__file__).parents[1]
     code = (
         "import sys, flotilla, flotilla.native, flotilla.native.runtime as r, flotilla.native.platform_verify,"
         "flotilla.runtime.manager, flotilla.runtime.planning;"

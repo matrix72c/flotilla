@@ -494,7 +494,7 @@ def test_named_inputs_bind_releases_and_the_anchor(tmp_path: Path, monkeypatch: 
     assert set(cfg.input_settings()) == {"datasets", "runtimes"}
     seen: list[Any] = []
 
-    def capture(bindings, *, storage, inputs):
+    def capture(bindings: dict[str, Any], *, storage: Any, inputs: Any) -> None:
         seen.append(({name: b.root for name, b in bindings.items()}, storage, inputs))
 
     monkeypatch.setattr(flotilla.native, "ReleaseBindings", capture)

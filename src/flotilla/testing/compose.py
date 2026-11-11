@@ -14,10 +14,11 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from flotilla.compose.adapter import ComposeConfigAdapter
 from flotilla.compose.task import load_environment
 
 
-class OfflineComposeAdapter:
+class OfflineComposeAdapter(ComposeConfigAdapter):
     """Compose adapter double for select/prepare tests; never executes a tool."""
 
     def load(

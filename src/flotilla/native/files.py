@@ -55,13 +55,12 @@ def inventory(root: Path, identities: Mapping[str, tuple[int, int, int]] | None 
         uid, gid, mode = identities.get(key, (info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)))
         if mode & 0o7000:
             raise ValueError(f"unsupported special permission bits: {key}")
-        common = dict(uid=uid, gid=gid, mode=mode)
         if stat.S_ISDIR(info.st_mode):
-            result[key] = FileEntry(kind="directory", **common)
+            result[key] = FileEntry(kind="directory", mode=mode, uid=uid, gid=gid)
             for child in sorted(path.iterdir(), reverse=True):
                 stack.append((child.name if key == "." else f"{key}/{child.name}", child))
         elif stat.S_ISREG(info.st_mode):
-            result[key] = FileEntry(kind="file", size=info.st_size, sha256=file_hash(path), **common)
+            result[key] = FileEntry(kind="file", mode=mode, uid=uid, gid=gid, size=info.st_size, sha256=file_hash(path))
         elif stat.S_ISLNK(info.st_mode):
             target = os.readlink(path)
             if not target or target.startswith("/") or "\\" in target or any(ord(c) < 32 for c in target):
@@ -72,7 +71,7 @@ def inventory(root: Path, identities: Mapping[str, tuple[int, int, int]] | None 
                 raise ValueError(f"unsafe symlink: {key}") from exc
             if root.is_symlink() or not resolved.is_relative_to(root.resolve()):
                 raise ValueError(f"symlink escapes asset: {key}")
-            result[key] = FileEntry(kind="symlink", target=target, **common)
+            result[key] = FileEntry(kind="symlink", mode=mode, uid=uid, gid=gid, target=target)
         else:
             raise ValueError(f"unsupported special file: {key}")
     if set(identities) - set(result):

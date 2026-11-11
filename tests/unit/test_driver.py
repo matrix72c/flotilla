@@ -142,7 +142,9 @@ def test_seed_bytes_ignore_extraction_times_preserving_identity_and_links(tmp_pa
         def __init__(self, timestamp: float) -> None:
             self.timestamp = timestamp
 
-        def extract(self, image, path, dest, *, identities=None):
+        def extract(
+            self, image: str, path: str, dest: Path, *, identities: dict[str, tuple[int, int, int]] | None = None
+        ) -> bool:
             directory = dest / "nested"
             directory.mkdir()
             (directory / "first").write_bytes(b"from-image")
@@ -151,6 +153,7 @@ def test_seed_bytes_ignore_extraction_times_preserving_identity_and_links(tmp_pa
             metadata = {".": (101, 202, 0o750), "nested": (101, 202, 0o700)}
             metadata.update({f"nested/{name}": (103, 204, 0o640) for name in ("first", "second")})
             metadata["nested/link"] = (103, 204, 0o777)
+            assert identities is not None
             identities.update(metadata)
             for entry in [dest, *dest.rglob("*")]:
                 os.utime(entry, (self.timestamp, self.timestamp), follow_symlinks=False)
@@ -175,7 +178,8 @@ def test_seed_bytes_ignore_extraction_times_preserving_identity_and_links(tmp_pa
         assert tar.getmember("nested").mode == 0o700
         first = tar.getmember("nested/first")
         assert (first.uid, first.gid, first.mode) == (103, 204, 0o640)
-        assert tar.extractfile(first).read() == b"from-image"
+        stream = tar.extractfile(first)
+        assert stream is not None and stream.read() == b"from-image"
         assert tar.getmember("nested/second").islnk()
         assert tar.getmember("nested/second").linkname == "nested/first"
         assert tar.getmember("nested/link").issym()

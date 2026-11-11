@@ -4,6 +4,8 @@ Importing readers and models does not load the scheduler, Harbor, Compose or a
 builder. Runtime exports are lazy for CPU metadata and installed helper use.
 """
 
+from typing import Any
+
 from .models import (
     PROTOCOL_VERSION,
     Artifact,
@@ -47,7 +49,7 @@ __all__ = [
 ]
 
 
-def __getattr__(name: str):
+def __getattr__(name: str) -> Any:
     if name in {"NativeAttempt", "VerificationResult"}:
         from .runtime import NativeAttempt, VerificationResult
 

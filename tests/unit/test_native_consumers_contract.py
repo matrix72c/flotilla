@@ -12,7 +12,7 @@ from flotilla.compose.normalize import normalize
 from tests.contract.native_consumers import fixture_files
 
 
-def test_compose_fixture_overrides_image_entrypoint():
+def test_compose_fixture_overrides_image_entrypoint() -> None:
     files = fixture_files("compose", "registry.example/neutral@sha256:" + "a" * 64)
     document = json.loads(files["environment/docker-compose.yaml"])
     project = normalize(document, {})

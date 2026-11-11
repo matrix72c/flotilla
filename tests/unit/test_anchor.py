@@ -751,6 +751,7 @@ async def test_named_input_roots_are_mounted_read_only_and_only_read(
 ) -> None:
     settings = AnchorSettings(image="anchor@sha256:abc", inputs=("datasets", "runtimes"))
     anchor = await _started(platform, clock, settings)
+    assert anchor.iid is not None
     volumes = platform.spec_of(anchor.iid).volumes
     assert [(v.key, v.mount_path, v.read_only, v.root) for v in volumes] == [
         ("", "/flotilla-root", False, "work"),
@@ -789,6 +790,7 @@ async def test_named_input_roots_are_mounted_read_only_and_only_read(
 @pytest.mark.asyncio
 async def test_unconfigured_input_root_is_refused(platform: FakePlatform, clock: ManualClock) -> None:
     anchor = await _started(platform, clock)
+    assert anchor.iid is not None
     assert [v.root for v in platform.spec_of(anchor.iid).volumes] == ["work"]
     assert anchor.path("releases/r", root="work") == "/flotilla-root/releases/r"
     with pytest.raises(ValueError, match="datasets"):

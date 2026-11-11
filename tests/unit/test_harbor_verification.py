@@ -8,10 +8,12 @@ import json
 import shlex
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+
+pytest.importorskip("harbor")
 from harbor.models.task.config import TaskConfig, TaskOS
 from harbor.models.trial.config import ArtifactConfig
 from harbor.models.trial.paths import TrialPaths
@@ -194,8 +196,8 @@ async def test_separate_verifier_releases_main_before_staging_and_keeps_workspac
         assert verification.active_verifier is verifier
         assert events == ["release-main", "stage-tests", "open-verifier", "initialize-verifier"]
         await verification.check()
-        main.handle.check.assert_awaited_once()
-        verifier.handle.check.assert_awaited_once()
+        cast(SimpleNamespace, main.handle).check.assert_awaited_once()
+        cast(SimpleNamespace, verifier.handle).check.assert_awaited_once()
         owner.close.assert_not_awaited()
         options = owner.open.await_args.args[1]
         assert options.request_id == "attempt-verifier"
