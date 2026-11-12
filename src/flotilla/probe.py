@@ -31,6 +31,7 @@ from flotilla.platform.base import (
     SharedVolume,
     TmpfsMount,
 )
+from flotilla.share.release import ensure_builtin_release
 
 PROBE_LABEL = "flotilla/probe"  # run id; with the launch and unit labels it identifies a probed instance
 _EXEC_TIMEOUT_S = 30.0
@@ -75,6 +76,9 @@ async def probe_deployment(
     directory = f"launches/{anchor.launch_id}"
     try:
         await anchor.start()
+        if cfg.share.builtin:
+            # Every probe sandbox mounts the share tools, so the release must exist first.
+            await ensure_builtin_release(anchor)
         await anchor.mkdir(directory, stage="prepare")
         report = await probe(platform, clock, anchor, settings)
     finally:

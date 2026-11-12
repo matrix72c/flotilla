@@ -87,12 +87,14 @@ Typed, layer-agnostic bindings for a consumer's agent runtime. Flotilla validate
 | Key | Meaning |
 |---|---|
 | `input` | Optional `[inputs.<name>]` holding the layers; omitted means the work root `[storage]` |
-| `layers.<name>.local_root` | Local directory of the layer (resolved against the deployment TOML) |
+| `layers.<name>.local_root` | Optional local directory of the layer (resolved against the deployment TOML); Flotilla only records it |
 | `layers.<name>.platform_root` | Layer location on its root, same forms as a release's `platform_root` |
 
 Agent identity, runtime mount paths and timeouts belong to the consumer's recipe, not to this section. The former opaque `[voyager]` namespace was removed; loading a deployment that still declares it fails with a migration error. Secrets must not be embedded here or in task definitions.
 
-### `[share]` (required)
+### `[share]` (optional)
+
+Omitted means the built-in release `busybox-1.36.1-r31`, published from the Anchor image's pinned BusyBox into the work root at probe/runtime start when missing. Set it only for a custom release.
 
 | Key | Meaning |
 |---|---|
@@ -265,7 +267,7 @@ The probe image needs the configured execd interface, shell/file utilities and P
 
 Schema 2 stores one `status` per check: `passed`, `failed`, `skipped`, or `error`, plus concise evidence, measurements and runtime scope. Only `passed` enables a capability. `ok` is a derived internal property, not an accepted report field. Reports do not accept `source`, `declared`, `implicit_egress_declared`, `diagnostics`, or `multi_container`.
 
-`evidence_profile` binds backend, endpoint/project/extensions, ordinary and privileged runtime choices, execd/filesystem protocols, storage mapping, shared-tool release, network policy and relevant TTL/list budgets. Build settings and preparation concurrency are excluded. A different relevant configuration requires a new probe; endpoint equality alone is insufficient. Ordinary evidence does not enable privileged execution: its storage, auth, network and no-auto-mount checks are separate.
+`evidence_profile` binds backend, endpoint/project/extensions, ordinary and privileged runtime choices, execd/filesystem protocols, storage mapping, shared-tool release, network policy and relevant TTL/list budgets. Build settings and preparation concurrency are excluded. It records what the probe measured; a later configuration change only logs a warning, so rerun the probe when the platform behavior itself changed. Ordinary evidence does not enable privileged execution: its storage, auth, network and no-auto-mount checks are separate.
 
 The report records requested TTLs, observed expiries and measured group size, not maximum platform limits. The configured list budget remains subject to `reaper.grace + probe.list_visibility_s < reaper.gc_window`; a fast observation never shrinks the safety budget.
 

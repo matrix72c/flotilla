@@ -352,10 +352,16 @@ def test_ingress_extension_is_explicit_and_requires_sandbox_id_linking() -> None
         ("inputs", {"datasets": {"host_path": "@user:owner"}}),
     ],
 )
-def test_relevant_config_changes_reject_stale_evidence(section: str, value: dict[str, Any]) -> None:
+def test_config_changes_keep_evidence_and_only_warn(
+    section: str, value: dict[str, Any], caplog: pytest.LogCaptureFixture
+) -> None:
     cfg = config(**{section: value})
-    with pytest.raises(ConfigError, match="evidence"):
-        cfg.platform_capabilities(report())
+    evidence = report()
+    assert evidence.evidence_profile != cfg.evidence_profile()
+    assert cfg.platform_capabilities(evidence).link  # the report describes the platform, not this text
+    with caplog.at_level("WARNING", logger="flotilla.config"):
+        cfg.check_against(evidence)
+    assert "different deployment settings" in caplog.text
 
 
 def test_protocol_runtime_extension_binding() -> None:
@@ -551,3 +557,20 @@ def test_agent_runtime_is_typed_and_layer_agnostic(tmp_path: Path) -> None:
     assert cfg.agent_runtime.layers["lagent"].local_root == Path("layers/lagent")
     resolved = cfg.to_mapping()["agent_runtime"]["layers"]["lagent"]["local_root"]
     assert resolved == str(tmp_path / "layers/lagent")
+
+
+def test_share_defaults_to_the_builtin_release() -> None:
+    data = config_data()
+    del data["share"]
+    assert FlotillaConfig.from_mapping(data).share.builtin
+    assert not config().share.builtin  # an explicit custom pin stays custom
+
+
+def test_runtime_layer_local_root_is_optional(tmp_path: Path) -> None:
+    cfg = config(
+        inputs={"runtimes": {"host_path": "@user:owner", "root_subpath": "runtimes"}},
+        agent_runtime={"input": "runtimes", "layers": {"node": {"platform_root": "node/node22"}}},
+    )
+    assert cfg.agent_runtime is not None and cfg.agent_runtime.layers["node"].local_root is None
+    restored = FlotillaConfig.from_mapping(cfg.to_mapping(), base_dir=tmp_path)
+    assert restored.agent_runtime == cfg.agent_runtime

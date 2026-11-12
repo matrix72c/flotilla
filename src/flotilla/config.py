@@ -38,6 +38,7 @@ from flotilla.platform.opensandbox import ExecdSettings, NetworkSettings, Storag
 from flotilla.platform.opensandbox import build as build_opensandbox
 from flotilla.platform.opensandbox.filesystem import FilesystemProtocol, FilesystemSettings
 from flotilla.resources import cpu, memory
+from flotilla.share.release import BUILTIN_RELEASE, BUILTIN_RELEASE_SHA256
 
 if TYPE_CHECKING:
     from flotilla.build.images import BuildSettings
@@ -144,8 +145,15 @@ class Storage(_Model):
 
 
 class Share(_Model):
-    release: str
-    release_sha256: str
+    """Shared tools mounted at /.flotilla. Omit `[share]` to use the built-in BusyBox release."""
+
+    release: str = BUILTIN_RELEASE
+    release_sha256: str = BUILTIN_RELEASE_SHA256
+
+    @property
+    def builtin(self) -> bool:
+        """Whether this is the built-in release, which runtime and probe start publish when missing."""
+        return (self.release, self.release_sha256) == (BUILTIN_RELEASE, BUILTIN_RELEASE_SHA256)
 
     @field_validator("release")
     @classmethod
@@ -406,10 +414,13 @@ class TaskRelease(_Model):
 
 
 class RuntimeLayerBinding(_Model):
-    """Deployment locations of one agent runtime layer; Flotilla mounts it read-only, nothing more."""
+    """Location of one agent runtime layer on its storage root; Flotilla mounts it read-only, nothing more.
 
-    local_root: Path
+    `local_root` is an optional host copy for consumers that want one; Flotilla never reads it.
+    """
+
     platform_root: str = Field(min_length=1)
+    local_root: Path | None = None
 
 
 class AgentRuntime(_Model):
@@ -437,7 +448,7 @@ class FlotillaConfig(_Model):
     build: Build = Build()
     prepare: Prepare = Prepare()
     probe: Probe = Probe()
-    share: Share
+    share: Share = Share()
     network: Network = Network()
     security: Security = Security()
     runtime_params: dict[str, str] = {}
@@ -551,10 +562,12 @@ class FlotillaConfig(_Model):
             data["task_releases"][name]["local_root"] = str(root.absolute())
         if self.agent_runtime is not None:
             for layer_name, layer in self.agent_runtime.layers.items():
-                root = layer.local_root
-                if not root.is_absolute() and self.base_dir is not None:
-                    root = self.base_dir / root
-                data["agent_runtime"]["layers"][layer_name]["local_root"] = str(root.absolute())
+                if layer.local_root is None:
+                    continue
+                local = layer.local_root
+                if not local.is_absolute() and self.base_dir is not None:
+                    local = self.base_dir / local
+                data["agent_runtime"]["layers"][layer_name]["local_root"] = str(local.absolute())
         return data
 
     def release_bindings(self) -> ReleaseBindings:
@@ -581,10 +594,8 @@ class FlotillaConfig(_Model):
         return CapabilityReport.load_json(self.capabilities_path().read_bytes())
 
     def platform_capabilities(self, report: CapabilityReport | None = None) -> Capabilities:
-        """Only use measured evidence bound to this deployment's runtime choices."""
+        """Capabilities measured by the probe, adjusted for what this deployment enforces."""
         report = report or self.load_report()
-        if report.evidence_profile != self.evidence_profile():
-            raise ConfigError(["capability evidence does not match deployment settings; rerun probe"])
         caps = report.to_capabilities()
         rt = report.runtime
         caps = replace(
@@ -709,7 +720,11 @@ class FlotillaConfig(_Model):
         """Startup validation without platform calls. Raises `ConfigError` listing every problem."""
         problems: list[str] = []
         if report.evidence_profile != self.evidence_profile():
-            problems.append("capability evidence does not match deployment settings; rerun probe")
+            # Informational only: the report describes the platform, not this exact deployment text.
+            logging.getLogger(__name__).warning(
+                "capability report was measured with different deployment settings; rerun probe if the platform "
+                "behavior changed"
+            )
         endpoint = self.backend_settings.endpoint
         if report.endpoint.rstrip("/") != endpoint:
             problems.append(f"capability report endpoint {report.endpoint} does not match config {endpoint}")

@@ -159,7 +159,7 @@ def test_unsupported_tmpfs_is_rejected_before_building(tmp_path: Path) -> None:
     assert not builder.requests
 
 
-def test_report_requires_matching_dialect_and_runtime_profile() -> None:
+def test_report_requires_probed_evidence_and_the_internal_dialect() -> None:
     data = config_data()
     data["opensandbox"]["filesystem_protocol"] = "sandbox-system-v1"
     cfg = FlotillaConfig.from_mapping(data)
@@ -172,14 +172,15 @@ def test_report_requires_matching_dialect_and_runtime_profile() -> None:
     )
     assert cfg.platform_capabilities(evidence).readonly_rootfs and cfg.platform_capabilities(evidence).native_tmpfs
     assert not cfg.platform_capabilities(report(evidence_profile=cfg.evidence_profile())).readonly_rootfs
-    changes: list[dict[str, Any]] = [{"filesystem_protocol": "upstream"}, {"extensions": {"runtimeClass": "kata"}}]
-    for changed in changes:
-        other = cfg.model_copy(update={"opensandbox": cfg.opensandbox_settings().model_copy(update=changed)})
-        with pytest.raises(ValueError, match="evidence"):
-            other.platform_capabilities(evidence)
-    unmeasured = evidence.model_copy(update={"evidence_profile": ""})
-    with pytest.raises(ValueError, match="evidence"):
-        cfg.platform_capabilities(unmeasured)
+    upstream = cfg.model_copy(
+        update={"opensandbox": cfg.opensandbox_settings().model_copy(update={"filesystem_protocol": "upstream"})}
+    )
+    caps = upstream.platform_capabilities(evidence)
+    assert not caps.readonly_rootfs and not caps.native_tmpfs  # the dialect is still enforced
+    kata = cfg.model_copy(
+        update={"opensandbox": cfg.opensandbox_settings().model_copy(update={"extensions": {"runtimeClass": "kata"}})}
+    )
+    assert kata.platform_capabilities(evidence).readonly_rootfs  # settings changes no longer discard evidence
 
 
 def test_effective_configuration_is_normalized_and_malformed_values_fail_closed() -> None:

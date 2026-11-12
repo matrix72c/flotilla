@@ -148,6 +148,7 @@ forbidden_modules = [
   "flotilla.build",
   "flotilla.scan",
   "flotilla.share",
+  "flotilla.busybox",
   "flotilla.manifest",
   "flotilla.capabilities",
   "flotilla.config",

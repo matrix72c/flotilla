@@ -34,12 +34,11 @@ host_path = "/srv/flotilla"
 # claim_name = "flotilla-shared"
 # root_subpath = "flotilla"
 
-[share]
-# Publish this immutable release before running probe: `flotilla share publish <dir> --deployment deployment.toml`
-# writes RELEASE.json, uploads it, and prints the two lines below to paste back.
-release = "example-release"
-# Replace with the SHA256 of the published release's RELEASE.json.
-release_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+# [share] is optional: without it, probe/runtime start publish the built-in BusyBox release from the Anchor image.
+# For a custom release, run `flotilla share publish <dir> --deployment deployment.toml` and paste the two lines it prints:
+# [share]
+# release = "example-release"
+# release_sha256 = "<sha256 of the published RELEASE.json>"
 
 [network]
 external = []

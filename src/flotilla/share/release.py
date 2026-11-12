@@ -13,9 +13,12 @@ import uuid
 from collections.abc import Mapping, Sequence, Set
 from dataclasses import dataclass
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from flotilla._io import owned_io
+from flotilla.busybox import BUSYBOX_SHA256, BUSYBOX_URL
 from flotilla.core.anchor import Anchor
+from flotilla.platform.base import FlotillaError
 
 SHARE = "share"
 RELEASES = f"{SHARE}/releases"
@@ -23,6 +26,15 @@ STAGING = f"{SHARE}/staging"
 RELEASE_JSON = "RELEASE.json"
 #: Per-file limit: files go one by one over exec, so an oversized file is a build problem, not uploaded.
 MAX_FILE_BYTES = 512 * 1024 * 1024
+
+#: The built-in share: the Anchor image's own pinned BusyBox, published as `bin/busybox` (mode 0755). A deployment
+#: without `[share]` uses it, and runtime/probe start publishes it into the work root when it is missing.
+BUILTIN_COMPONENT = BUSYBOX_URL.rsplit("/", 1)[-1].removesuffix(".apk").removeprefix("busybox-static-")
+BUILTIN_RELEASE = f"busybox-{BUILTIN_COMPONENT}"
+#: sha256 of the built-in release's `RELEASE.json`; byte-identical to releases published by earlier tooling.
+BUILTIN_RELEASE_SHA256 = "9b571fcfe2ac28acf951f082785c2718b4d6bff3c2400728de7841dce4d5ad9b"
+#: Where the Anchor image ships the BusyBox binary (see `anchor_assets/Dockerfile`).
+ANCHOR_BUSYBOX = "/.flotilla/bin/busybox"
 
 
 class ReleaseError(ValueError):
@@ -228,6 +240,43 @@ async def check_release(anchor: Anchor, release: str, *, expected_sha256: str) -
         raise ReleaseError(f"{manifest_key} sha256 is {actual}, but the config pins {expected_sha256}")
     if not await anchor.exists(f"{target}/bin/busybox", stage="prepare"):
         raise ReleaseError(f"share release {release} has no bin/busybox")
+
+
+async def ensure_builtin_release(anchor: Anchor) -> bool:
+    """Publish the built-in share from the Anchor image's BusyBox when the work root lacks it.
+
+    Needs no network: the binary comes from the running Anchor and must be the pinned build. Returns whether this
+    call published it; a concurrent publisher of the same content is fine. Callers still run `check_release`.
+    """
+    if await anchor.exists(f"{RELEASES}/{BUILTIN_RELEASE}/{RELEASE_JSON}", stage="prepare"):
+        return False
+    data = await anchor.read_image_file(ANCHOR_BUSYBOX, stage="prepare")
+    if hashlib.sha256(data).hexdigest() != BUSYBOX_SHA256:
+        raise ReleaseError(
+            f"Anchor image {ANCHOR_BUSYBOX} is not the pinned BusyBox; publish a share and set [share] explicitly"
+        )
+
+    def stage_bundle(directory: str) -> Path:
+        root = Path(directory) / "bundle"
+        (root / "bin").mkdir(parents=True)
+        binary = root / "bin" / "busybox"
+        binary.write_bytes(data)
+        binary.chmod(0o755)
+        return root
+
+    with TemporaryDirectory(prefix="flotilla-share-") as directory:
+        root = await owned_io(stage_bundle, directory)
+        try:
+            result = await publish_release(anchor, BUILTIN_RELEASE, root, components={"busybox": BUILTIN_COMPONENT})
+        except (ReleaseError, FlotillaError):
+            # Lost a race to another launch: accept its release only if it is the built-in one.
+            if not await anchor.exists(f"{RELEASES}/{BUILTIN_RELEASE}/{RELEASE_JSON}", stage="prepare"):
+                raise
+            await check_release(anchor, BUILTIN_RELEASE, expected_sha256=BUILTIN_RELEASE_SHA256)
+            return False
+    if result.release_sha256 != BUILTIN_RELEASE_SHA256:
+        raise ReleaseError(f"built-in share published with unexpected {RELEASE_JSON} sha256 {result.release_sha256}")
+    return not result.skipped
 
 
 async def verify_release(anchor: Anchor, release: str, *, expected_sha256: str) -> VerifyReport:

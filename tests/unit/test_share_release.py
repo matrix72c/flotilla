@@ -16,13 +16,21 @@ from typing import Any
 import pytest
 import pytest_asyncio
 
+from flotilla.busybox import BUSYBOX_SHA256
 from flotilla.core.anchor import Anchor, AnchorSettings
 from flotilla.platform.base import ErrorCategory, FlotillaError
+from flotilla.share import release as share_release
 from flotilla.share.release import (
+    ANCHOR_BUSYBOX,
+    BUILTIN_COMPONENT,
+    BUILTIN_RELEASE,
+    BUILTIN_RELEASE_SHA256,
     RELEASE_JSON,
     RELEASES,
     STAGING,
     ReleaseError,
+    check_release,
+    ensure_builtin_release,
     gc_releases,
     publish_release,
     release_entries,
@@ -370,3 +378,76 @@ async def test_changed_source_does_not_publish_an_inconsistent_manifest(
         await publish_release(anchor, "changed", root, components={})
     assert f"{RELEASES}/changed" not in tree.dirs
     assert not any(p.startswith(f"{STAGING}/changed.") for p in tree.dirs)
+
+
+# ───────────────────────────── built-in share ─────────────────────────────
+
+
+def test_builtin_release_reproduces_the_previously_published_share() -> None:
+    """Deployments that pinned the canonical BusyBox share keep the same RELEASE.json digest."""
+    document = {
+        "components": {"busybox": BUILTIN_COMPONENT},
+        "files": {"bin/busybox": {"mode": "0755", "sha256": BUSYBOX_SHA256, "size": 1025960}},
+        "release": BUILTIN_RELEASE,
+    }
+    blob = json.dumps(document, sort_keys=True, ensure_ascii=False, indent=2).encode() + b"\n"
+    assert BUILTIN_RELEASE == "busybox-1.36.1-r31"
+    assert hashlib.sha256(blob).hexdigest() == BUILTIN_RELEASE_SHA256
+
+
+def _pin_fake_busybox(monkeypatch: pytest.MonkeyPatch, anchor: Anchor, tmp_path: Path, data: bytes) -> list[str]:
+    """Make `data` the pinned BusyBox and serve it as the Anchor image binary; returns the read log."""
+    monkeypatch.setattr(share_release, "BUSYBOX_SHA256", hashlib.sha256(data).hexdigest())
+    root = tmp_path / "expected"
+    (root / "bin").mkdir(parents=True)
+    (root / "bin" / "busybox").write_bytes(data)
+    (root / "bin" / "busybox").chmod(0o755)
+    _, digest = release_json(BUILTIN_RELEASE, root, {"busybox": BUILTIN_COMPONENT})
+    monkeypatch.setattr(share_release, "BUILTIN_RELEASE_SHA256", digest)
+    reads: list[str] = []
+
+    async def read_image_file(path: str, *, stage: str) -> bytes:
+        reads.append(path)
+        return data
+
+    monkeypatch.setattr(anchor, "read_image_file", read_image_file)
+    return reads
+
+
+@pytest.mark.asyncio
+async def test_builtin_release_is_published_from_the_anchor_image_once(
+    anchor: Anchor, tree: SharedTree, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reads = _pin_fake_busybox(monkeypatch, anchor, tmp_path, b"\x7fELF-busybox")
+    assert await ensure_builtin_release(anchor)
+    assert reads == [ANCHOR_BUSYBOX]
+    key = f"{RELEASES}/{BUILTIN_RELEASE}/bin/busybox"
+    assert key in tree.files and tree.modes[key] == "0755"
+    await check_release(anchor, BUILTIN_RELEASE, expected_sha256=share_release.BUILTIN_RELEASE_SHA256)
+    # Present releases are left alone: no second read or upload.
+    events = list(tree.events)
+    assert not await ensure_builtin_release(anchor)
+    assert reads == [ANCHOR_BUSYBOX]
+    assert tree.events == events
+
+
+@pytest.mark.asyncio
+async def test_builtin_release_refuses_an_unpinned_anchor_busybox(
+    anchor: Anchor, tree: SharedTree, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _pin_fake_busybox(monkeypatch, anchor, tmp_path, b"\x7fELF-busybox")
+
+    async def other(path: str, *, stage: str) -> bytes:
+        return b"something else"
+
+    monkeypatch.setattr(anchor, "read_image_file", other)
+    with pytest.raises(ReleaseError, match="not the pinned BusyBox"):
+        await ensure_builtin_release(anchor)
+    assert f"{RELEASES}/{BUILTIN_RELEASE}" not in tree.dirs
+
+
+@pytest.mark.asyncio
+async def test_read_image_file_refuses_storage_and_relative_paths(anchor: Anchor) -> None:
+    for path in ("/flotilla-root/share/x", "/flotilla-inputs/runtimes/x", "relative/busybox", "/a/../b"):
+        with pytest.raises(ValueError, match="not an Anchor image path"):
+            await anchor.read_image_file(path, stage="prepare")
