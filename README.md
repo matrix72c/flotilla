@@ -60,7 +60,7 @@ flotilla probe --deployment deployment.toml --env sandbox.env
 flotilla select --host-root ./tasks --deployment deployment.toml \
   --out selected.jsonl --report selection-report.json
 flotilla prepare selected.jsonl --deployment deployment.toml \
-  --out ./release --report prepare-report.json --image-repo registry.example.org/team/tasks
+  --out ./release --name example --report prepare-report.json --image-repo registry.example.org/team/tasks
 ```
 
 `prepare` may build and publish required USER0 adaptations. It does not upload the static release. Bind the local release and its published platform location in `[task_releases.example]` before executing. See [Native tasks](docs/Native_Tasks.md) for path binding, installation, credentials and migration.
@@ -91,7 +91,7 @@ async def main():
 asyncio.run(main())
 ```
 
-`NativeAttempt` consumes the bound task definition and assets, creates attempt-private writable state and opens its roles. Hidden tests are staged only for verification. Local and platform integrity checks reject missing or altered files; no source-task or builder fallback is permitted. Dataset rows retain full release/task identities, order and duplicates. Metadata and capacity inspection use the prepared definitions rather than recompiling source tasks.
+`NativeAttempt` consumes the bound task definition and assets, creates attempt-private writable state and opens its roles. Hidden tests are staged only for verification. No source-task or builder fallback is permitted. Dataset rows name their release and task and keep order and duplicates. Metadata and capacity inspection use the prepared definitions rather than recompiling source tasks.
 
 Harbor and Voyager share this lifecycle. Harbor remains optional, using a pinned patched build for its source/runtime interfaces. The old source-workspace APIs are legacy interfaces, not the native consumption path.
 

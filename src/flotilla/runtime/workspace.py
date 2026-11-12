@@ -97,11 +97,8 @@ class WorkspaceStore:
         self.jobs: set[asyncio.Task[Any]] = set()
         self.compile_slots = asyncio.Semaphore(config.prepare.concurrency)
         self.closing = False
-        # Registered only after the installed native helper verifies consumed files.
+        # Native release task files a launch may mount: registered when a native attempt is created.
         self.native_environments: dict[str, tuple[str, str]] = {}  # digest -> (task files key, storage root)
-        self.native_assets: dict[tuple[str, str, str], set[str]] = {}  # (storage root, key, release) -> assets
-        self.native_tasks: set[tuple[str, str, str, str]] = set()
-        self.native_lock = asyncio.Lock()
 
     async def create_empty(self, task_key: str) -> WorkspaceInfo:
         """Create private state without copying or compiling a source task."""

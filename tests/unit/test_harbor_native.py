@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, Mock
@@ -72,16 +72,14 @@ def build_release(
     roles: dict[str, Manifest] = {"main": role("datasets/task")}
     if mode == "separate":
         roles["verifier"] = role("datasets/task#verifier")
-    with ReleaseWriter(base / "release") as writer:
-        asset = writer.add_asset(tests)
+    with ReleaseWriter(base / "release", "fixture") as writer:
         task = Task(
             key="datasets/task",
             roles=roles,
-            assets=(asset,),
             verification=Verification(
                 role="verifier" if mode == "separate" else "main",
                 command=VERIFY_COMMAND,
-                tests=asset,
+                tests="tasks/datasets/task/tests",
                 env={"TASK_TOKEN": "native"},
                 optional_output_paths={"reward.txt": "/logs/verifier/reward.txt"},
                 require_output=True,
@@ -93,8 +91,8 @@ def build_release(
                 "harbor": {"config": PRESENTATION if presentation is None else presentation},
             },
         )
-        record = writer.add_task(task, "A neutral native instruction.\n")
-        writer.publish([{"task_ref": record.task_ref, "task_digest": record.task_digest, "annotations": {}}])
+        writer.add_task(task, "A neutral native instruction.\n", {"tests": tests})
+        writer.publish([{"task": "datasets/task", "annotations": {}}])
     return base / "release"
 
 
@@ -154,11 +152,11 @@ async def test_resolve_preserves_row_order_and_duplicates(tmp_path: Path, select
     source.dataset = duplicates
     resolved = await source.resolve_task_configs(job_config(source))
     assert [task.path for task in resolved] == [
-        root / PurePosixPath(row["task_ref"]).parent
+        root / "tasks" / row["task"]
     ] * 3  # duplicates are separate trials, not deduplicated
-    assert [task.source for task in resolved] == [row["release_id"]] * 3
+    assert [task.source for task in resolved] == [row["release"]] * 3
     # Every row was validated against the release, not just the first.
-    assert set(source.bounds) == {(root / PurePosixPath(row["task_ref"]).parent).absolute()}
+    assert set(source.bounds) == {(root / "tasks" / row["task"]).absolute()}
 
 
 async def test_resolve_rejects_harbor_task_selection(selection: Selection) -> None:
@@ -176,9 +174,9 @@ async def test_resolve_rejects_empty_and_unbound_selections(tmp_path: Path, sele
     with pytest.raises(ValueError, match="selects no tasks"):
         await source.resolve_task_configs(job_config(source))
     foreign = tmp_path / "foreign.jsonl"
-    foreign.write_text(json.dumps(dict(row, release_id="0" * 64)) + "\n")
+    foreign.write_text(json.dumps(dict(row, release="other")) + "\n")
     source.dataset = foreign
-    with pytest.raises(ValueError, match="without an explicit binding"):
+    with pytest.raises(ValueError, match="without a \\[task_releases\\] binding"):
         await source.resolve_task_configs(job_config(source))
 
 
@@ -203,7 +201,7 @@ async def test_load_rebuilds_the_harbor_task_from_provenance(selection: Selectio
     assert task.config.environment.docker_image == "r.io/main:1"
     assert download.cached and download.download_time_sec == 0
     bound = source.bound_for(task)
-    assert bound.row.task_digest == row["task_digest"]
+    assert bound.row.task == row["task"]
     assert bound.task.provenance["harbor"]["config"]["environment"]["docker_image"] == "r.io/main:1"
 
 
@@ -333,7 +331,7 @@ async def make_runtime(
     task_config = TaskConfig.model_validate(PRESENTATION)
     task = HarborTask.from_metadata(root, config=task_config, instruction="A neutral native instruction.\n")
     runtime = NativeFlotillaRuntime.__new__(NativeFlotillaRuntime)
-    runtime.bound = source.bounds[(root / PurePosixPath(row["task_ref"]).parent).absolute()]
+    runtime.bound = source.bounds[(root / "tasks" / row["task"]).absolute()]
     runtime.config = config
     runtime.task = task
     runtime.paths = paths_of(tmp_path)

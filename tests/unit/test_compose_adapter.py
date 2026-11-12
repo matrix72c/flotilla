@@ -76,6 +76,25 @@ def test_adapter_delegates_ordered_merge_and_interpolation(tmp_path: Path, monke
     assert calls[-1][0][-4:] == ["config", "--format", "json", "--no-path-resolution"]
 
 
+def test_adapter_checks_the_compose_version_once_per_process(tmp_path: Path) -> None:
+    calls: list[list[str]] = []
+
+    def run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        if args[-2:] == ["version", "--short"]:
+            return subprocess.CompletedProcess(args, 0, COMPOSE_VERSION, "")
+        return subprocess.CompletedProcess(args, 0, '{"name": "flotilla", "services": {"main": {"image": "i"}}}', "")
+
+    (tmp_path / "compose.yaml").write_text("services: {}")
+    with patch("flotilla.compose.adapter.subprocess.run", side_effect=run):
+        for _ in range(3):
+            ComposeConfigAdapter().load(
+                tmp_path, files=(tmp_path / "compose.yaml",), environment={}, main_image="i", main_build=False
+            )
+    assert [args[-2:] for args in calls].count(["version", "--short"]) == 1
+    assert len(calls) == 4
+
+
 @pytest.mark.parametrize("failure", ["missing", "wrong-version", "config-error"])
 def test_adapter_never_falls_back(tmp_path: Path, failure: str) -> None:
     def run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:

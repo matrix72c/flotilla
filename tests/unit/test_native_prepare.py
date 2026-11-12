@@ -1,4 +1,4 @@
-"""Host select/prepare: atomic all-row releases, USER0 dedup, explicit mirror, resume."""
+"""Host select/prepare: atomic all-row releases, USER0 dedup, explicit mirror, failure cleanup."""
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ pytest.importorskip("harbor")
 from harbor.models.task.config import TaskConfig
 
 from flotilla.build.builder import BuildRequest
-from flotilla.build.driver import BuildContext
 from flotilla.build.images import BuildSettings, ImageError
 from flotilla.integrations.native_import import SelectedTask
 from flotilla.native import ReleaseReader, read_dataset
@@ -156,6 +155,7 @@ volumes:
     result = prepare(
         _selection(tmp_path),
         out=out,
+        name="rel",
         image_repo="r.io/ns/out",
         report=report,
         context=_ctx(
@@ -165,11 +165,12 @@ volumes:
         compose_adapter=ADAPTER(),
     )
     # Complete release layout published by a single rename; staging is gone.
-    assert (out / "manifest.json").is_file() and (out / "dataset.jsonl").is_file()
+    assert sorted(p.name for p in out.iterdir()) == ["dataset.jsonl", "tasks"]
     assert not list(tmp_path.glob(f".{out.name}-*"))
     rows = read_dataset(out / "dataset.jsonl")
     assert len(rows) == 2
-    assert all(row.release_id == result.release_id for row in rows)
+    assert all(row.release == result.name == "rel" for row in rows)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["harbor", "release", "report.json", "selected.jsonl"]
     assert all(r["status"] == "prepared" for r in result.report)
     assert json.loads(report.read_text())["rows"] == [dict(r) for r in result.report]
     assert json.loads(report.read_text())["metrics"] == result.metrics
@@ -179,14 +180,14 @@ volumes:
     assert phases["image_extract"]["calls"] == 1
     assert phases["user0_build_push"]["calls"] == phases["application_build_push"]["calls"] == 0
     assert phases["registry_copy"]["calls"] == 0
-    assert phases["package"]["calls"] == 5  # two tasks, two assets, final publication
+    assert phases["package"]["calls"] == 3  # two tasks, final publication
     assert all(phase["seconds"] >= 0 and phase["failed"] == 0 for phase in phases.values())
     assert result.metrics["elapsed_s"] >= phases["package"]["seconds"]
 
     reader = ReleaseReader(out)
-    tasks = {task.key: task for task in (reader.read_task(row) for row in rows)}
+    tasks = {task.key: task for task in (reader.read_task(row.task) for row in rows)}
     assert set(tasks) == {"plain", "seeded"}
-    assert sorted(reader.instruction(row) for row in rows) == ["Do it.\n", "Solve the task.\n"]
+    assert sorted(reader.instruction(row.task) for row in rows) == ["Do it.\n", "Solve the task.\n"]
     # Root-user images are linked by digest; nothing was built or copied.
     assert builder.requests == []
     plain_task = tasks["plain"]
@@ -202,8 +203,9 @@ volumes:
     assert verification.require_output and verification.env == {} and verification.timeout_s == 600.0
     assert verification.tests and (out / verification.tests / "test.sh").is_file()  # hidden tests staged
     assert [(a.name, a.role, a.target) for a in seeded_task.artifacts] == [("agent", "main", "/logs/agent")]
-    # Volume seed becomes a static asset with preserved ownership metadata.
-    asset = next(a for a in seeded_task.assets if (out / a / "seeds").is_dir())
+    # Volume seed is a tar inside the task directory, with its ownership metadata.
+    asset = "tasks/seeded/files"
+    assert verification.tests == "tasks/seeded/tests"
     volumes = seeded_task.roles["main"].trial_volumes
     assert any(v.seed and v.seed.startswith(f"{asset}/seeds/") for v in volumes)
     with tarfile.open(next((out / asset / "seeds").glob("*.tar"))) as archive:
@@ -234,6 +236,7 @@ def test_prepare_failure_publishes_nothing_but_reports_every_row(tmp_path: Path)
         prepare(
             _selection(tmp_path),
             out=out,
+            name="rel",
             image_repo="r.io/ns/out",
             report=report,
             context=_ctx(),
@@ -256,14 +259,14 @@ def test_prepare_output_collision_and_identical_row_dedup(tmp_path: Path) -> Non
         annotations={"split": "train"},
         parameters={"SEED": "7"},
     )
-    result = prepare([row, row], out=out, context=_ctx(), compose_adapter=ADAPTER())
+    result = prepare([row, row], out=out, name="rel", context=_ctx(), compose_adapter=ADAPTER())
     assert len(list((out / "tasks").iterdir())) == 1  # identical rows share one task entry
     rows = read_dataset(out / "dataset.jsonl")
     assert len(rows) == 2
     assert all(r.annotations == {"split": "train"} and r.parameters == {"SEED": "7"} for r in rows)
     assert all(r["status"] == "prepared" for r in result.report)
     with pytest.raises(FileExistsError):
-        prepare([row], out=out, context=_ctx(), compose_adapter=ADAPTER())
+        prepare([row], out=out, name="rel", context=_ctx(), compose_adapter=ADAPTER())
 
 
 # ───────────────────────────── USER0 adaptation ─────────────────────────────
@@ -284,6 +287,7 @@ def test_prepare_adapts_nonroot_images_once_per_digest(tmp_path: Path) -> None:
     result = prepare(
         _selection(tmp_path),
         out=out,
+        name="rel",
         image_repo="r.io/ns/out",
         context=_ctx(builder=builder, registry=FakeRegistry(user="1000:1001", published=builder.published)),
         compose_adapter=ADAPTER(),
@@ -294,7 +298,7 @@ def test_prepare_adapts_nonroot_images_once_per_digest(tmp_path: Path) -> None:
     assert all(r.tag.startswith("r.io/ns/out:user0-") for r in builder.requests)
     assert len({r.tag for r in builder.requests}) == 2
     reader = ReleaseReader(out)
-    tasks = {t.key: t for t in (reader.read_task(row) for row in read_dataset(out / "dataset.jsonl"))}
+    tasks = {t.key: t for t in (reader.read_task(row.task) for row in read_dataset(out / "dataset.jsonl"))}
     shared = f"r.io/ns/out@{RUNTIME_A}"
     alpha = tasks["alpha"]
     assert set(alpha.roles) == {"main", "verifier"}  # verifier role declared via task.toml
@@ -322,6 +326,7 @@ def test_prepare_requires_image_repo_before_any_publication(tmp_path: Path) -> N
         prepare(
             _selection(tmp_path),
             out=out,
+            name="rel",
             report=report,
             context=_ctx(
                 builder=builder,
@@ -345,6 +350,7 @@ def test_prepare_image_repo_overrides_context_target(tmp_path: Path) -> None:
     prepare(
         _selection(tmp_path),
         out=tmp_path / "release",
+        name="rel",
         image_repo="r.io/x/y",
         context=_ctx(builder=builder, registry=FakeRegistry(user="1000:1001", published=builder.published)),
         compose_adapter=ADAPTER(),
@@ -364,6 +370,7 @@ def test_prepare_mirrors_only_when_explicitly_configured(tmp_path: Path) -> None
         prepare(
             _selection(tmp_path),
             out=out,
+            name="rel",
             report=report,
             context=_ctx(builder=builder, registry=registry),
             compose_adapter=ADAPTER(),
@@ -381,6 +388,7 @@ def test_prepare_mirrors_only_when_explicitly_configured(tmp_path: Path) -> None
     result = prepare(
         _selection(tmp_path),
         out=tmp_path / "mirrored",
+        name="rel",
         context=ctx,
         compose_adapter=ADAPTER(),
     )
@@ -391,7 +399,7 @@ def test_prepare_mirrors_only_when_explicitly_configured(tmp_path: Path) -> None
     source, target = mirror.copied[0]
     assert source == f"docker.io/library/redis@{DIGEST}" and target.startswith("r.io/ns/out:mirror-")
     reader = ReleaseReader(result.output)
-    task = reader.read_task(read_dataset(result.output / "dataset.jsonl")[0])
+    task = reader.read_task(read_dataset(result.output / "dataset.jsonl")[0].task)
     assert task.roles["main"].units["main"].image == f"r.io/ns/out@{DIGEST}"  # remote digest read-back
     assert result.images == (f"r.io/ns/out@{DIGEST}",)
 
@@ -418,18 +426,19 @@ def test_prepare_inspects_tmpfs_paths_without_building(tmp_path: Path) -> None:
     result = prepare(
         _selection(tmp_path, caps=enhanced),
         out=tmp_path / "release",
+        name="rel",
         context=_ctx(builder=builder, image_export=export, caps=enhanced),
         compose_adapter=ADAPTER(),
     )
     assert builder.requests == []  # mount directories are runtime responsibilities
     assert export.inspected == [(f"r.io/ns/app@{DIGEST}", ("/cache", "/scratch", "/.flotilla-runtime"))]
     reader = ReleaseReader(result.output)
-    task = reader.read_task(read_dataset(result.output / "dataset.jsonl")[0])
+    task = reader.read_task(read_dataset(result.output / "dataset.jsonl")[0].task)
     unit = task.roles["main"].units["main"]
     assert [m.mount_path for m in unit.tmpfs_mounts] == ["/cache", "/scratch"]
 
 
-# ───────────────────────────── resume ─────────────────────────────
+# ───────────────────────────── failure cleanup ─────────────────────────────
 
 
 class PushOutageBuilder(FakeBuilder):
@@ -441,92 +450,27 @@ class PushOutageBuilder(FakeBuilder):
         return super().build(request)
 
 
-def _nonroot_context(builder: FakeBuilder) -> BuildContext:
-    return _ctx(builder=builder, registry=FakeRegistry(user="1000:1001", published=builder.published))
-
-
-def test_prepare_resume_reuses_pushed_adaptations(tmp_path: Path) -> None:
+def test_prepare_failure_reports_pushed_images_and_removes_work_files(tmp_path: Path) -> None:
     root = tmp_path / "harbor"
     harbor_task(root, "alpha")
     harbor_task(root, "beta", image="r.io/other:1")
-    selected = _selection(tmp_path)
+    builder = PushOutageBuilder(digests=[RUNTIME_A])
     out, report = tmp_path / "release", tmp_path / "report.json"
-    work = tmp_path / f".{out.name}.prepare"
     with pytest.raises(PreparationError, match="no release published"):
         prepare(
-            selected,
+            _selection(tmp_path),
             out=out,
+            name="rel",
             image_repo="r.io/ns/out",
             report=report,
-            context=_nonroot_context(PushOutageBuilder(digests=[RUNTIME_A])),
+            context=_ctx(builder=builder, registry=FakeRegistry(user="1000:1001", published=builder.published)),
             compose_adapter=ADAPTER(),
         )
     assert not out.exists()
-    state = json.loads((work / "state.json").read_text())
-    assert len(state["adaptations"]) == 1  # alpha's adaptation was pushed before the outage
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["harbor", "report.json", "selected.jsonl"]
     assert json.loads(report.read_text())["images"] == [f"r.io/ns/out@{RUNTIME_A}"]
     interrupted = json.loads(report.read_text())["metrics"]["phases"]["user0_build_push"]
     assert interrupted["calls"] == 2 and interrupted["failed"] == 1
-
-    # Interrupted work is never silently reused: resume is explicit or rejected.
-    with pytest.raises(ValueError, match="explicit resume"):
-        prepare(
-            selected,
-            out=out,
-            image_repo="r.io/ns/out",
-            context=_nonroot_context(FakeBuilder()),
-            compose_adapter=ADAPTER(),
-        )
-    with pytest.raises(ValueError, match="resume requires existing evidence"):
-        prepare(
-            selected,
-            out=tmp_path / "fresh",
-            resume=True,
-            image_repo="r.io/ns/out",
-            context=_nonroot_context(FakeBuilder()),
-            compose_adapter=ADAPTER(),
-        )
-    empty_work = tmp_path / ".partial.prepare"
-    empty_work.mkdir()
-    with pytest.raises(PreparationError, match="resume requires work evidence"):
-        prepare(
-            selected,
-            out=tmp_path / "partial",
-            resume=True,
-            work_dir=empty_work,
-            context=_nonroot_context(FakeBuilder()),
-            compose_adapter=ADAPTER(),
-        )
-    (root / "alpha" / "instruction.md").write_text("Changed.\n")
-    with pytest.raises(PreparationError, match="resume inputs changed"):
-        prepare(
-            selected,
-            out=out,
-            resume=True,
-            image_repo="r.io/ns/out",
-            context=_nonroot_context(FakeBuilder()),
-            compose_adapter=ADAPTER(),
-        )
-    (root / "alpha" / "instruction.md").write_text("Do it.\n")
-
-    resumed = FakeBuilder(digests=[RUNTIME_B])
-    result = prepare(
-        selected,
-        out=out,
-        resume=True,
-        image_repo="r.io/ns/out",
-        context=_nonroot_context(resumed),
-        compose_adapter=ADAPTER(),
-    )
-    assert len(resumed.requests) == 1 and resumed.requests[0].tag.startswith("r.io/ns/out:user0-")
-    assert result.metrics["counts"]["adaptations_resumed"] == 1
-    assert result.metrics["phases"]["user0_build_push"]["calls"] == 1
-    assert result.metrics["phases"]["user0_build_push"]["failed"] == 0
-    reader = ReleaseReader(out)
-    tasks = {t.key: t for t in (reader.read_task(row) for row in read_dataset(out / "dataset.jsonl"))}
-    assert tasks["alpha"].roles["main"].units["main"].image == f"r.io/ns/out@{RUNTIME_A}"  # reused, not rebuilt
-    assert tasks["beta"].roles["main"].units["main"].image == f"r.io/ns/out@{RUNTIME_B}"
-    assert set(result.images) == {f"r.io/ns/out@{RUNTIME_A}", f"r.io/ns/out@{RUNTIME_B}"}
 
 
 def test_prepare_metrics_measure_real_calls_not_seed_cache_hits(
@@ -562,6 +506,7 @@ volumes:
     result = prepare(
         _selection(tmp_path),
         out=tmp_path / "release",
+        name="rel",
         context=_ctx(image_export=TimedExport({"/data": {"seed": "same"}})),
         compose_adapter=ADAPTER(),
     )
@@ -572,7 +517,7 @@ volumes:
     assert result.metrics["counts"]["registry_cache_hits"] > 0
     assert phases["role_prepare"]["seconds"] == 3.5  # inclusive, not a second 3.5 s cost
     assert result.metrics["elapsed_s"] == 3.5
-    assert "metrics" not in (result.output / "manifest.json").read_text()
+    assert "metrics" not in (result.output / "dataset.jsonl").read_text()
 
 
 def test_prepare_metrics_separate_application_build_from_user0(tmp_path: Path) -> None:
@@ -581,6 +526,7 @@ def test_prepare_metrics_separate_application_build_from_user0(tmp_path: Path) -
     result = prepare(
         _selection(tmp_path),
         out=tmp_path / "release",
+        name="rel",
         context=_ctx(builder=builder),
         compose_adapter=ADAPTER(),
     )

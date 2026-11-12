@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Changed
 
+- **Breaking: native release format v2.** A release is a plain directory: `dataset.jsonl` plus `tasks/<task-key>/{task.json,instruction.md,files/,tests/}`. There is no `manifest.json`, no content addressing, no per-file inventory and no `release_id`/`task_digest`. Rows are `{release, task, annotations, parameters}`; `release` names the `[task_releases.<name>]` binding. Version 1 releases must be prepared again.
+- Consumers read only `task.json` and `instruction.md`; nothing is hashed locally, and launches no longer run the Anchor-side `platform_verify` check (the installed helper keeps `--clear-directory` and `--self-test`, so existing Anchor images keep working). The 16 MiB metadata limit is gone, so one release holds any number of tasks.
+- `flotilla prepare` takes `--name` and drops `--resume`/`--work-dir` and the input fingerprint; work files live in a temporary sibling directory removed afterwards. File owners are not recorded or applied; modes are kept.
+- The Compose executable's version is checked once per process instead of once per task.
 - `[share]` is optional. Without it a deployment uses the built-in release `busybox-1.36.1-r31`, which probe and runtime start publish into the work root from the Anchor image's pinned BusyBox when missing (no network). Explicit `[share]` pins keep working.
 - A capability report measured with different deployment settings (`evidence_profile`) is no longer rejected; runtime start logs a warning. The report schema is unchanged.
 - `[agent_runtime].layers.<name>.local_root` is optional; layers can be identified by `platform_root` alone.

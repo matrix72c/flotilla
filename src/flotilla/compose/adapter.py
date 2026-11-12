@@ -93,6 +93,10 @@ def _input_gate(root: Path, files: Sequence[Path]) -> None:
                         _env_file_gate(root, spec)
 
 
+# The executable's version is checked once per process, not once per task.
+_VERSION_CHECKED: set[tuple[tuple[str, ...], str]] = set()
+
+
 @dataclass(frozen=True)
 class ComposeConfigAdapter:
     """The executable and exact version are explicit dependencies, never auto-installed.
@@ -139,9 +143,11 @@ class ComposeConfigAdapter:
             # load_environment still applies native task resource overrides. Do
             # not use this shortcut for even an empty, but present, Compose file.
             return normalize({"services": {MAIN: base}}, {}, resolved=True)
-        version = self._run([*self.command, "version", "--short"], root, env).strip().removeprefix("v")
-        if version != self.expected_version:
-            raise ValueError(f"Compose {self.expected_version} required; found {version!r}")
+        if (self.command, self.expected_version) not in _VERSION_CHECKED:
+            version = self._run([*self.command, "version", "--short"], root, env).strip().removeprefix("v")
+            if version != self.expected_version:
+                raise ValueError(f"Compose {self.expected_version} required; found {version!r}")
+            _VERSION_CHECKED.add((self.command, self.expected_version))
         # Compose owns merging, interpolation, env_file parsing and short forms.
         with TemporaryDirectory(prefix="flotilla-compose-") as temporary:
             defaults = Path(temporary) / "defaults.yaml"

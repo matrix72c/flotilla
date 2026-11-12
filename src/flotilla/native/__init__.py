@@ -6,17 +6,7 @@ builder. Runtime exports are lazy for CPU metadata and installed helper use.
 
 from typing import Any
 
-from .models import (
-    PROTOCOL_VERSION,
-    Artifact,
-    AssetRecord,
-    DatasetRow,
-    FileEntry,
-    ReleaseManifest,
-    Task,
-    TaskRecord,
-    Verification,
-)
+from .models import PROTOCOL_VERSION, Artifact, DatasetRow, Task, Verification
 from .release import (
     BoundTask,
     ReleaseBinding,
@@ -30,18 +20,14 @@ from .release import (
 __all__ = [
     "PROTOCOL_VERSION",
     "Artifact",
-    "AssetRecord",
     "BoundTask",
     "DatasetRow",
-    "FileEntry",
     "NativeAttempt",
     "ReleaseBinding",
     "ReleaseBindings",
-    "ReleaseManifest",
     "ReleaseReader",
     "ReleaseWriter",
     "Task",
-    "TaskRecord",
     "Verification",
     "VerificationResult",
     "platform_key",

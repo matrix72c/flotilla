@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import posixpath
 import re
@@ -13,8 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from flotilla.manifest import SCHEMA_VERSION, Manifest
 from flotilla.prepared import PreparedEnvironment
 
-PROTOCOL_VERSION: Final = 1
-_DIGEST = re.compile(r"[0-9a-f]{64}")
+PROTOCOL_VERSION: Final = 2
 _IMAGE = re.compile(r"[^\s@]+@sha256:[0-9a-f]{64}")
 
 
@@ -37,10 +35,6 @@ def canonical(value: Any) -> bytes:
     if isinstance(value, BaseModel):
         value = value.model_dump(mode="json", by_alias=True)
     return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode()
-
-
-def digest(value: Any) -> str:
-    return hashlib.sha256(canonical(value)).hexdigest()
 
 
 class Model(BaseModel):
@@ -111,11 +105,10 @@ class Verification(Model):
 
 
 class Task(Model):
-    schema_version: Literal[1] = PROTOCOL_VERSION
+    schema_version: Literal[2] = PROTOCOL_VERSION
     key: str = Field(min_length=1)
     instruction: Literal["instruction.md"] = "instruction.md"
     roles: dict[str, Manifest]
-    assets: tuple[str, ...] = ()
     verification: Verification | None = None
     artifacts: tuple[Artifact, ...] = ()
     provenance: dict[str, Any] = {}
@@ -125,12 +118,7 @@ class Task(Model):
     def consistent(self) -> Task:
         if "main" not in self.roles or set(self.roles) - {"main", "verifier"}:
             raise ValueError("roles require main and optional verifier")
-        if len(self.assets) != len(set(self.assets)):
-            raise ValueError("duplicate assets")
-        for asset in self.assets:
-            relative_path(asset)
-            if not re.fullmatch(r"assets/[0-9a-f]{64}", asset):
-                raise ValueError("asset roots must be content addressed")
+        relative_path(self.key)
         refs: list[str] = []
         for manifest in self.roles.values():
             if manifest.schema_ != SCHEMA_VERSION:
@@ -169,8 +157,6 @@ class Task(Model):
                             raise ValueError("hidden tests cannot initialize task inputs")
         for ref in refs:
             relative_path(ref)
-            if not any(ref == root or ref.startswith(root + "/") for root in self.assets):
-                raise ValueError(f"undeclared asset reference: {ref}")
         names: set[str] = set()
         for artifact in self.artifacts:
             if artifact.name in names:
@@ -187,50 +173,12 @@ def overlaps(a: str, b: str) -> bool:
     return a == b or a.startswith(b + "/") or b.startswith(a + "/")
 
 
-class FileEntry(Model):
-    kind: Literal["file", "directory", "symlink"]
-    mode: int = Field(ge=0, le=0o7777)
-    uid: int = Field(default=0, ge=0)
-    gid: int = Field(default=0, ge=0)
-    size: int = Field(default=0, ge=0)
-    sha256: str | None = None
-    target: str | None = None
-
-
-class AssetRecord(Model):
-    digest: str
-    entries: dict[str, FileEntry]
-
-
-class TaskRecord(Model):
-    task_ref: str
-    task_digest: str
-    instruction_digest: str
-    assets: tuple[str, ...]
-
-
-class ReleaseManifest(Model):
-    schema_version: Literal[1] = PROTOCOL_VERSION
-    release_id: str
-    tasks: dict[str, TaskRecord]
-    assets: dict[str, AssetRecord]
-
-    def identity(self) -> str:
-        return digest(self.model_dump(mode="json", exclude={"release_id"}))
-
-
 class DatasetRow(Model):
-    release_id: str
-    task_ref: str
-    task_digest: str
+    """One selected task: `release` names its deployment binding, `task` its directory under `tasks/`."""
+
+    release: str = Field(min_length=1)
+    task: str
     annotations: dict[str, Any] = {}
     parameters: dict[str, Any] = {}
 
-    _path = field_validator("task_ref")(relative_path)
-
-    @field_validator("release_id", "task_digest")
-    @classmethod
-    def valid_digest(cls, value: str) -> str:
-        if not _DIGEST.fullmatch(value):
-            raise ValueError("expected sha256 hex identity")
-        return value
+    _path = field_validator("task")(relative_path)

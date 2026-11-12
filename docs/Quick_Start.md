@@ -20,7 +20,7 @@ Probe records measured capabilities and requires confirmed cleanup. Selection no
 
 ```sh
 flotilla prepare selected.jsonl --deployment deployment.toml \
-  --out ./release --report prepare-report.json \
+  --out ./release --name example --report prepare-report.json \
   --image-repo registry.example.org/team/task-runtime
 ```
 
@@ -38,7 +38,7 @@ local_root = "./release"
 platform_root = "/shared/releases/demo-v1"
 ```
 
-The platform root must be under your configured host storage root. PVC deployments instead use an explicit PVC location or relative storage key; see [Native tasks](Native_Tasks.md#bind-local-and-platform-roots). Local relative paths resolve against the deployment file. Platform copies are integrity-checked before execution. Consumers never repair missing files by rebuilding or reimporting source tasks.
+The platform root must be under your configured host storage root. PVC deployments instead use an explicit PVC location or relative storage key; see [Native tasks](Native_Tasks.md#bind-local-and-platform-roots). Local relative paths resolve against the deployment file. Consumers never repair missing files by rebuilding or reimporting source tasks.
 
 ## 4. Execute
 
