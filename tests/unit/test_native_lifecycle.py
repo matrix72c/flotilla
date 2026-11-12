@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import io
-import json
 import shutil
 import tarfile
 from pathlib import Path
@@ -28,7 +27,6 @@ from flotilla.native import (
     Verification,
     read_dataset,
 )
-from flotilla.native.platform_verify import verify as run_platform_verify
 from flotilla.platform.base import (
     ExecResult,
     FlotillaError,
@@ -63,38 +61,41 @@ def role(name: str, mounts: tuple[Mount, ...] = ()) -> Manifest:
     return Manifest(task=name, agent_service="main", units={"main": unit(mounts=mounts)})
 
 
-def build_release(base: Path, *, verifier: bool = True) -> tuple[Path, Task]:
+INPUT_KEY = "tasks/ds/task-a/files"
+
+
+def build_release(base: Path, *, name: str = "tb1", verifier: bool = True) -> tuple[Path, Task]:
     files = base / "input"
     (files / "nested").mkdir(parents=True)
     (files / "data.txt").write_text("static input")
-    roles: dict[str, Manifest] = {}
-    assets: list[str] = []
+    roles: dict[str, Manifest] = {
+        "main": role("ds/task-a", (Mount(scope="task", key=INPUT_KEY, target="/input", read_only=True),))
+    }
+    copies = {"files": files}
     verification = None
     artifacts: tuple[Artifact, ...] = ()
-    with ReleaseWriter(base / "release") as writer:
-        assets.append(writer.add_asset(files))
-        roles["main"] = role("ds/task-a", (Mount(scope="task", key=assets[0], target="/input", read_only=True),))
-        if verifier:
-            tests = base / "tests"
-            tests.mkdir()
-            (tests / "check.sh").write_text("#!/bin/sh\nexit 0\n")
-            assets.append(writer.add_asset(tests))
-            roles["verifier"] = role("ds/task-a#verifier")
-            verification = Verification(
-                role="verifier",
-                command=VERIFY_COMMAND,
-                tests=assets[1],
-                env={"TASK_TOKEN": "native"},
-                uid=1000,
-                gid=1000,
-                output_paths={"reward.txt": "/logs/verifier/reward.txt"},
-                optional_output_paths={"details.txt": "/logs/verifier/details.txt"},
-                require_output=True,
-            )
-            artifacts = (Artifact(name="agent", role="main", target="/logs/agent", verifier_target="/handoff/agent"),)
-        task = Task(key="ds/task-a", roles=roles, assets=tuple(assets), verification=verification, artifacts=artifacts)
-        record = writer.add_task(task, "Solve the task.\n")
-        writer.publish([{"task_ref": record.task_ref, "task_digest": record.task_digest}])
+    if verifier:
+        tests = base / "tests"
+        tests.mkdir()
+        (tests / "check.sh").write_text("#!/bin/sh\nexit 0\n")
+        copies["tests"] = tests
+        roles["verifier"] = role("ds/task-a#verifier")
+        verification = Verification(
+            role="verifier",
+            command=VERIFY_COMMAND,
+            tests="tasks/ds/task-a/tests",
+            env={"TASK_TOKEN": "native"},
+            uid=1000,
+            gid=1000,
+            output_paths={"reward.txt": "/logs/verifier/reward.txt"},
+            optional_output_paths={"details.txt": "/logs/verifier/details.txt"},
+            require_output=True,
+        )
+        artifacts = (Artifact(name="agent", role="main", target="/logs/agent", verifier_target="/handoff/agent"),)
+    task = Task(key="ds/task-a", roles=roles, verification=verification, artifacts=artifacts)
+    with ReleaseWriter(base / "release", name) as writer:
+        writer.add_task(task, "Solve the task.\n", copies)
+        writer.publish([{"task": "ds/task-a"}])
     return base / "release", task
 
 
@@ -106,18 +107,15 @@ def volume_of(spec: InstanceSpec, mount_path: str) -> SharedVolume | None:
 class NativeHarness:
     """Fake-platform shims for the consume-only lifecycle, local to these tests.
 
-    Anchor side: runs the real installed-helper verification in-process against a
-    local "platform copy" of the release, emulates `cp -a -- src/. dest` (the one
-    SharedTree does not model) and can inject a mid-create directory failure.
+    Anchor side: emulates the installed helper's `--clear-directory`, `cp -a -- src/. dest`
+    (the one SharedTree does not model) and can inject a mid-create directory failure.
     Unit side: interprets the verification command (asserting the handoff content),
     serves output reads and optional-output probes from a side table, and builds
     real tars for download_dir from the shared tree.
     """
 
     def stage_release(self, key: str, root: Path) -> None:
-        """Place a release copy on the fake shared storage: tree entries for anchor
-        directory operations, the local directory for in-process verification."""
-        self.platform_copies[key] = root
+        """Place a release copy on the fake shared storage as tree entries for anchor operations."""
         for path in sorted(root.rglob("*")):
             entry = f"{key}/{path.relative_to(root).as_posix()}"
             info = path.lstat()
@@ -131,10 +129,8 @@ class NativeHarness:
 
     def __init__(self, deployment: Deployment, monkeypatch: pytest.MonkeyPatch) -> None:
         _, self.platform, self.tree = deployment
-        self.platform_copies: dict[str, Path] = {}
         self.unit_files: dict[tuple[str, str], bytes] = {}
         self.verification_specs: list[ProcessSpec] = []
-        self.verify_calls = 0
         self.with_optional = False
         self.workspace_key: str | None = None
         self.fail_chown_of: str | None = None
@@ -175,22 +171,7 @@ class NativeHarness:
                 for key_part in [k for k in book if k.startswith(key + "/")]:
                     del book[key_part]
             return ExecResult(0, b"", b"")
-        self.verify_calls += 1
-        request = json.loads(self.platform.tree_contents[rel(argv[4])])
-        try:
-            result = run_platform_verify(
-                {
-                    "root": str(self.platform_copies[rel(request["root"])]),
-                    "row": request["row"],
-                    "validated_assets": request.get("validated_assets", ()),
-                }
-            )
-        except ValueError as exc:
-            return ExecResult(1, b"", f"native release verification failed: {exc}".encode())
-        result_key = rel(request["result"], write=True)
-        self.platform.tree_contents[result_key] = json.dumps(result).encode()
-        self.tree.files.add(result_key)
-        return ExecResult(0, b"", b"")
+        raise AssertionError(f"unexpected installed helper call: {argv!r}")
 
     def _copy_contents(self, argv: tuple[str, ...]) -> ExecResult:
         src, dst = self.tree._rel(argv[-2].removesuffix("/.")), self.tree._rel(argv[-1], write=True)
@@ -254,7 +235,7 @@ def prepare(
 ) -> tuple[FlotillaConfig, FakePlatform, SharedTree, NativeHarness, BoundTask, Task]:
     """Build a release, stage a separate platform copy, and install the harness."""
     cfg, platform, tree = deployment
-    root, task = build_release(tmp_path / "build", verifier=verifier)
+    root, task = build_release(tmp_path / "build", name=name, verifier=verifier)
     platform_copy = tmp_path / "platform-copy"
     shutil.copytree(root, platform_copy, symlinks=True)
     harness = NativeHarness(deployment, monkeypatch)
@@ -270,15 +251,12 @@ def prepare(
 async def test_consume_only_lifecycle_handoff_and_cleanup(
     tmp_path: Path, deployment: Deployment, monkeypatch: pytest.MonkeyPatch, with_optional: bool
 ) -> None:
-    cfg, platform, tree, harness, bound, task = prepare(tmp_path, deployment, monkeypatch)
+    cfg, platform, tree, harness, bound, _task = prepare(tmp_path, deployment, monkeypatch)
     harness.with_optional = with_optional
 
     async with Flotilla(deployment=cfg) as fleet:
         attempt = await NativeAttempt.create(fleet, bound)
         harness.workspace_key = attempt.workspace.key
-        assert harness.verify_calls == 1
-        # The per-check directory is removed; the launch-owned empty parent goes at teardown.
-        assert not any("native-checks/" in key for key in tree.dirs | tree.files)
 
         await attempt.open("main")
         units = [i for i in platform.iids() if platform.spec_of(i).labels.get(labels.ROLE) == labels.ROLE_UNIT]
@@ -286,7 +264,7 @@ async def test_consume_only_lifecycle_handoff_and_cleanup(
         main_spec = platform.spec_of(units[0])
         source = volume_of(main_spec, "/input")
         assert source is not None and source.read_only
-        assert source.key == f"releases/tb1/{task.assets[0]}"  # input binds the published release, not a rebuild
+        assert source.key == f"releases/tb1/{INPUT_KEY}"  # input binds the published release, not a rebuild
         artifacts = volume_of(main_spec, "/logs/agent")
         assert artifacts is not None and not artifacts.read_only
         assert artifacts.key == f"{attempt.workspace.key}/artifacts/agent"
@@ -330,10 +308,7 @@ async def test_consume_only_lifecycle_handoff_and_cleanup(
         assert not any(key.startswith(attempt.workspace.key) for key in tree.dirs | tree.files)
         assert not [i for i in platform.iids() if platform.spec_of(i).labels.get(labels.ROLE) == labels.ROLE_UNIT]
 
-        # A second attempt in the same launch reuses launch-local validation; the
-        # installed helper is not invoked again for the same release identity.
         second = await NativeAttempt.create(fleet, bound)
-        assert harness.verify_calls == 1
         await second.close()
     assert platform.instances() == []  # fleet teardown deleted anchor and units
 
@@ -343,7 +318,7 @@ async def test_attempt_isolation_guards(
     tmp_path: Path, deployment: Deployment, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     cfg, _platform, _tree, harness, bound, _ = prepare(tmp_path, deployment, monkeypatch)
-    plain_root, _ = build_release(tmp_path / "plain", verifier=False)
+    plain_root, _ = build_release(tmp_path / "plain", name="plain", verifier=False)
     plain_copy = tmp_path / "plain-copy"
     shutil.copytree(plain_root, plain_copy, symlinks=True)
     harness.stage_release("releases/plain", plain_copy)
@@ -374,7 +349,6 @@ async def test_attempt_isolation_guards(
             await attempt.verify()
 
         plain_attempt = await NativeAttempt.create(fleet, plain)
-        assert harness.verify_calls == 2  # a different release identity verifies again
         with pytest.raises(ValueError, match="no verification interface"):
             await plain_attempt.verify()
         await plain_attempt.close()
@@ -406,21 +380,6 @@ async def test_verification_runs_once_and_main_stays_closed_after_handoff(
 
 
 @pytest.mark.asyncio
-async def test_platform_copy_drift_fails_create_and_cleans_checks(
-    tmp_path: Path, deployment: Deployment, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    cfg, _platform, tree, harness, bound, task = prepare(tmp_path, deployment, monkeypatch)
-    drifted = harness.platform_copies["releases/tb1"]
-    (drifted / task.assets[0] / "data.txt").write_text("tampered after publication")
-
-    async with Flotilla(deployment=cfg) as fleet:
-        with pytest.raises(FlotillaError, match="native release verification failed"):
-            await NativeAttempt.create(fleet, bound)
-        assert not any("native-checks/" in key for key in tree.dirs | tree.files)
-        assert not any("/attempts/" in key for key in tree.dirs | tree.files)
-
-
-@pytest.mark.asyncio
 async def test_create_failure_releases_attempt_directory(
     tmp_path: Path, deployment: Deployment, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -434,7 +393,7 @@ async def test_create_failure_releases_attempt_directory(
 
 
 @pytest.mark.asyncio
-async def test_unvalidated_native_task_files_rejected_until_launch_validates(
+async def test_native_task_files_rejected_until_an_attempt_registers_them(
     tmp_path: Path, deployment: Deployment, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     cfg, _platform, _tree, _harness, bound, _ = prepare(tmp_path, deployment, monkeypatch)
@@ -469,18 +428,18 @@ async def test_releases_on_named_read_only_input_roots(
     )
     report_path.write_text(caps.dump_json())
     tree.dirs.update({tree.input_key("datasets"), tree.input_key("extra")})
-    root, task = build_release(tmp_path / "build", verifier=True)
+    root, _task = build_release(tmp_path / "build", name="r1", verifier=True)
     platform_copy = tmp_path / "platform-copy"
     shutil.copytree(root, platform_copy, symlinks=True)
     harness = NativeHarness((cfg, platform, tree), monkeypatch)
-    # The same release content on both roots: caches must keep the roots apart.
+    # The same release content on both roots: each attempt mounts its own root.
     harness.stage_release(tree.input_key("datasets", "tb/r1"), platform_copy)
     harness.stage_release(tree.input_key("extra", "tb/r1"), platform_copy)
-    # The same release (one release id) bound on each root, through separate binding sets.
+    # The same release name bound on each root, through separate binding sets.
     record = read_dataset(root / "dataset.jsonl")[0]
     bound = {
         name: ReleaseBindings(
-            {name: ReleaseBinding(local_root=root, platform_root="tb/r1", root=name)},
+            {"r1": ReleaseBinding(local_root=root, platform_root="tb/r1", root=name)},
             storage=cfg.storage_settings(),
             inputs=cfg.input_settings(),
         ).resolve(record)
@@ -504,7 +463,7 @@ async def test_releases_on_named_read_only_input_roots(
             main_spec = platform.spec_of(unit)
             source = volume_of(main_spec, "/input")
             assert source is not None and source.read_only and source.root == name
-            assert source.key == f"tb/r1/{task.assets[0]}"
+            assert source.key == f"tb/r1/{INPUT_KEY}"
             artifacts = volume_of(main_spec, "/logs/agent")
             assert artifacts is not None and artifacts.root == "work"
             share = volume_of(main_spec, "/.flotilla")
@@ -518,7 +477,6 @@ async def test_releases_on_named_read_only_input_roots(
             # Hidden tests were copied from the input root into the attempt's work-root directory.
             assert platform.tree_contents.get(f"{attempt.workspace.key}/tests/check.sh") is not None
             await attempt.close()
-        assert harness.verify_calls == 2  # each root's copy is verified on its own
     # Nothing on an input root was written; SharedTree also fails any write attempt there.
     assert {k: v for k, v in platform.tree_contents.items() if k.startswith("@")} == inputs_before
     assert platform.instances() == []

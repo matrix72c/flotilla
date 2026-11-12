@@ -23,7 +23,7 @@ flotilla probe --deployment deployment.toml --env sandbox.env
 flotilla select --host-root ./tasks --deployment deployment.toml \
   --out selected.jsonl --report selection-report.json
 flotilla prepare selected.jsonl --deployment deployment.toml \
-  --out ./release --report prepare-report.json \
+  --out ./release --name example --report prepare-report.json \
   --image-repo registry.example.org/team/tasks
 ```
 
@@ -38,18 +38,18 @@ local_root = "./release"
 platform_root = "/shared/releases/example"
 ```
 
-本地相对路径相对 deployment 文件解析。平台路径受配置的 host/PVC 存储根限制，不猜测或随意剥离前缀。凭据保存在包外，运行时显式注入；报告、resume 目录不属于 release。
+本地相对路径相对 deployment 文件解析。平台路径受配置的 host/PVC 存储根限制，不猜测或随意剥离前缀。凭据保存在包外，运行时显式注入；报告不属于 release。
 
 ```text
 release/
-  manifest.json
   dataset.jsonl
-  tasks/<variant>/task.json
-  tasks/<variant>/instruction.md
-  assets/<content-digest>/...
+  tasks/<task-key>/task.json
+  tasks/<task-key>/instruction.md
+  tasks/<task-key>/files/...
+  tasks/<task-key>/tests/...
 ```
 
-`dataset.jsonl` 每行保留 release/task 完整身份、annotations 和非秘密参数，顺序与重复不丢失。过滤或重排选择行不改变不可变任务身份。缺少文件、平台上传不完整或摘要不一致时显式失败，不回退到原始 Harbor 目录或 builder。
+release 就是这棵目录树，没有中央清单，也不按内容哈希寻址。`dataset.jsonl` 每行是 `release`（prepare `--name` 给的名字，对应 deployment 的 `[task_releases.<name>]`）、`task`（`tasks/` 下的目录）、annotations 和非秘密参数，顺序与重复不丢失。消费时只读 `task.json` 和 `instruction.md`，不做哈希校验；缺少文件时直接报错，不回退到原始 Harbor 目录或 builder。
 
 ## Python 示例
 

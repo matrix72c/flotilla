@@ -109,9 +109,9 @@ class FlotillaTaskSource:
         bound_tasks = await asyncio.gather(*(resolve(row) for row in rows))
         tasks = []
         for bound in bound_tasks:
-            directory = (bound.reader.root / PurePosixPath(bound.row.task_ref).parent).absolute()
+            directory = bound.directory.absolute()
             self.bounds.setdefault(directory, bound)
-            tasks.append(TrialTaskConfig(path=directory, source=bound.row.release_id))
+            tasks.append(TrialTaskConfig(path=directory, source=bound.row.release))
         return tasks
 
     async def load_task(self, config: Any) -> tuple[Task, TaskDownloadResult]:

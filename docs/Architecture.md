@@ -13,7 +13,7 @@
 | Anchor | A small, renewable sandbox per launch that mounts the shared-storage root and performs file operations on it |
 | Share release | An immutable directory of helper binaries (BusyBox) mounted into every sandbox at `/.flotilla` |
 | Dataset row | Release ID, task reference and digest, plus annotations and parameters |
-| Task release | Immutable manifest, native definitions and content-addressed static assets, explicitly bound to local/platform roots |
+| Task release | A directory of `tasks/<key>/` definitions and static files plus a `dataset.jsonl`, bound by name to local/platform roots |
 | Attempt workspace | Launch-owned private role state, verification staging and artifact handoff directories |
 | Capability report | `capabilities.json`, written by `flotilla probe`: what the deployment supports, each item `passed`, `failed`, `skipped`, or `error` |
 | Security gap / waiver | A security capability the deployment lacks; startup refuses unless it is listed in `security.accept_insecure` |

@@ -14,7 +14,7 @@ The extra pins [Harbor d78eb9c262e7074944106d16bff0ba6426bb2d34](https://github.
 
 Use [Quick start](Quick_Start.md) to probe the deployment and run host-side `select` then `prepare`. The preparation environment needs the pinned official Compose CLI and configured image tooling. Registry credentials belong only there. Execution requires a compatible installed Anchor and shared tools, **not** Harbor/Compose/build tooling in the Anchor.
 
-The output is a portable directory containing `manifest.json`, `dataset.jsonl`, `tasks/`, and `assets/`. Publish the complete directory through your existing storage tools, preserving its metadata. Bind both its local readable copy and its platform copy:
+The output is a portable directory containing `dataset.jsonl` and `tasks/<key>/`. Publish the complete directory through your existing storage tools, preserving file modes. Bind both its local readable copy and its platform copy:
 
 ```toml
 [task_releases.tb2]
@@ -52,7 +52,7 @@ environment:
 harbor run --config /srv/eval/harbor-job.yaml
 ```
 
-`nop` is a lifecycle smoke agent, not a solver. Supply your intended Harbor agent and its credentials separately for evaluation. Do **not** set Harbor `tasks`/`datasets`, `verifier.import_path`, or `verifier.env`: the native dataset owns selection and the release owns verification. To filter or repeat tasks, write a selection JSONL retaining the complete original rows (`release_id`, `task_ref`, `task_digest`, annotations and parameters). Order and duplicate rows remain separate trials.
+`nop` is a lifecycle smoke agent, not a solver. Supply your intended Harbor agent and its credentials separately for evaluation. Do **not** set Harbor `tasks`/`datasets`, `verifier.import_path`, or `verifier.env`: the native dataset owns selection and the release owns verification. To filter or repeat tasks, write a selection JSONL retaining the complete original rows (`release`, `task`, annotations and parameters). Order and duplicate rows remain separate trials.
 
 Relative `task_source.kwargs.dataset` and `deployment` resolve against the config that defines them. Snapshots freeze absolute external paths. Remote configs require absolute input paths. A standalone restored Trial revalidates its selection rather than depending on the old Job's in-memory cache.
 
@@ -61,7 +61,7 @@ The importer stores Harbor presentation metadata in `task.provenance.harbor.conf
 ## Execution and ownership
 
 - `task_source` owns local selection and metadata; `runtime` owns the Flotilla client, `NativeAttempt`, verification, artifacts and cleanup; `environment` is the Harbor I/O adapter. Configure all three together.
-- Each attempt has private mutable volumes and verification output. Immutable assets may be shared read-only after launch-local integrity verification.
+- Each attempt has private mutable volumes and verification output. Immutable task files are shared read-only.
 - Hidden tests are not exposed during the agent phase. A prepared task with an explicit separate verifier releases main before opening the verifier; artifact handoff remains platform-side. Without an explicit Harbor `[verifier.environment]`, preparation uses main for verification, even if an old source requested inherited `environment_mode="separate"`. Inspect the prepared roles rather than assuming that old hint created another sandbox.
 - Original application and healthcheck UID/GID remain authoritative after host-side USER0 adaptation. Flotilla does not recursively rewrite published asset ownership or create application users.
 - Task and job/trial result-artifact downloads use Harbor's ordinary trial output and manifest. Agent failures and disabled verification still collect available results before cleanup. They are distinct from release preparation and verifier handoff.

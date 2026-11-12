@@ -45,9 +45,8 @@ def _build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--env", type=Path, help="explicit preparation credentials; platform credentials are not needed")
     pr.add_argument("--image-repo", help="output repository without tag/digest; overrides deployment build.target")
     pr.add_argument("--out", required=True, type=Path, help="new native release directory (not uploaded automatically)")
+    pr.add_argument("--name", required=True, help="release name; rows carry it and [task_releases.<name>] binds it")
     pr.add_argument("--report", required=True, type=Path)
-    pr.add_argument("--resume", action="store_true")
-    pr.add_argument("--work-dir", type=Path)
     pr.add_argument("--require-prebuilt-images", action="store_true")
     anc = sub.add_parser("anchor", help="installed-package Anchor tools")
     anchor_sub = anc.add_subparsers(dest="anchor_command", required=True)
@@ -148,10 +147,9 @@ def _prepare(args: argparse.Namespace) -> int:
         args.selected,
         deployment=args.deployment,
         out=args.out,
+        name=args.name,
         report=args.report,
         image_repo=args.image_repo,
-        resume=args.resume,
-        work_dir=args.work_dir,
         require_prebuilt_images=args.require_prebuilt_images,
     )
     print(f"native release prepared: {args.out}; publish it using your storage tools before consuming")

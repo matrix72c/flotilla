@@ -16,7 +16,7 @@ flotilla select --host-root /data/harbor/tasks --deployment deployment.toml \
   --out selected.jsonl --report selection-report.json
 flotilla prepare selected.jsonl --deployment deployment.toml --env prepare.env \
   --image-repo registry.example.org/team/task-runtime \
-  --out /data/releases/example --report prepare-report.json
+  --out /data/releases/example --name example --report prepare-report.json
 ```
 
 `probe` writes to the capability path declared in the deployment. An explicit `--out` must resolve to that same path. Probe applies the deployment's required capabilities and security policy and requires confirmed instance, Anchor and storage cleanup. Choosing a filesystem protocol is not proof of its behavior; measured evidence is bound to the deployment and includes missing mount targets.
@@ -27,28 +27,30 @@ flotilla prepare selected.jsonl --deployment deployment.toml --env prepare.env \
 
 **Executing prepare may build and publish necessary images.** `--image-repo` is a repository without tag/digest and overrides `build.target`. It does not mean mirror every source image. Mirroring is explicit, no `latest` tag is moved, and final references use the remote manifest digest, not a local Docker image ID. Missing publication targets fail before the necessary build. Registry authentication remains outside the release and is not required by consume-only execution.
 
-A failed selected row fails the release: no partial successful dataset is silently published. The output directory must not exist. Reports and resume work are separate from the release; use explicit `--resume` after correcting a failed attempt. Previously published images are recorded, not automatically deleted. Never mutate a release used by running jobs.
+A failed selected row fails the release: no partial successful dataset is silently published. The output directory must not exist. Work files live in a temporary sibling directory that is removed afterwards; after correcting a failure, run prepare again. Previously published images are recorded, not automatically deleted. Never mutate a release used by running jobs.
 
-The prepare report includes invocation-local `metrics`: total `elapsed_s`, per-phase `calls`/`failed`/`seconds`, and cache-hit/resumed-adaptation counts. `import_normalize` combines importing and official Compose normalization; `user0_build_push` and `application_build_push` each measure the builder's combined build/publication call. Phase times are inclusive and may overlap, so do not sum them. Tool calls exclude cache hits, failures remain counted, and resume starts fresh measurements rather than adding old durations. Metrics do not change release identity.
+`--name` names the release. Every dataset row carries it, and the consumer's deployment binds it as `[task_releases.<name>]`. A task selected several times is packaged once; its rows repeat.
+
+The prepare report includes invocation-local `metrics`: total `elapsed_s`, per-phase `calls`/`failed`/`seconds`, and cache-hit counts. `import_normalize` combines importing and official Compose normalization; `user0_build_push` and `application_build_push` each measure the builder's combined build/publication call. Phase times are inclusive and may overlap, so do not sum them. Tool calls exclude cache hits and failures remain counted. The Compose executable's version is checked once per process.
 
 ## Static publication belongs to the user
 
-Publish the complete output with your existing rsync, shared storage or object-storage tools. Flotilla does not upload a task dataset for you. Preserve bytes, modes and symlinks, and apply the numeric UID/GID recorded in each asset inventory at the destination. The preparation host need not have those owners locally: blindly copying its actual owners can fail platform integrity validation. Existing tar tools can carry inventory ownership for extraction by a trusted storage administrator. Validate the delivered copy with `ReleaseReader(root, ownership=True)` and read the selected tasks before using it. A gateway PUT acknowledgement may precede visibility through a separate NFS client; wait for visibility before consuming.
+Publish the complete output with your existing rsync, shared storage or object-storage tools. Flotilla does not upload a task dataset for you. Preserve bytes and modes. File owners are not part of the release: task inputs are mounted read-only, and volume seeds are tar archives that carry their own numeric owners. A gateway PUT acknowledgement may precede visibility through a separate NFS client; wait for visibility before consuming.
 
 Publish shared-tools and the Agent runtime separately, and grant the platform read access to the fixed runtime images. Do not place credentials, source checkout paths or image archives inside the task release.
 
 ```text
 release/
-  manifest.json
   dataset.jsonl
-  tasks/<task-variant>/task.json
-  tasks/<task-variant>/instruction.md
-  assets/<content-digest>/...
+  tasks/<task-key>/task.json
+  tasks/<task-key>/instruction.md
+  tasks/<task-key>/files/...      # bind content and volume seed tars
+  tasks/<task-key>/tests/...      # hidden tests, staged only for verification
 ```
 
-`task.json` is authoritative and carries role manifests, the verification interface, explicit artifact handoffs, resolved application identities and fixed images. Original Harbor and Compose files are not consulted by consumers. Static bind content and immutable volume seeds live in `assets/`. Writable volumes and verification outputs belong to each attempt.
+There is no central manifest and nothing is content-addressed: a release is this directory tree. `task.json` (protocol version 2) is authoritative and carries role manifests, the verification interface, explicit artifact handoffs, resolved application identities and fixed images; its file references are relative to the release root. Original Harbor and Compose files are not consulted by consumers. Writable volumes and verification outputs belong to each attempt.
 
-Task/release identities include normalized definitions and static content/metadata. Machine paths and report timestamps do not participate. `dataset.jsonl` is a selection view: preserve or reorder rows, retain duplicates, and filter it without rebuilding the immutable release. Each row has `release_id`, `task_ref`, `task_digest`, `annotations` and non-secret `parameters`. Do not reduce identity to a task basename. Compiling the same source with different parameters produces different variants.
+`dataset.jsonl` is a selection view: preserve or reorder rows, retain duplicates, filter it, or concatenate rows of several releases without rebuilding anything. Each row has `release` (the release name), `task` (the task key, which is its directory under `tasks/`), `annotations` and non-secret `parameters`. Version 1 releases (`manifest.json`, `release_id`/`task_digest` rows) are not readable; prepare them again.
 
 ## Bind local and platform roots
 
@@ -60,7 +62,7 @@ platform_root = "/shared/releases/example"
 
 Local relative paths resolve against the deployment TOML, not the caller's working directory. For host storage, `platform_root` must be confined beneath the configured host root. For PVC storage use the explicit `pvc:<claim>/<configured-root-subpath>/<release-key>` location; bare relative roots are rejected. An arbitrary absolute host path is not treated as a PVC key by stripping its prefix.
 
-Loading configuration for probe/select/prepare does not open future release paths. Consumption opens the selected releases, verifies local task and asset contents, verifies the platform copies, and refuses missing files, mismatched identities, partial uploads and unsupported protocol versions. Selection across several releases requires every release to be explicitly bound. Large immutable assets are verified once per launch, not once per attempt. Releases must be maintained by a trusted publisher and read-only to workloads; checksums are not a promise of TOCTOU protection for an adversarially writable directory.
+Loading configuration for probe/select/prepare does not open release paths. Consumption reads only `task.json` and `instruction.md` of each selected task from the local root; nothing is hashed or re-verified locally or on the platform. A row's `release` must name a binding. Releases must be maintained by a trusted publisher and read-only to workloads.
 
 An optional typed `[agent_runtime]` section binds a consumer's runtime layers (arbitrary names, each with local/platform roots); Flotilla validates shape and roots but not which layers exist — that contract belongs to the consumer. Flotilla does not interpret Agent types, GPU resources, reward or training configuration.
 

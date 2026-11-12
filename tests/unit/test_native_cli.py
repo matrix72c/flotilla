@@ -30,8 +30,9 @@ def test_deployment_loading_does_not_open_releases(tmp_path: Path) -> None:
     assert cfg.task_releases["future"].local_root == Path("not-created")
     assert cfg.agent_runtime is not None and cfg.agent_runtime.layers["lagent"].local_root == Path("not-created")
     assert cfg.to_mapping()["task_releases"]["future"]["local_root"] == str(tmp_path / "not-created")
-    with pytest.raises((ValueError, OSError)):
-        cfg.release_bindings()
+    bindings = cfg.release_bindings()
+    with pytest.raises(OSError):
+        bindings.resolve({"release": "future", "task": "t"})
 
 
 def test_env_is_literal_and_errors_never_echo_values(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 from typing import Any
@@ -12,7 +11,6 @@ import pytest
 from flotilla.config import FlotillaConfig, TaskRelease
 from flotilla.manifest import Context, Manifest, Resources, Unit
 from flotilla.native import ReleaseWriter, Task, Verification
-from flotilla.native.platform_verify import verify
 from flotilla.platform.base import ExecAttempt, ExecResult, InstanceHandle, ProcessSpec
 from flotilla.testing.platform import FakePlatform, SharedTree
 from flotilla.testing.runtime import deployment as deployment
@@ -24,9 +22,9 @@ def native_example(
     deployment: tuple[FlotillaConfig, FakePlatform, SharedTree],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-) -> list[dict[str, Any]]:
+) -> list[tuple[str, ...]]:
     """Real release reader/writer and lifecycle; fake only platform execution."""
-    cfg, platform, tree = deployment
+    cfg, platform, _tree = deployment
     release = tmp_path / "release"
     unit = Unit(
         image="example.invalid/runtime@sha256:" + "a" * 64,
@@ -34,7 +32,7 @@ def native_example(
         resources=Resources(cpu="1", memory="128Mi"),
         command=None,
     )
-    with ReleaseWriter(release) as writer:
+    with ReleaseWriter(release, "demo") as writer:
         task = Task(
             key="documentation/example",
             roles={
@@ -44,34 +42,24 @@ def native_example(
             },
             verification=Verification(command=("true",)),
         )
-        record = writer.add_task(task, "Check connectivity.")
-        writer.publish([{"task_ref": record.task_ref, "task_digest": record.task_digest}])
+        writer.add_task(task, "Check connectivity.")
+        writer.publish([{"task": "documentation/example"}])
     cfg = cfg.model_copy(
         update={"task_releases": {"demo": TaskRelease(local_root=release, platform_root="/mnt/shared/releases/demo")}}
     )
     monkeypatch.setattr(FlotillaConfig, "load", lambda _: cfg)
     monkeypatch.chdir(tmp_path)
     original = platform.exec
-    checks: list[dict[str, Any]] = []
+    helper_calls: list[tuple[str, ...]] = []
 
     async def execute(handle: InstanceHandle, proc: ProcessSpec, *, attempt: ExecAttempt | None = None) -> ExecResult:
         if proc.argv[:4] == ("python3", "-I", "-m", "flotilla.native.platform_verify"):
-            if proc.argv[4] == "--clear-directory":
-                return ExecResult(0, b"", b"")
-            request_key = proc.argv[4].removeprefix(tree.mount)
-            request = json.loads(platform.tree_contents[request_key])
-            checks.append(request)
-            # The fake platform shares the immutable release fixture. Run the real
-            # installed helper logic; don't synthesize an integrity success flag.
-            response = verify({**request, "root": str(release)})
-            result_key = request["result"].removeprefix(tree.mount)
-            tree.files.add(result_key)
-            platform.tree_contents[result_key] = json.dumps(response).encode()
+            helper_calls.append(proc.argv)
             return ExecResult(0, b"", b"")
         return await original(handle, proc, attempt=attempt)
 
     monkeypatch.setattr(platform, "exec", execute)
-    return checks
+    return helper_calls
 
 
 @pytest.mark.asyncio
@@ -82,13 +70,13 @@ async def test_native_documentation_example(
     monkeypatch: pytest.MonkeyPatch,
     document: str,
 ) -> None:
-    checks = native_example(deployment, tmp_path, monkeypatch)
+    helper_calls = native_example(deployment, tmp_path, monkeypatch)
     blocks = re.findall(r"```python\n(.*?)```", (ROOT / document).read_text(), re.S)
     [code] = [block for block in blocks if "async def main" in block]
     namespace: dict[str, Any] = {}
     exec(compile(code.replace("asyncio.run(main())", ""), document, "exec"), namespace)
     await namespace["main"]()
-    assert len(checks) == 1
+    assert all(argv[4] == "--clear-directory" for argv in helper_calls)  # no release re-verification
     assert deployment[1].instances() == []
     assert not any(key.startswith("launches/") for key in deployment[2].dirs | deployment[2].files)
 

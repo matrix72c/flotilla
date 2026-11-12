@@ -2,10 +2,21 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 import pytest
 
+from flotilla.compose import adapter
 from flotilla.platform.base import Capabilities
 from flotilla.testing.platform import FakePlatform, ManualClock, SharedTree
+
+
+@pytest.fixture(autouse=True)
+def _fresh_compose_version_check() -> Iterator[None]:
+    """Compose's version is checked once per process; each test starts unchecked."""
+    adapter._VERSION_CHECKED.clear()
+    yield
+    adapter._VERSION_CHECKED.clear()
 
 
 @pytest.fixture

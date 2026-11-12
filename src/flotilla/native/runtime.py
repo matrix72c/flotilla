@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
-import uuid
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -31,64 +29,19 @@ class VerificationResult:
     outputs: dict[str, bytes]
 
 
-async def _validate(manager: Manager, bound: BoundTask) -> dict[str, PreparedEnvironment]:
-    store = manager.workspaces
-    root = bound.platform_key
-    identity = bound.row.release_id
-    key = bound.root, root, identity, bound.row.task_digest
-    async with store.native_lock:
-        if key not in store.native_tasks:
-            directory = f"launches/{manager.launch_id}/native-checks/{uuid.uuid4().hex}"
-            request_key = f"{directory}/request.json"
-            result_key = f"{directory}/result.json"
-            primary: BaseException | None = None
-            try:
-                await manager.anchor.mkdir(directory, stage="prepare")
-                request = {
-                    "root": manager.anchor.path(root, root=bound.root),
-                    "row": bound.row.model_dump(mode="json"),
-                    "validated_assets": sorted(store.native_assets.get((bound.root, root, identity), set())),
-                    "result": manager.anchor.path(result_key),
-                }
-                await manager.anchor.upload(
-                    request_key, json.dumps(request).encode(), mode=0o600, uid=0, gid=0, stage="prepare"
-                )
-                result = await manager.anchor.execute(
-                    ("python3", "-I", "-m", "flotilla.native.platform_verify", manager.anchor.path(request_key)),
-                    timeout_s=manager.cfg.prepare.workspace_timeout,
-                    stage="prepare",
-                )
-                if result.timed_out or result.exit_code != 0:
-                    raise ValueError("platform native release verification failed")
-                payload = json.loads(await manager.anchor.download(result_key, stage="prepare"))
-                if payload.get("release_id") != identity or payload.get("task_digest") != bound.row.task_digest:
-                    raise ValueError("platform native release identity mismatch")
-                assets = set(payload.get("assets", ()))
-                if not set(bound.task.assets) <= assets or assets - set(bound.reader.manifest.assets):
-                    raise ValueError("platform native asset verification incomplete")
-                store.native_assets.setdefault((bound.root, root, identity), set()).update(assets)
-                store.native_tasks.add(key)
-            except BaseException as exc:
-                primary = exc
-                raise
-            finally:
-                try:
-                    await manager.anchor.remove(directory, stage="run")
-                except BaseException as cleanup:
-                    if primary is None:
-                        raise
-                    primary.add_note(f"native verification cleanup failed: {cleanup!r}")
-        environments = {
-            role: PreparedEnvironment(manifest.model_copy(update={"task_files": root}))
-            for role, manifest in bound.task.roles.items()
-        }
-        for prepared in environments.values():
-            store.native_environments[prepared.digest] = root, bound.root
-        return environments
+def _environments(manager: Manager, bound: BoundTask) -> dict[str, PreparedEnvironment]:
+    """Point each role at the release's platform copy and authorize those task files for this launch."""
+    environments = {
+        role: PreparedEnvironment(manifest.model_copy(update={"task_files": bound.platform_key}))
+        for role, manifest in bound.task.roles.items()
+    }
+    for prepared in environments.values():
+        manager.workspaces.native_environments[prepared.digest] = bound.platform_key, bound.root
+    return environments
 
 
 async def _create(manager: Manager, bound: BoundTask) -> tuple[WorkspaceInfo, dict[str, PreparedEnvironment]]:
-    environments = await _validate(manager, bound)
+    environments = _environments(manager, bound)
     info = await manager.workspaces.create_empty(bound.task.key)
     try:
         for artifact in bound.task.artifacts:
@@ -141,8 +94,8 @@ class NativeAttempt:
 
     @classmethod
     async def create(cls, fleet: Flotilla, bound_task: BoundTask) -> NativeAttempt:
-        # Reconstruct from the validated reader, not caller-mutated nested dicts.
-        bound = replace(bound_task, task=bound_task.reader.read_task(bound_task.row))
+        # Reconstruct from the reader, not caller-mutated nested dicts.
+        bound = replace(bound_task, task=bound_task.reader.read_task(bound_task.row.task))
         await fleet.start()
         info, prepared = await fleet._call(
             lambda manager: _create(manager, bound),

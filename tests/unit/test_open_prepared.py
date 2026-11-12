@@ -56,7 +56,7 @@ def test_removed_in_open_preparation_has_migration_errors() -> None:
     with pytest.raises(SystemExit):
         _build_parser().parse_args(["prepare", "ds/t", "--deployment", "d.toml", "--out", "diagnostics.json"])
     parsed = _build_parser().parse_args(
-        ["prepare", "selected.jsonl", "--deployment", "d.toml", "--out", "release", "--report", "report.json"]
+        ["prepare", "selected.jsonl", "--deployment", "d.toml", "--out", "release", "--name", "r", "--report", "r.json"]
     )
     assert parsed.selected == Path("selected.jsonl")
 
