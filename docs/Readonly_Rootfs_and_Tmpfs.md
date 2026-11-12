@@ -24,7 +24,7 @@ flotilla probe --deployment deployment.toml --out capabilities.json
 
 Filesystem checks run when the explicitly selected protocol can express them; unsupported modes produce `skipped`, not an automatic protocol/runtime fallback. There are no handwritten declaration flags. The image needs the standard probe tools including Python 3, `stat` (`-f`), `dd`, `grep`, `touch`, `/tmp`, and `/var/tmp`, plus working configured share mounts.
 
-The report records `runtime.readonly_rootfs`, `storage.native_tmpfs`, and `storage.shm_size`. Only `passed` ordinary-runtime evidence enables these capabilities. The schema-2 `evidence_profile` binds endpoint, runtime/extensions, protocols, storage, share and relevant policy. A mismatched or legacy report is rejected and must be reprobed; it is not silently downgraded to ordinary support.
+The report records `runtime.readonly_rootfs`, `storage.native_tmpfs`, and `storage.shm_size`. Only `passed` ordinary-runtime evidence enables these capabilities. The deployment must still select `sandbox-system-v1`; with `upstream` these capabilities are off. A configuration that differs from the probed `evidence_profile` only logs a warning. Legacy reports are rejected and must be reprobed.
 
 Checks include EROFS root writes, writable-volume transfer, `/etc/hosts`, actual tmpfs type, ownership/mode, non-root writes, capacity exhaustion, persistence across exec, output delivery while full, and separation between instances. The combined readonly/tmpfs behavior is also checked. Probe cleanup is bounded and recorded. Unit mocks are not real platform acceptance; no compatible release image has been validated for the current redesign.
 
@@ -75,7 +75,7 @@ The platform echoes an explicit size in the instance's `extensions` and omits th
 
 Upstream OpenSandbox has no create-time `/dev/shm` setting, so upstream mode rejects tasks declaring `shm_size`. Flotilla does not drop the field or fall back to the default size.
 
-With the selected `sandbox-system-v1` protocol the probe requests 96 MiB, then checks as UID 1000 that `/dev/shm` is tmpfs, reports exactly that capacity, and refuses a larger write. Only `passed` evidence in `storage.shm_size`, bound to the same `evidence_profile`, enables the capability.
+With the selected `sandbox-system-v1` protocol the probe requests 96 MiB, then checks as UID 1000 that `/dev/shm` is tmpfs, reports exactly that capacity, and refuses a larger write. Only `passed` evidence in `storage.shm_size`, with the `sandbox-system-v1` dialect selected, enables the capability.
 
 ## Preparation and runtime storage
 

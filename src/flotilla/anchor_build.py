@@ -25,9 +25,8 @@ from importlib import metadata, resources
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
 
-BUSYBOX_URL = "https://dl-cdn.alpinelinux.org/alpine/v3.20/main/x86_64/busybox-static-1.36.1-r31.apk"
-BUSYBOX_CONTROL = "Q1hZXWQJ7C5Eu/FFlBqrTGUqcycsM="
-BUSYBOX_SHA256 = "6d4ae568988ee24beb9dac4afdac4df67f90bbaed6ca47628da35ff5eb632a4c"
+from flotilla.busybox import BUSYBOX_CONTROL, BUSYBOX_SHA256, BUSYBOX_URL
+
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 
 

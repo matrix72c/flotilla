@@ -43,7 +43,7 @@ from flotilla.runtime.types import (
     ServiceInfo,
 )
 from flotilla.runtime.workspace import WorkspaceStore
-from flotilla.share.release import ReleaseError, check_release
+from flotilla.share.release import ReleaseError, check_release, ensure_builtin_release
 
 
 def invalid(message: str) -> FlotillaError:
@@ -133,6 +133,8 @@ class Manager:
             if not await self.anchor.exists("", stage="prepare", root=name):
                 raise invalid(f"input storage root {name!r} does not exist")
         try:
+            if self.cfg.share.builtin:
+                await ensure_builtin_release(self.anchor)
             await check_release(self.anchor, self.cfg.share.release, expected_sha256=self.cfg.share.release_sha256)
         except ReleaseError as exc:
             raise invalid(f"pinned share release failed its startup check: {exc}") from exc

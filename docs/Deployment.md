@@ -29,14 +29,14 @@ A successful build proves image self-containment, not platform behavior. Do not 
 
 Copy the [deployment template](../deployments/examples/opensandbox.toml), replacing endpoint, image, network and storage values. Keep actual credentials and deployment evidence outside Git. The environment variable named by `opensandbox.credential_env` supplies runtime API credentials.
 
-Use one shared root visible consistently to all workers and the Anchor. Assemble a share directory containing the controlled `bin/busybox` and retain its corresponding license/source information. Bootstrap does not require an existing capability report:
+Use one shared root visible consistently to all workers and the Anchor. Without `[share]`, the deployment uses the built-in shared-tools release `busybox-1.36.1-r31`: probe and runtime start publish it into the work root from the Anchor image's own pinned BusyBox when it is missing, with no network access. A custom release is optional; assemble a directory containing the controlled `bin/busybox`, retain its license/source information and publish it:
 
 ```sh
 flotilla share publish share-root --deployment deployment.toml \
   --release initial --component busybox=1.36.1
 ```
 
-Put its release name and `RELEASE.json` digest in `[share]`. Shared-tools releases are immutable. They are separate from native task releases and any Agent runtime.
+Then put its release name and `RELEASE.json` digest in `[share]`. Shared-tools releases are immutable. They are separate from native task releases and any Agent runtime.
 
 ## 3. Probe the actual deployment
 
@@ -79,7 +79,7 @@ platform_root = "/shared/releases/example"
 
 For host storage, the platform root is confined under the release's root (`[inputs.<input>]` if the binding names one, otherwise `[storage]`). PVC deployments require an explicit `pvc:<claim>/<configured-root-subpath>/<release-key>` binding; bare relative roots are rejected. Preserve required metadata and symlinks during publication; both local and platform consumed files are verified. Releases must remain immutable while selected by any running job. Task upload is not a Flotilla backend feature.
 
-To consume releases published in another owner's storage, keep `[storage]` on storage this deployment owns and declare the owner's read-only shares as named input roots; publish a shared-tools release in the work root with `flotilla share publish`. Different payloads may come from different roots. For example, with platform storage identifiers:
+To consume releases published in another owner's storage, keep `[storage]` on storage this deployment owns and declare the owner's read-only shares as named input roots; the built-in shared-tools release is published into the work root on first start. Different payloads may come from different roots. For example, with platform storage identifiers:
 
 ```toml
 [storage]                      # this team's writable root

@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Changed
+
+- `[share]` is optional. Without it a deployment uses the built-in release `busybox-1.36.1-r31`, which probe and runtime start publish into the work root from the Anchor image's pinned BusyBox when missing (no network). Explicit `[share]` pins keep working.
+- A capability report measured with different deployment settings (`evidence_profile`) is no longer rejected; runtime start logs a warning. The report schema is unchanged.
+- `[agent_runtime].layers.<name>.local_root` is optional; layers can be identified by `platform_root` alone.
+
 ### Added
 
 - Support caller-owned external read-only mounts via `OpenOptions.external_mounts` and `RunRequest.external_mounts`. Mounts are verified for read-only flags, non-overlapping target paths, and key hygiene, and are excluded from trial volume lifecycle management (no seeding, chowning, or cleanup deletions).

@@ -130,10 +130,6 @@ protocol = "current"
 volumes = "host"
 host_path = "/path/to/flotilla-local/shared"
 
-[share]
-release = "local-1"
-release_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"  # filled in by step 5
-
 [network]
 external = []                         # sandboxes get no internet access
 
@@ -177,23 +173,9 @@ external_targets = [
 
 There is no handwritten declaration file. A probe reports `passed`, `failed`, `skipped`, or `error`; absent controls never count as success. Configure TCP/UDP service controls and a DNS query name as described in [Network validation](Network_Validation.md). HTTPS and NTP avoid the need to operate raw echo servers; `service = "echo"` remains the default for existing controls. Standard services use one pinned IP across allow/deny/restore, and HTTPS requires valid CA trust and hostname verification. Cluster DNS may remain reachable; resolver-IP non-53 controls are optional diagnostics, not a prerequisite. Explicit security waivers cannot manufacture functional or no-network acceptance.
 
-## 5. Publish the share release
+## 5. Probe the platform
 
-Every sandbox mounts a small, immutable directory of helper tools at `/.flotilla`. Copy BusyBox out of the anchor image and publish it:
-
-```sh
-mkdir -p share-root/bin
-container=$(docker create localhost:5000/flotilla/anchor@sha256:REPLACE_WITH_ANCHOR_DIGEST)
-docker cp "$container:/.flotilla/bin/busybox" share-root/bin/busybox
-docker rm "$container"
-
-flotilla share publish share-root --deployment deployment.toml \
-  --release local-1 --component busybox=1.36.1
-```
-
-The command prints a `release_sha256` line. Paste it into `[share]` in `deployment.toml`.
-
-## 6. Probe the platform
+Every sandbox mounts a small, immutable directory of helper tools at `/.flotilla`. The deployment has no `[share]`, so the first probe publishes the built-in release from the anchor image's BusyBox.
 
 ```sh
 flotilla probe --deployment deployment.toml
@@ -202,7 +184,7 @@ flotilla share verify --deployment deployment.toml
 
 The probe creates real sandboxes and checks lifecycle, execution, authentication, storage, and controlled networking. It atomically writes `capabilities.json`, including cleanup status and configuration binding. Inspect every required result and cleanup outcome; this guide does not predict which checks will pass on your Docker runtime. Missing required evidence blocks runtime admission. Review security gaps before accepting any by name; never edit report outcomes to bypass admission.
 
-## 7. Run a task
+## 6. Run a task
 
 Only after capability checks and cleanup pass, create the [README example](../README.md#example), a two-service task with Redis:
 

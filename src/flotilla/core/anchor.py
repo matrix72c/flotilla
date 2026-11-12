@@ -279,6 +279,24 @@ class Anchor:
         except FlotillaError as exc:
             raise at_stage(exc, stage) from exc
 
+    async def read_image_file(self, path: str, *, stage: Stage) -> bytes:
+        """Read a file shipped in the Anchor image itself, never a path on a storage mount."""
+        s = self._settings
+        mounts = (s.mount_path, s.inputs_mount_path)
+        normalized = posixpath.normpath(path)
+        if (
+            normalized != path
+            or not posixpath.isabs(path)
+            or any(path == mount or path.startswith(mount.rstrip("/") + "/") for mount in mounts)
+        ):
+            raise ValueError(f"not an Anchor image path: {path!r}")
+        self.ensure_alive(stage)
+        assert self._handle is not None
+        try:
+            return await self._platform.read_file(self._handle, path)
+        except FlotillaError as exc:
+            raise at_stage(exc, stage) from exc
+
     async def rename(self, src_key: str, dest_key: str, *, stage: Stage) -> None:
         """Atomic rename (staging -> final directory). Fails without overwriting if the target exists.
 
