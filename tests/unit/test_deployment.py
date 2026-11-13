@@ -147,6 +147,7 @@ def test_runtime_layers_and_mounts(released: tuple[Path, Path]) -> None:
     deployment = Deployment.load(released[0])
     layers = deployment.runtime_layers()
     assert layers.root == "runtimes"
+    assert layers.root_identity == deployment.storage_identity("runtimes") != deployment.storage_identity()
     assert dict(layers.keys) == {"node": "node/n1", "lagent": "lagent/l1"}
     manifest = Manifest(task="t", agent_service="work", units={"work": unit(), "db": unit()})
     prepared = PreparedEnvironment(manifest)
@@ -157,8 +158,8 @@ def test_runtime_layers_and_mounts(released: tuple[Path, Path]) -> None:
     (volumes,) = options.external_mounts.values()
     assert list(options.external_mounts) == ["work"]
     assert [(v.key, v.mount_path, v.read_only, v.root) for v in volumes] == [
-        ("lagent/l1", "/opt/a/lagent", True, "runtimes"),
         ("node/n1", "/opt/a/node", True, "runtimes"),
+        ("lagent/l1", "/opt/a/lagent", True, "runtimes"),
     ]
     with pytest.raises(ValueError, match="exactly the runtime layers"):
         deployment.runtime_options(prepared, layers, {"node": "/opt/a/node"})

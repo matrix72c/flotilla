@@ -182,6 +182,10 @@ class Deployment:
             reserved_memory_gib=peak["reserved_memory_gib"],
         )
 
+    def storage_identity(self, root: str = "work") -> str:
+        """Backend identity of the work root or a named read-only input root."""
+        return self._config.storage_settings_for(root).root
+
     def runtime_layers(self) -> RuntimeLayers:
         """The [agent_runtime] layers as storage keys; layer names are not interpreted."""
         runtime = self._config.agent_runtime
@@ -200,15 +204,14 @@ class Deployment:
         mount_paths: Mapping[str, str],
         **options: Any,
     ) -> OpenOptions:
-        """Open options mounting each layer read-only into the manifest's agent service."""
-        current = self._config.storage_settings_for(layers.root).root
-        if layers.root_identity != current:
+        """Open options mounting each layer read-only into the manifest's agent service, in `mount_paths` order."""
+        if layers.root_identity != self.storage_identity(layers.root):
             raise ValueError("runtime layer storage root does not match the deployment")
         if set(mount_paths) != set(layers.keys):
             raise ValueError(f"mount paths must name exactly the runtime layers {sorted(layers.keys)}")
         volumes = tuple(
             SharedVolume(key=layers.keys[name], mount_path=mount_paths[name], read_only=True, root=layers.root)
-            for name in sorted(layers.keys)
+            for name in mount_paths
         )
         return OpenOptions(external_mounts={prepared.manifest().agent_service: volumes}, **options)
 
