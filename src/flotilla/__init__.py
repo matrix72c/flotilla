@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from flotilla._version import __version__
+from flotilla.deployment import DatasetPeak, Deployment, RowValidation, RuntimeLayers
 from flotilla.platform.base import ErrorCategory, ExecOutcomeUnknown, ExecResult, FlotillaError, ProcessStatus
 from flotilla.prepared import PreparedEnvironment, PreparedTask, load_prepared
 from flotilla.runtime.client import Flotilla
@@ -22,6 +23,8 @@ __all__ = [
     "AdmissionTimeout",
     "CleanupError",
     "CleanupReport",
+    "DatasetPeak",
+    "Deployment",
     "Environment",
     "EnvironmentInfo",
     "ErrorCategory",
@@ -35,7 +38,9 @@ __all__ = [
     "Process",
     "ProcessStatus",
     "ResourceReservation",
+    "RowValidation",
     "RuntimeEvent",
+    "RuntimeLayers",
     "Service",
     "ServiceInfo",
     "__version__",

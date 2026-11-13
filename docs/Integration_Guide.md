@@ -11,6 +11,26 @@ Two consequences follow:
 - One `NativeAttempt` owns its private workspace and roles. Your framework stops the agent before `attempt.verify()`, which stages hidden tests and declared artifact handoffs, then closes the attempt. Host `flotilla prepare` produces the native dataset before consumption; the user publishes its static files.
 - A score never makes a cleanup failure acceptable. Check `CleanupReport.clean` separately and treat an unclean report as an infrastructure problem.
 
+## Loading a deployment
+
+Load the deployment once per process through `Deployment` and ask it for everything platform-side. Do not read backend tables, timeout names or storage settings from the configuration yourself.
+
+```python
+from flotilla import Deployment
+
+deployment = Deployment.load("deployment.toml", credentials="private.env")  # binds only credential_env
+fleet = deployment.client(on_event=on_event)
+bindings = deployment.release_bindings()
+budget = deployment.setup_budget()          # worst case from create to started services, seconds
+peak = deployment.dataset_peak(rows)        # local reservation maxima; no credentials, creates nothing
+layers = deployment.runtime_layers()        # [agent_runtime] as storage keys; names are your vocabulary
+options = deployment.runtime_options(main, layers, {"node": "/opt/runtime/node"}, request_id="episode-1")
+frozen = deployment.freeze(run_dir / "inputs")  # portable deployment.json + capabilities.json
+report = await deployment.validate(rows, sandboxes=True, options=lambda role, prepared: ...)
+```
+
+`runtime_options` mounts each layer read-only into the manifest's agent service and rejects a layer set whose storage root has moved. `validate` records each row's failure instead of raising, never opens a separate verifier role and closes its client cleanly.
+
 ## One client per process
 
 Create one `Flotilla` per process and keep it for the process lifetime. It owns an anchor sandbox, a background event loop thread for renewal and cleanup, and the concurrency limits from `deployment.toml`. Do not share one across processes, and do not create one per episode.
