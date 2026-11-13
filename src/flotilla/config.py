@@ -520,10 +520,17 @@ class FlotillaConfig(_Model):
         except OSError as exc:
             # An unreadable config file is a usage error: report it as a config error, without a traceback.
             raise ConfigError([f"cannot read deployment configuration {path}: {exc.strerror or exc}"]) from exc
-        try:
-            data = tomllib.loads(text)
-        except tomllib.TOMLDecodeError as exc:
-            raise ConfigError([f"{path} is not valid TOML: {exc}"]) from exc
+        if path.suffix == ".json":
+            # A frozen copy written by Deployment.freeze.
+            try:
+                data = json.loads(text)
+            except json.JSONDecodeError as exc:
+                raise ConfigError([f"{path} is not valid JSON: {exc}"]) from exc
+        else:
+            try:
+                data = tomllib.loads(text)
+            except tomllib.TOMLDecodeError as exc:
+                raise ConfigError([f"{path} is not valid TOML: {exc}"]) from exc
         return cls.model_validate({**data, "base_dir": path.resolve().parent})
 
     @classmethod

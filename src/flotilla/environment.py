@@ -10,6 +10,11 @@ from pathlib import Path
 
 def load_env_file(path: str | Path) -> None:
     """Load literal KEY=value assignments. No expansion, sourcing or logging values."""
+    os.environ.update(read_env_file(path))
+
+
+def read_env_file(path: str | Path) -> dict[str, str]:
+    """Parse literal KEY=value assignments without touching the process environment."""
     values: dict[str, str] = {}
     for number, line in enumerate(Path(path).read_text().splitlines(), 1):
         line = line.strip()
@@ -30,4 +35,4 @@ def load_env_file(path: str | Path) -> None:
         if key in values:
             raise ValueError(f"duplicate environment variable {key} at line {number}")
         values[key] = parts[0] if parts else ""
-    os.environ.update(values)
+    return values
