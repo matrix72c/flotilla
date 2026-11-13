@@ -85,6 +85,8 @@ async def storage_extra(run: _Run, *, privileged: bool = False) -> dict[str, Ite
     scope = "privileged" if privileged else "ordinary"
     base = f"launches/{run.anchor.launch_id}/{run.run_id}/shared-{scope}"
     await run.anchor.mkdir(base + "/visible", stage="prepare")
+    if privileged:  # the runtime path does the same for writable mounts of privileged-runtime units
+        await run.anchor.open_permissions(base + "/visible", stage="prepare")
     spec = replace(
         run._spec("shared-" + scope, (SharedVolume(base + "/visible", "/probe", False),)),
         privileged=privileged,

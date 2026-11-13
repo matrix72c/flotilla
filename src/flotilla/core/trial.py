@@ -181,6 +181,16 @@ class Trial:
                 )
             elif vol.owner is not None:
                 await self._anchor.chown(key, *vol.owner, stage="prepare")
+        # Privileged-runtime root cannot write anchor-owned content; open what such units mount writable.
+        writable = {
+            f"{base}/{m.key}"
+            for u in self._plan.units.values()
+            if u.privileged_runtime
+            for m in u.mounts
+            if m.scope == "trial" and not m.read_only
+        }
+        for key in sorted(writable):
+            await self._anchor.open_permissions(key, stage="prepare")
 
     async def _create_all(self) -> None:
         await run_all(self._create_unit(u) for u in sorted(self._plan.units))

@@ -612,3 +612,32 @@ def test_sanitize_keeps_distinct_values_distinct() -> None:
     assert a != b and len(a) <= 63 and len(b) <= 63
     assert labels.sanitize_value("ok-value", 63) == "ok-value"  # valid values kept as-is
     assert labels.is_valid_value(labels.sanitize_value("///", 63), 63)
+
+
+@pytest.mark.asyncio
+async def test_prepare_opens_writable_mounts_of_privileged_runtime_units(
+    platform: FakePlatform, clock: ManualClock, anchor: Anchor, reaper: Reaper, tree: SharedTree, shell: Shell
+) -> None:
+    _seed_hosts(platform)
+    platform.caps = replace(platform.caps, privileged_runtime=True, devices=frozenset({"kvm"}))
+    plan = replace(
+        _three(),
+        volumes=(TrialVolume("cache", owner=(999, 999)), TrialVolume("shared"), TrialVolume("ro")),
+        units={
+            **_three().units,
+            "main": _unit(
+                devices=frozenset({"kvm"}),
+                mounts=(Mount("trial", "cache", "/cache", False), Mount("trial", "ro", "/ro", True)),
+            ),
+            "app": _unit(mounts=(Mount("trial", "shared", "/shared", False),)),
+        },
+    )
+    tree.events.clear()
+    ready = await clock.run(_new_trial(platform, clock, anchor, reaper, plan).start())
+    assert [e for e in tree.events if e.startswith("open ")] == ["open launches/L1/t1/cache"]
+    assert tree.modes["launches/L1/t1/cache"] == "0777" and tree.owners["launches/L1/t1/cache"] == "999:999"
+    assert "launches/L1/t1/shared" not in tree.modes and "launches/L1/t1/ro" not in tree.modes
+    spec = platform.spec_of(ready.handles["main"].iid)
+    assert spec.privileged and spec.devices == {"kvm"}
+    reaper.release("t1")
+    await clock.run(reaper.close())
