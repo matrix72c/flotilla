@@ -156,10 +156,13 @@ def test_tmpfs_is_inspected_not_derived_without_approximating_container_identity
     assert manifest.networks["default"].names == {"main": ["main"]}
     compose = task.env_dir / "docker-compose.yaml"
     compose.write_text(compose.read_text().replace("image: r.io/a", "image: r.io/a\n    container_name: agent-alias"))
-    rejected_builder = FakeBuilder()
-    rejected = build_task(load_task(task.path), tmp_path / "rejected", replace(ctx, builder=rejected_builder))
-    assert rejected.status == "rejected" and "identity" in rejected.reason
-    assert not rejected_builder.requests
+    aliased = build_task(
+        load_task(task.path), tmp_path / "aliased", replace(ctx, caps=replace(ctx.caps, native_tmpfs=True))
+    )
+    assert aliased.status == "built", aliased.reason
+    assert aliased.manifest_path
+    names = Manifest.load_json(aliased.manifest_path.read_bytes()).networks["default"].names
+    assert names == {"agent-alias": ["main"], "main": ["main"]}
 
 
 def test_mount_path_inspection_rejects_image_symlink(tmp_path: Path) -> None:

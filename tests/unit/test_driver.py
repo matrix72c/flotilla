@@ -299,7 +299,7 @@ def test_build_runs_builder_for_build_service(tmp_path: Path) -> None:
     (path / "environment" / "Dockerfile").write_text("FROM r.io/base:1\nRUN echo hi\n")
     ctx = _ctx()
     out = build_task(load_task(path), tmp_path / "out", ctx)
-    assert out.status == "built" and out.dispositions == {"main": "build"} and out.built == ("main",)
+    assert out.status == "built" and out.dispositions == {"main": "built"} and out.built == ("main",)
     (request,) = ctx.builder.requests  # type: ignore[union-attr]
     assert request.dockerfile == "Dockerfile" and request.service == "main"
 
@@ -569,7 +569,7 @@ def test_all_image_sources_adapt_user0_and_keep_real_mounts(tmp_path: Path, sour
         tmp_path,
         "adapt",
         compose=f"services:\n  main:\n    {origin}\n    volumes:\n      - {volume}\nvolumes:\n  cache: {{}}\n",
-        Dockerfile="FROM r.io/base:1\n",
+        Dockerfile="FROM r.io/base:1\nRUN true\n",
         payload__value="payload",
     )
     if source == "image":
@@ -640,7 +640,8 @@ def test_nonroot_image_keeps_task_context_with_root_daemon(
     assert unit.command == ["/entrypoint", "original-cmd"]
     assert unit.healthcheck is not None and unit.healthcheck.test == ["/health"]
     assert unit.image == f"r.io/ns/out@{DIGEST2}"
-    assert outcome.dispositions == {"main": "build"} and outcome.built == ("main",)
+    assert outcome.dispositions == {"main": "mirror" if mirror else "link"}
+    assert outcome.built == ("main",) and outcome.adapted == ("main",)
     (request,) = builder.requests
     assert request.dockerfile_text is not None and request.dockerfile_text.endswith("\nUSER 0:0\n")
     assert list(request.context.iterdir()) == []
@@ -687,7 +688,8 @@ def test_concurrent_builds_keep_their_metadata_digest_when_output_tag_is_overwri
         (path / "environment/marker").write_text("second")
         second = executor.submit(build_task, load_task(path), tmp_path / "out", _ctx(builder=RacingBuilder(False)))
         outcomes = [first.result(), second.result()]
-    assert requests[0].tag == requests[1].tag  # Stable publish name; not a cache or version key.
+    # Content-keyed cache tags: different context bytes never share a tag.
+    assert requests[0].tag != requests[1].tag and all(":bk-" in r.tag for r in requests)
     assert outcomes[0].manifest_path != outcomes[1].manifest_path
     for outcome, digest in zip(outcomes, [DIGEST, DIGEST2], strict=True):
         assert outcome.status == "built"

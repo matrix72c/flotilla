@@ -65,6 +65,15 @@ class DockerRegistry:
             raise ImageError(f"cannot parse digest from {ref} (imagetools output: {out[:200]!r})")
         return digest
 
+    def find(self, name: str, reference: str) -> str | None:
+        try:
+            return self.digest(name, reference)
+        except ImageError as exc:
+            # `imagetools inspect` reports a missing tag in an existing repository as `<ref>: not found`.
+            if f"{name}:{reference}: not found" in str(exc):
+                return None
+            raise
+
     def image_config(self, pinned: str) -> Mapping[str, Any]:
         """The `config` section of the image config. Reads only the manifest and config blob, not layers."""
         config = self._image(pinned).get("config")

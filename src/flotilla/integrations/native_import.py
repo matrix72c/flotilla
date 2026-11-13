@@ -37,6 +37,7 @@ class ImportedTask:
     instruction: str
     config: Any
     tests: Path | None
+    warnings: tuple[str, ...] = ()
 
 
 class UnsupportedTask(ValueError):
@@ -100,14 +101,17 @@ def import_task(
         raise UnsupportedTask("native importer does not yet encode per-phase network policy")
     environments = task_environments(path, compose_adapter=compose_adapter, compose_environment=row.parameters)
     roles = {}
+    warnings: list[str] = []
     for index, environment in enumerate(environments):
         role = "main" if index == 0 else "verifier"
         if role in roles:
             raise UnsupportedTask("multiple verifier environments require a multi-step protocol")
         declared = environment.environment_config or {}
-        for key in ("gpus", "gpu_types", "tpu", "mcp_servers", "skills_dir", "healthcheck", "env", "storage_mb"):
+        for key in ("gpus", "gpu_types", "tpu", "mcp_servers", "skills_dir", "healthcheck", "env"):
             if declared.get(key):
                 raise UnsupportedTask(f"{role}: environment.{key} is not represented by the native importer")
+        if declared.get("storage_mb"):
+            warnings.append(f"{role}: environment.storage_mb ignored; the platform has no per-sandbox disk quota")
         if declared.get("os", "linux") != "linux":
             raise UnsupportedTask(f"{role}: only linux images are supported")
         if require_prebuilt_images:
@@ -117,6 +121,7 @@ def import_task(
         scan = scan_task(environment, caps)
         if scan.status == "rejected":
             raise UnsupportedTask(f"{role}: " + "; ".join(f.reason for f in scan.findings if f.kind == "reject"))
+        warnings.extend(f"{role}: {f.path}: {f.reason}" for f in scan.findings if f.kind == "warn")
         if scan.runtime_params:
             raise UnsupportedTask(f"{role}: unresolved prepare parameters: {', '.join(scan.runtime_params)}")
         roles[role] = environment
@@ -124,4 +129,4 @@ def import_task(
     tests = confined(path, "tests")
     if tests.exists() and not tests.is_dir():
         raise ValueError("tests must be a directory")
-    return ImportedTask(row, roles, instruction, config, tests if tests.exists() else None)
+    return ImportedTask(row, roles, instruction, config, tests if tests.exists() else None, tuple(warnings))

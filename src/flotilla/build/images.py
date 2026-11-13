@@ -128,6 +128,13 @@ class Registry(Protocol):
         """Manifest digest (`sha256:...`) of `name` (registry/repo) at `reference` (tag or digest)."""
         ...
 
+    def find(self, name: str, reference: str) -> str | None:
+        """Like `digest`, but `None` when the tag does not exist; other failures still raise.
+
+        The default finds nothing, so registries without lookup support always build.
+        """
+        return None
+
     def image_config(self, pinned: str) -> Mapping[str, Any]:
         """`config` section of the image config of `pinned` (`repo@sha256:...`); reads only manifest and blob."""
         ...

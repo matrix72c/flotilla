@@ -6,6 +6,7 @@ import json
 import tarfile
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -521,7 +522,7 @@ volumes:
 
 
 def test_prepare_metrics_separate_application_build_from_user0(tmp_path: Path) -> None:
-    harbor_task(tmp_path / "harbor", "application", image=None, Dockerfile="FROM r.io/base:1\n")
+    harbor_task(tmp_path / "harbor", "application", image=None, Dockerfile="FROM r.io/base:1\nRUN true\n")
     builder = FakeBuilder()
     result = prepare(
         _selection(tmp_path),
@@ -533,3 +534,29 @@ def test_prepare_metrics_separate_application_build_from_user0(tmp_path: Path) -
     assert len(builder.requests) == 1
     assert result.metrics["phases"]["application_build_push"]["calls"] == 1
     assert result.metrics["phases"]["user0_build_push"]["calls"] == 0
+
+
+class _RefusingAdapter(OfflineComposeAdapter):
+    def __init__(self, error: Exception) -> None:
+        super().__init__()
+        object.__setattr__(self, "error", error)
+
+    def load(self, project_dir: Path, **kwargs: Any) -> Any:
+        if project_dir.parent.name == "refused":
+            raise self.error  # type: ignore[attr-defined]
+        return super().load(project_dir, **kwargs)
+
+
+def test_select_reports_tasks_compose_refuses_and_stops_on_tool_failure(tmp_path: Path) -> None:
+    from flotilla.compose.adapter import ComposeToolError
+
+    root = tmp_path / "harbor"
+    harbor_task(root, "plain")
+    harbor_task(root, "refused")
+    invalid = _RefusingAdapter(ValueError("official Compose config failed: services.db.volumes must be a array"))
+    result = select(root, caps=_caps(), compose_adapter=invalid)
+    assert [row.task_key for row in result.rows] == ["plain"]
+    refused = next(r for r in result.report if r["task_key"] == "refused")
+    assert (refused["status"], refused["code"]) == ("rejected", "invalid_task")
+    with pytest.raises(PreparationError, match="selection failed"):
+        select(root, caps=_caps(), compose_adapter=_RefusingAdapter(ComposeToolError("Compose unavailable")))

@@ -14,7 +14,7 @@ flotilla select --host-root ./source-tasks --deployment deployment.toml \
   --out selected.jsonl --report selection-report.json
 ```
 
-Probe records measured capabilities and requires confirmed cleanup. Selection normalizes supported task definitions but does not build or open task sandboxes. Inspect its report before preparing. `--require-prebuilt-images` rejects tasks that would need application builds; Voyager applies this constraint automatically.
+Probe records measured capabilities and requires confirmed cleanup. Selection normalizes supported task definitions but does not build or open task sandboxes. Inspect its report before preparing. The report lists each service's image source (`image`, `build`, or `config-only`). `--require-prebuilt-images` rejects tasks that would need application builds, for preparation hosts without Docker.
 
 ## 2. Prepare once
 
@@ -24,7 +24,7 @@ flotilla prepare selected.jsonl --deployment deployment.toml \
   --image-repo registry.example.org/team/task-runtime
 ```
 
-This command may build and publish required images. Provide registry credentials explicitly via your tool configuration or `--env prepare.env`. The repository argument has no tag or digest. Non-root source images get a minimal USER0 adaptation after the original application identity is resolved. Runtime images are fixed by remote digest. Static bind files, hidden tests and volume seeds are captured in the release. tmpfs/readonly rootfs do not by themselves require derived images.
+This command may build and publish required images. Provide registry credentials explicitly via your tool configuration or `--env prepare.env`. The repository argument has no tag or digest. Dockerfiles that only set configuration reuse their base digest; other builds are reused from the registry when an identical build exists (see [Native tasks](Native_Tasks.md)). Non-root source images get a minimal USER0 adaptation after the original application identity is resolved. Runtime images are fixed by remote digest. Static bind files, hidden tests and volume seeds are captured in the release. tmpfs/readonly rootfs do not by themselves require derived images.
 
 Preparation is atomic: failed selected rows do not silently disappear. Output must be a new directory. Keep reports and resumable work outside it. No platform task instances or static uploads are created by this command.
 

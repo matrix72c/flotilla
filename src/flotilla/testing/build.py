@@ -63,6 +63,9 @@ class FakeRegistry:
         self.resolved.append((name, reference))
         return self.digests.get(f"{name}:{reference}", DIGEST)
 
+    def find(self, name: str, reference: str) -> str | None:
+        return self.published.get(f"{name}:{reference}")
+
     def image_config(self, pinned: str) -> Mapping[str, Any]:
         self.configs += 1
         return {"Cmd": ["/bin/bash"], "WorkingDir": "/app", "User": self.user}

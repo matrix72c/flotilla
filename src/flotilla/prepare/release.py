@@ -14,9 +14,11 @@ from tempfile import mkdtemp
 from typing import Any, TypeVar
 
 from flotilla.build.builder import Builder, BuildRequest
+from flotilla.build.dockerfile import config_only
 from flotilla.build.driver import BuildContext, build_task, preflight_images
 from flotilla.build.images import ImageRef, pin_images, plan_images
 from flotilla.compose.adapter import ComposeConfigAdapter
+from flotilla.compose.task import HarborTask, TaskError
 from flotilla.integrations.native_import import ImportedTask, SelectedTask, UnsupportedTask, discover, import_task
 from flotilla.manifest import Manifest
 from flotilla.platform.base import Capabilities
@@ -55,6 +57,7 @@ class _Metrics:
                 "import_normalize",
                 "image_preflight",
                 "registry_digest",
+                "registry_lookup",
                 "image_config",
                 "image_accounts",
                 "mount_path_inspection",
@@ -67,7 +70,7 @@ class _Metrics:
                 "package",
             )
         }
-        self.counts = {"registry_cache_hits": 0, "seed_cache_hits": 0}
+        self.counts = {"registry_cache_hits": 0, "seed_cache_hits": 0, "build_cache_hits": 0, "config_only": 0}
 
     def call(self, phase: str, function: Callable[..., _T], *args: Any, **kwargs: Any) -> _T:
         observation = self.phases[phase]
@@ -160,6 +163,8 @@ def select(
                     "stage": "select",
                     "code": "supported",
                     "roles": list(imported.roles),
+                    "images": {role: _image_sources(task) for role, task in imported.roles.items()},
+                    "warnings": list(imported.warnings),
                     "validation": "metadata/official-compose; images not inspected",
                 }
             )
@@ -170,6 +175,17 @@ def select(
                     "status": "rejected",
                     "stage": "select",
                     "code": "unsupported",
+                    "reason": str(exc),
+                }
+            )
+        except TaskError as exc:
+            # The task's own files are invalid (for example Compose itself refuses them); tool failures are not.
+            reports.append(
+                {
+                    "task_key": row.task_key,
+                    "status": "rejected",
+                    "stage": "select",
+                    "code": "invalid_task",
                     "reason": str(exc),
                 }
             )
@@ -193,6 +209,18 @@ def select(
             for row in rows:
                 stream.write(row.model_dump_json() + "\n")
     return SelectionResult(tuple(rows), tuple(reports))
+
+
+def _image_sources(task: HarborTask) -> dict[str, str]:
+    """Per service: `image`, `build`, or `config-only` (a build that may reuse its base digest)."""
+    out: dict[str, str] = {}
+    for name, svc in sorted(task.project.services.items()):
+        if svc.build is None:
+            out[name] = "image"
+            continue
+        dockerfile = task.env_dir / svc.build.context / (svc.build.dockerfile or "Dockerfile")
+        out[name] = "config-only" if config_only(dockerfile.read_text()) else "build"
+    return out
 
 
 def _rows(selected: str | Path | Sequence[SelectedTask | Mapping[str, Any]]) -> list[SelectedTask]:
@@ -223,6 +251,12 @@ class _RegistryCache:
         else:
             self.metrics.counts["registry_cache_hits"] += 1
         return self.digests[key]
+
+    def find(self, name: str, reference: str) -> str | None:
+        found: str | None = self.metrics.call("registry_lookup", self.registry.find, name, reference)
+        if found is not None:
+            self.digests[(name, reference)] = found
+        return found
 
     def image_config(self, pinned: str) -> Any:
         if pinned not in self.configs:
@@ -411,6 +445,7 @@ def _prepare(
     dataset = []
     published_images: set[str] = set()
     packaged: set[str] = set()
+    prepared_images: dict[str, dict[str, Any]] = {}
     try:
         with ReleaseWriter(output, name) as writer:
             for i, row in enumerate(rows):
@@ -421,6 +456,7 @@ def _prepare(
                         roles = {}
                         files: dict[str, Path] = {}
                         sources_by_role = {}
+                        images_by_role = {}
                         for role, task in imported.roles.items():
                             sources_by_role[role] = {
                                 p.service: p.ref.pinned(p.ref.digest or "")
@@ -431,6 +467,15 @@ def _prepare(
                             published_images.update(context.adaptations.values())
                             if outcome.status != "built" or outcome.manifest_path is None:
                                 raise ValueError(f"{role}: {outcome.reason}")
+                            images_by_role[role] = {
+                                "dispositions": dict(outcome.dispositions),
+                                "adapted": list(outcome.adapted),
+                            }
+                            for disposition in outcome.dispositions.values():
+                                if disposition == "cache-hit":
+                                    metrics.counts["build_cache_hits"] += 1
+                                elif disposition == "config-only":
+                                    metrics.counts["config_only"] += 1
                             manifest = Manifest.load_json(outcome.manifest_path.read_text())
                             published_images.update(unit.image for unit in manifest.units.values())
                             if outcome.needs_publish:
@@ -475,8 +520,11 @@ def _prepare(
                         )
                         metrics.call("package", writer.add_task, native, imported.instruction, files)
                         packaged.add(row.task_key)
+                        prepared_images[row.task_key] = images_by_role
                     dataset.append({"task": row.task_key, "annotations": row.annotations, "parameters": row.parameters})
                     reports[i].update(status="prepared", stage="package", code="complete")
+                    if row.task_key in prepared_images:
+                        reports[i]["images"] = prepared_images[row.task_key]
                 except (OSError, ValueError, RuntimeError) as exc:
                     reports[i].update(status="failed", stage="prepare", code="prepare_error", reason=str(exc))
                     # Keep processing so each selected row receives its own diagnosis.

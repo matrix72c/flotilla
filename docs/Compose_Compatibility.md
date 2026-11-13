@@ -80,19 +80,19 @@ merge/interpolation implementation or a production fallback.
   replacement. Command strings are argv, not an implicit shell. These are argv
   selection rules only, not a promise that the selected process is container PID 1.
 
-## Explicitly unsupported semantics
+## Docker-only semantics
 
-The scanner/build boundary rejects, rather than silently approximates:
+Fields that only change local Docker behavior are recorded, not approximated:
+published ports (peers on a shared network reach every port), `init`,
+`logging`, `stop_signal`, `stop_grace_period`, `pull_policy`, bridge
+`gateway_mode`/name/MTU options and network attachment priorities. Restart
+policies other than `no` never restart a service; an exit Docker would restart
+voids the run. `hostname` and `container_name` become names peers resolve;
+`gethostname()` keeps the platform's value.
 
-- Published ports, including target-only declarations that would allocate a host
-  port automatically. `expose` alone does not publish ports.
-- Actual `hostname` and `container_name`. Network aliases are not replacements
-  for these identities.
-- Restart policies other than `no`, dependency restart propagation, `init`,
-  `stop_signal`, and `stop_grace_period`.
-- Docker privileged mode, logging-driver configuration, pull policies, bridge
-  driver options, nonzero network attachment priorities, and the other
-  unsupported security/device/namespace fields reported by normalization.
+The scanner/build boundary still rejects Docker privileged mode outside the
+privileged runtime, other bridge driver options, and the security, device and
+namespace fields listed in [Compose support](Compose_Support.md).
 
 Filesystem mounts, networking, health checks, and resource limits also remain
 subject to the deployment's declared/probed capabilities. Successful model

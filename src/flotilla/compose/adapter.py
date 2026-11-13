@@ -97,6 +97,10 @@ def _input_gate(root: Path, files: Sequence[Path]) -> None:
 _VERSION_CHECKED: set[tuple[tuple[str, ...], str]] = set()
 
 
+class ComposeToolError(ValueError):
+    """The Compose executable is unavailable or misbehaves; unlike invalid task input, never a task verdict."""
+
+
 @dataclass(frozen=True)
 class ComposeConfigAdapter:
     """The executable and exact version are explicit dependencies, never auto-installed.
@@ -144,9 +148,12 @@ class ComposeConfigAdapter:
             # not use this shortcut for even an empty, but present, Compose file.
             return normalize({"services": {MAIN: base}}, {}, resolved=True)
         if (self.command, self.expected_version) not in _VERSION_CHECKED:
-            version = self._run([*self.command, "version", "--short"], root, env).strip().removeprefix("v")
+            try:
+                version = self._run([*self.command, "version", "--short"], root, env).strip().removeprefix("v")
+            except ValueError as exc:
+                raise ComposeToolError(str(exc)) from exc
             if version != self.expected_version:
-                raise ValueError(f"Compose {self.expected_version} required; found {version!r}")
+                raise ComposeToolError(f"Compose {self.expected_version} required; found {version!r}")
             _VERSION_CHECKED.add((self.command, self.expected_version))
         # Compose owns merging, interpolation, env_file parsing and short forms.
         with TemporaryDirectory(prefix="flotilla-compose-") as temporary:
@@ -172,7 +179,7 @@ class ComposeConfigAdapter:
             # variable name, brace expression, or shell syntax in the result.
             document = json.loads(self._run(args, root, env).replace("$$", "$"))
         if not isinstance(document, dict) or not isinstance(document.get("services"), dict):
-            raise ValueError("Compose config did not return a service mapping")
+            raise ComposeToolError("Compose config did not return a service mapping")
         main = document["services"].get(MAIN)
         if not isinstance(main, dict):
             raise ValueError("Compose config is missing Harbor's main service")
@@ -212,7 +219,7 @@ class ComposeConfigAdapter:
         try:
             result = subprocess.run(args, cwd=cwd, env=env, text=True, capture_output=True, check=False, timeout=60)
         except (OSError, subprocess.TimeoutExpired) as exc:
-            raise ValueError(f"official Compose config unavailable: {exc}") from exc
+            raise ComposeToolError(f"official Compose config unavailable: {exc}") from exc
         if result.returncode:
             raise ValueError(f"official Compose config failed: {result.stderr.strip()}")
         return result.stdout

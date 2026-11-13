@@ -226,16 +226,15 @@ def test_null_and_empty_command_entrypoint(entrypoint: str | list[str] | None, c
         ("pull_policy", "always"),
     ],
 )
-def test_unimplemented_semantics_rejected(field: str, value: object, tmp_path: Path) -> None:
+def test_docker_only_semantics_are_recorded_not_rejected(field: str, value: object, tmp_path: Path) -> None:
     from flotilla.build.driver import build_task
     from flotilla.compose.task import HarborTask
     from flotilla.testing.build import FakeBuilder, FakeRegistry, _ctx
 
-    project = normalize({"services": {"main": {"image": "image", field: value}}}, {})
-    assert any(f.kind == "reject" and f.path == f"services.main.{field}" for f in project.findings)
+    project = normalize({"services": {"main": {"image": "r.io/image", field: value}}}, {})
+    kinds = {f.kind for f in project.findings if f.path == f"services.main.{field}"}
+    assert kinds and kinds <= {"equivalent", "warn"}, project.findings
     builder, registry = FakeBuilder(), FakeRegistry()
-    task = HarborTask("rejected", tmp_path, tmp_path, project, ())
+    task = HarborTask("accepted", tmp_path, tmp_path, project, ())
     outcome = build_task(task, tmp_path / "out", _ctx(builder=builder, registry=registry))
-    assert outcome.status == "rejected"
-    assert not builder.requests and not registry.resolved and not registry.copied
-    assert registry.configs == 0 and not (tmp_path / "out").exists()
+    assert outcome.status == "built", outcome.reason
