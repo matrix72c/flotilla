@@ -325,6 +325,7 @@ async def _docker(run: _Run, unit: InstanceHandle) -> Item:
 
 # Root opens the device node and exercises it: KVM_GET_API_VERSION (must be 12) then KVM_CREATE_VM; TUNSETIFF
 # creates a TAP interface (IFF_TAP | IFF_NO_PI), which needs CAP_NET_ADMIN in the sandbox network namespace.
+# The interface is looked up by name; sysbox's sysfs does not resolve /sys/class/net/<name> links.
 _DEVICE_SCRIPTS: dict[TaskDevice, str] = {
     "kvm": (
         "import fcntl, os\n"
@@ -334,10 +335,10 @@ _DEVICE_SCRIPTS: dict[TaskDevice, str] = {
         "os.close(fd)\n"
     ),
     "tun": (
-        "import fcntl, os, struct\n"
+        "import fcntl, os, socket, struct\n"
         "fd = os.open('/dev/net/tun', os.O_RDWR | os.O_CLOEXEC)\n"
         "fcntl.ioctl(fd, 0x400454CA, struct.pack('16sH22x', b'flotilla-tap0', 0x1002))\n"
-        "assert os.path.isdir('/sys/class/net/flotilla-tap0')\n"
+        "socket.if_nametoindex('flotilla-tap0')\n"
         "os.close(fd)\n"
     ),
 }
