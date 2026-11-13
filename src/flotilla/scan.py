@@ -141,11 +141,11 @@ def _deployment(project: Project, caps: Capabilities) -> Iterable[Finding]:
             )
         if svc.udp_ports and not caps.link_udp:
             yield Finding(f"services.{name}.ports", "reject", "UDP ports declared, but this deployment lacks link_udp")
-        if svc.privileged:
+        if svc.privileged and not caps.privileged_runtime:
             yield Finding(
                 f"services.{name}.privileged",
                 "reject",
-                "a privileged sandbox is not equivalent to Docker privileged mode",
+                "deployment has no privileged-runtime isolation evidence",
             )
 
 

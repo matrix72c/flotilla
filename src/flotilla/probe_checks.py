@@ -229,7 +229,7 @@ async def privileged(run: _Run) -> dict[str, Item]:
     unit = await run._create(replace(run._spec("privileged"), image=run.settings.privileged_image, privileged=True))
     # Address readiness uses the exact configured protocol and real privileged create path.
     await p.internal_address(unit)
-    # Docker evidence admits `privileged` services only; isolation and device checks below do not depend on it.
+    # Optional Docker measurement (DinD daemon and inner container limits); recorded, never required for admission.
     docker = await attempt(lambda: _docker(run, unit), scope="privileged")
     auth = await attempt(lambda: authentication(p, unit, run_id=run.run_id, scope="privileged"), scope="privileged")
     fuse_item = await attempt(lambda: fuse(run, unit), scope="privileged")
@@ -267,14 +267,11 @@ async def privileged(run: _Run) -> dict[str, Item]:
     tun_item = await attempt(lambda: device(run, "tun"), scope="privileged")
     return {
         "privileged_runtime": Item(
-            status=docker.status if docker.status != "passed" or gone else "failed",
+            status="passed" if gone else "failed",
             scope="privileged",
-            evidence=(
-                "configured privileged create; docker info; digest inner container output/exit/resource limits; "
-                "outer deletion"
-            ),
+            evidence="configured privileged create and address readiness; outer deletion; Docker in measurements",
             measurements={
-                "docker": docker.evidence,
+                "docker": {"status": docker.status, "evidence": docker.evidence},
                 "extensions": sorted(p._privileged_extensions),
                 "inner_memory_bytes": 64 * 1024 * 1024,
                 "inner_cpu": 0.5,

@@ -206,8 +206,11 @@ def _service(
         else:
             c.reject(f"{path}.{key}", "unsupported field")
 
-    if raw.get("privileged"):
-        c.reject(f"{path}.privileged", "a privileged sandbox is not equivalent to Docker privileged mode")
+    if raw.get("privileged") is True:
+        c.warn(
+            f"{path}.privileged",
+            "runs on the privileged runtime: root holds all capabilities in its own user namespace, not on the host",
+        )
     devices = _devices(raw.get("devices"), f"{path}.devices", c)
     _cap_add(raw.get("cap_add"), f"{path}.cap_add", devices, c)
     if "image" not in raw and "build" not in raw:

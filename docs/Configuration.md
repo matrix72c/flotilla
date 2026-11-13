@@ -250,7 +250,7 @@ All probe inputs live in the deployment file. Images must be pinned `repo@sha256
 | `deployment` | `"deployment"` | Human-readable report name |
 | `image` | `""` | Required ordinary probe image |
 | `privileged_image` | `""` | Image for the configured privileged create path (e.g. Kata DinD). Enables the privileged phase: isolation, FUSE, KVM and TUN checks |
-| `inner_image` | `""` | Fixed lightweight image with `/bin/sh` for DinD execution/resource checks. Without it Docker is not measured and `privileged: true` services are not admitted; device evidence is unaffected |
+| `inner_image` | `""` | Fixed lightweight image with `/bin/sh` for DinD execution/resource checks. Without it Docker is not measured; admission of `privileged: true` services and devices does not depend on it |
 | `link_members` | `9` | Measured group size, bounded to 2–32; not a platform maximum |
 | `hosts_recheck_s` | `600` | Delay before verifying that `/etc/hosts` was not rewritten |
 | `list_visibility_s` | `30` | Configured listing budget, also used by management bootstrap and GC safety |

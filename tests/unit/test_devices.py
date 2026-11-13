@@ -200,10 +200,10 @@ def test_report_devices_need_privileged_scoped_evidence() -> None:
     assert not report(**unprivileged).to_capabilities().devices
     no_docker = {**measured, "runtime.privileged_runtime": {"status": "skipped", "scope": "privileged"}}
     caps = report(**no_docker).to_capabilities()
-    assert caps.devices == {"fuse", "kvm", "tun"} and not caps.privileged_runtime
+    assert caps.devices == {"fuse", "kvm", "tun"} and caps.privileged_runtime
     cfg = FlotillaConfig.from_mapping(config_data())
     caps = cfg.platform_capabilities(report(**no_docker))
-    assert caps.devices == {"fuse", "kvm", "tun"} and not caps.privileged_runtime
+    assert caps.devices == {"fuse", "kvm", "tun"} and caps.privileged_runtime
 
 
 SETTINGS = ProbeSettings(
