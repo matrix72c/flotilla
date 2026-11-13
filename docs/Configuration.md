@@ -24,7 +24,7 @@ A configuration contains exactly one backend table: `[opensandbox]` for the buil
 | `capabilities` | `"capabilities.json"` | Path to the capability report written by `flotilla probe` |
 | `filesystem_protocol` | `"upstream"` | Lifecycle filesystem mapping: `"upstream"` omits extension fields; `"sandbox-system-v1"` enables the internal wire format, subject to matching probe evidence |
 | `extensions` | `{}` | Extra `extensions` sent with every create request |
-| `privileged_extensions` | `{}` | Extra `extensions` sent only for `privileged: true` services |
+| `privileged_extensions` | `{}` | Extra `extensions` sent only for privileged services, including services declaring `/dev/kvm` or `/dev/net/tun`. The device keys `kvm` and `tun` are written per instance and cannot be set in any extensions table |
 | `management_extensions` | `{}` | Overrides of `extensions` sent only by workspace anchors explicitly selecting `prepare.management_profile = "management"`; never merged with `privileged_extensions` |
 | `create_fields` | `{}` | Extra top-level create-request fields. Fields managed by Flotilla (`image`, `entrypoint`, `metadata`, `timeout`, `resourceLimits`, `resourceRequests`, `volumes`, `networkPolicy`, `extensions`, `env`, `readOnlyRootFilesystem`, `tmpfsMounts`) are rejected |
 | `group_extension` | unset | Extension key used to place all sandboxes of one environment in one scheduling group. Set only if the deployment implements it |
@@ -249,8 +249,8 @@ All probe inputs live in the deployment file. Images must be pinned `repo@sha256
 |---|---|---|
 | `deployment` | `"deployment"` | Human-readable report name |
 | `image` | `""` | Required ordinary probe image |
-| `privileged_image` | `""` | Image for the configured privileged create path (e.g. Kata DinD) |
-| `inner_image` | `""` | Fixed lightweight image with `/bin/sh` for DinD execution/resource checks |
+| `privileged_image` | `""` | Image for the configured privileged create path (e.g. Kata DinD). Enables the privileged phase: isolation, FUSE, KVM and TUN checks |
+| `inner_image` | `""` | Fixed lightweight image with `/bin/sh` for DinD execution/resource checks. Without it Docker is not measured and `privileged: true` services are not admitted; device evidence is unaffected |
 | `link_members` | `9` | Measured group size, bounded to 2–32; not a platform maximum |
 | `hosts_recheck_s` | `600` | Delay before verifying that `/etc/hosts` was not rewritten |
 | `list_visibility_s` | `30` | Configured listing budget, also used by management bootstrap and GC safety |
@@ -261,7 +261,7 @@ All probe inputs live in the deployment file. Images must be pinned `repo@sha256
 
 For external isolation acceptance, provide TCP and UDP service controls (for example HTTPS and NTP, without operating echo servers) and a DNS query name. HTTPS/NTP resolve once under an allowing policy and use the same pinned IP for allow/deny/restore; HTTPS retains certificate hostname verification and SNI. Missing positives, invalid responses, certificate errors or restore failures never prove isolation. Measured cluster DNS on TCP/UDP 53 is allowed; this is not complete network disconnection. Non-53 controls on each resolver IP are optional and reported separately as `resolver_non_dns`; missing controls are `skipped`, not an isolation failure or proof of IP-wide blocking. See [Network validation](Network_Validation.md). Probe targets do not extend `[network].external` for tasks.
 
-The probe image needs the configured execd interface, shell/file utilities and Python 3's standard socket/TLS libraries and a CA trust store for HTTPS. The privileged phase additionally needs Docker; the fixed inner image must expose readable cgroup v2 limits. FUSE runs only when the actual configured extensions enable it and requires `fuse-overlayfs` and `fusermount3`; missing tools are errors, not evidence of unsupported platform behavior.
+The probe image needs the configured execd interface, shell/file utilities and Python 3's standard socket/TLS libraries and a CA trust store for HTTPS. The Docker check of the privileged phase additionally needs a running Docker daemon; the fixed inner image must expose readable cgroup v2 limits. FUSE runs only when the actual configured extensions enable it and requires `fuse-overlayfs` and `fusermount3`; missing tools are errors, not evidence of unsupported platform behavior. KVM and TUN checks run `python3` as root in the privileged image.
 
 ## Generated capabilities.json
 

@@ -42,7 +42,7 @@ def dataset(tmp_path: Path) -> Path:
     root = tmp_path / "ds"
     _task(root, "plain", toml='[environment]\ndocker_image = "r.io/ns/app:1"\n')
     _task(root, "files", compose=WITH_FILES, **{"shared__f.txt": "x"})
-    _task(root, "broken", compose="services:\n  main:\n    image: r.io/a:1\n    devices: [/dev/kvm]\n")
+    _task(root, "broken", compose="services:\n  main:\n    image: r.io/a:1\n    devices: [/dev/sda]\n")
     return root
 
 
@@ -92,7 +92,11 @@ async def test_prepare_writes_rows_failures_and_task_files(
     assert rows["ds/plain"].environment().manifest().task_files is None
     assert anchors.started == 1
     failure = json.loads(failures_path(out).read_text())
-    assert failure["id"] == "ds/broken" and failure["stage"] == "scan" and "devices" in failure["reason"]
+    assert (
+        failure["id"] == "ds/broken"
+        and failure["stage"] == "scan"
+        and "/dev/net/tun are supported" in failure["reason"]
+    )
     assert not any((out.parent / "ds.jsonl.work").glob("task-*"))  # per-task scratch removed
 
 
@@ -117,7 +121,7 @@ async def test_forced_failure_drops_the_old_row_and_no_files_means_no_anchor(
     task = _task(root, "t", toml='[environment]\ndocker_image = "r.io/ns/app:1"\n')
     out = tmp_path / "ds.jsonl"
     await _run(cfg, [root], out, anchors)
-    (task / "environment" / "docker-compose.yaml").write_text("services:\n  main:\n    devices: [/dev/kvm]\n")
+    (task / "environment" / "docker-compose.yaml").write_text("services:\n  main:\n    devices: [/dev/sda]\n")
     report = await _run(cfg, [root], out, anchors, force=True)
     assert report.failed == ("ds/t",) and load_prepared(out) == []
     assert anchors.started == 0

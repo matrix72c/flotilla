@@ -999,3 +999,27 @@ async def test_reconciliation_keeps_tokens_of_repeated_creates_distinct(clock: M
     platform.forget_creates({"flotilla/unit": "not-visible"})
     assert not platform._pending
     await platform.aclose()
+
+
+@pytest.mark.asyncio
+async def test_devices_are_per_instance_extensions_on_the_privileged_runtime(
+    clock: ManualClock, caps: Capabilities
+) -> None:
+    spec = dataclasses.replace(_spec("vm"), privileged=True, devices=frozenset({"tun", "kvm"}))
+    kwargs: dict[str, Any] = {"privileged_extensions": {"runtimeClassName": "sysbox-runc"}}
+    with pytest.raises(FlotillaError, match="devices") as failure:
+        await _create_body(clock, caps, spec, **kwargs)  # no probed evidence
+    assert failure.value.category is ErrorCategory.INVALID and not failure.value.retryable
+    caps = dataclasses.replace(caps, privileged_runtime=True, devices=frozenset({"kvm", "tun"}))
+    body = await _create_body(clock, caps, spec, **kwargs)
+    assert body["extensions"] == {"project": "p1", "runtimeClassName": "sysbox-runc", "kvm": "true", "tun": "true"}
+    plain = await _create_body(clock, caps, dataclasses.replace(spec, devices=frozenset()), **kwargs)
+    assert plain["extensions"] == {"project": "p1", "runtimeClassName": "sysbox-runc"}
+
+
+@pytest.mark.parametrize("field", ["extensions", "privileged_extensions", "management_extensions"])
+@pytest.mark.parametrize("key", ["kvm", "tun"])
+def test_static_extensions_cannot_set_device_keys(clock: ManualClock, caps: Capabilities, field: str, key: str) -> None:
+    kwargs: dict[str, Any] = {field: {key: "true"}}
+    with pytest.raises(ValueError, match=key):
+        _platform(lambda r: httpx.Response(200), clock, caps=caps, **kwargs)

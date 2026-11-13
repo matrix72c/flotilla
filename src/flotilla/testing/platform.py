@@ -408,6 +408,8 @@ class FakePlatform:
                 volume_paths=tuple(m.mount_path for m in spec.volumes),
                 shm_size_bytes=spec.shm_size_bytes,
             )
+            if missing := sorted(spec.devices - self.caps.devices):
+                raise ValueError(f"deployment does not support devices {missing}")
         except ValueError as exc:
             raise FlotillaError(str(exc), stage="create", category=ErrorCategory.INVALID, retryable=False) from exc
         max_ttl = self.caps.max_ttl_seconds

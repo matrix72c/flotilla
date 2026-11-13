@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Literal
 
-from flotilla.platform.base import TmpfsMount
+from flotilla.platform.base import TaskDevice, TmpfsMount
 
 Kind = Literal["equivalent", "warn", "reject"]
 Condition = Literal["service_started", "service_healthy", "service_completed_successfully"]
@@ -86,6 +86,7 @@ class Service:
     readonly_rootfs: bool = False
     restart: RestartPolicy = "no"
     privileged: bool = False
+    devices: frozenset[TaskDevice] = frozenset()  # run on the privileged runtime
     container_name: str | None = None
     hostname: str | None = None
     udp_ports: tuple[int, ...] = ()

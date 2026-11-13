@@ -12,6 +12,7 @@ from flotilla.platform.base import (
     Resources,
     SharedVolume,
     StorageRoot,
+    TaskDevice,
     TmpfsMount,
     overlaps,
     validate_mounts,
@@ -84,6 +85,12 @@ class Unit:
     readonly_rootfs: bool = False
     tmpfs_mounts: tuple[TmpfsMount, ...] = ()
     shm_size_bytes: int | None = None
+    devices: frozenset[TaskDevice] = frozenset()
+
+    @property
+    def privileged_runtime(self) -> bool:
+        """Devices are only offered on the privileged runtime."""
+        return self.privileged or bool(self.devices)
 
 
 @dataclass(frozen=True)
@@ -208,7 +215,7 @@ class TrialPlan:
                     raise ValueError(f"{name}: external mount {path} conflicts with another or reserved mount")
                 occupied.append(path)
             validate_mounts(unit.tmpfs_mounts, (m.target for m in unit.mounts), shm_size_bytes=unit.shm_size_bytes)
-            if unit.readonly_rootfs and unit.privileged:
+            if unit.readonly_rootfs and unit.privileged_runtime:
                 raise ValueError(f"{name}: readonly_rootfs cannot be combined with privileged")
             for m in unit.mounts:
                 if any(overlaps(m.target, reserved) for reserved in RESERVED_MOUNTS):
