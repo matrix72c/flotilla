@@ -244,8 +244,9 @@ class Deployment:
                     for role, manifest in bound.task.roles.items():
                         definition = PreparedEnvironment(manifest)
                         result.environments.append(asdict(fleet.reservation(definition)))
-                        # The isolated verifier only opens through verify() after a run.
-                        if not sandboxes or role == verifier:
+                        # A separate verifier role only opens through verify() after a run;
+                        # a shared verifier is main itself, which must still start here.
+                        if not sandboxes or (role == verifier and role != "main"):
                             continue
                         handle = await attempt.open(role, options(role, definition) if options else OpenOptions())
                         try:

@@ -29,21 +29,21 @@ def unit(cpu: str = "1", memory: str = "128Mi") -> Unit:
     )
 
 
-def build_release(base: Path, *, name: str = "rel", services: int = 1, cpu: str = "1") -> Path:
+def build_release(base: Path, *, name: str = "rel", services: int = 1, cpu: str = "1", shared: bool = False) -> Path:
     tests = base / "tests"
     tests.mkdir(parents=True)
     (tests / "test.sh").write_text("#!/bin/sh\nexit 0\n")
     key = "ds/task-a"
     units = {"main": unit(cpu)} | {f"svc{i}": unit(cpu) for i in range(1, services)}
     directory = ReleaseWriter.directory(key)
+    roles = {"main": Manifest(task=key, agent_service="main", units=units)}
+    if not shared:
+        roles["verifier"] = Manifest(task=f"{key}#verifier", agent_service="main", units={"main": unit()})
     task = Task(
         key=key,
-        roles={
-            "main": Manifest(task=key, agent_service="main", units=units),
-            "verifier": Manifest(task=f"{key}#verifier", agent_service="main", units={"main": unit()}),
-        },
+        roles=roles,
         verification=Verification(
-            role="verifier",
+            role="main" if shared else "verifier",
             command=("bash", "/tests/test.sh"),
             tests=f"{directory}/tests",
             output_paths={"reward.txt": "/logs/verifier/reward.txt"},
@@ -237,3 +237,15 @@ async def test_validate_reports_rows_and_never_opens_the_verifier(
     assert len(results[0].environments) == 2  # both roles are still sized for admission
     assert results[2].error is not None and "ValidationError" in results[2].error
     assert FakeAttempt.opened == ["main", "main"] and seen == ["main", "main"]
+
+
+@pytest.mark.asyncio
+async def test_validate_starts_main_when_it_is_also_the_verifier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("flotilla.native.runtime.NativeAttempt", FakeAttempt)
+    monkeypatch.setattr(Flotilla, "close", _clean_close)
+    FakeAttempt.opened = []
+    path = write_deployment(tmp_path, build_release(tmp_path / "data", shared=True))
+    (result,) = await Deployment.load(path).validate([{"release": "rel", "task": "ds/task-a"}], sandboxes=True)
+    assert result.passed and FakeAttempt.opened == ["main"]
