@@ -350,6 +350,14 @@ class Anchor:
             retryable=True,
         )
 
+    async def open_permissions(self, key: str, *, stage: Stage) -> None:
+        """Make `key` and its contents readable and writable by every identity (`chmod -R a+rwX`).
+
+        Root of a privileged-runtime instance (sysbox user namespace) is not the storage owner of anchor-created
+        content, so default 755/644 content is read-only to it; the platform has no inheritable default ACL.
+        """
+        await self._run(("chmod", "-R", "a+rwX", "--", self._path(key)), stage)
+
     async def chmod(self, key: str, mode: int, *, stage: Stage) -> None:
         """Set the permission bits of `key` (restores mode after publishing)."""
         await self._run(("chmod", f"{mode:04o}", "--", self._path(key)), stage)

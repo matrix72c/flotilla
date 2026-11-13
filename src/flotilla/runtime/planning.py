@@ -154,4 +154,5 @@ def _unit(u: ManifestUnit, env: dict[str, str], resources: Resources | None) -> 
         readonly_rootfs=u.readonly_rootfs,
         tmpfs_mounts=_resolve_tmpfs(tuple(u.tmpfs_mounts), resources),
         shm_size_bytes=u.shm_size_bytes,
+        devices=frozenset(u.devices),
     )

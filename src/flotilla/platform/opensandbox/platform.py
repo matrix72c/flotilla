@@ -28,6 +28,7 @@ from flotilla.platform.base import (
     ProcessSpec,
     ProcessStatus,
     Stage,
+    TaskDevice,
     Topology,
 )
 from flotilla.platform.opensandbox import address
@@ -48,6 +49,8 @@ MIN_TTL_SECONDS = 60  # minimum timeout
 #: timeout is well above execd's ping interval (3s).
 DEFAULT_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 DEFAULT_MAX_CONNECTIONS = 100  # per pool; each in-flight foreground exec holds one connection
+#: Device extension keys, written per instance (`"true"`) for services that declare the device node.
+DEVICE_EXTENSIONS: Mapping[TaskDevice, str] = {"kvm": "kvm", "tun": "tun"}
 #: Create request fields managed by flotilla, forbidden in `create_fields`. Includes `env`: it holds only the execd
 #: access token; workload env is passed per execution.
 MANAGED_CREATE_FIELDS = frozenset(
@@ -122,6 +125,8 @@ class OpenSandboxPlatform:
             raise ValueError(
                 f"extensions cannot set the placement group key {group_extension!r}: flotilla writes it per trial"
             )
+        if clash := sorted({key for key in DEVICE_EXTENSIONS.values() if any(key in v for v in extension_sets)}):
+            raise ValueError(f"extensions cannot set {clash}: flotilla writes them per instance from Compose devices")
         if any(SHM_SIZE_EXTENSION in values for values in extension_sets):
             raise ValueError(
                 f"extensions cannot set {SHM_SIZE_EXTENSION!r}: flotilla writes it per instance from Compose shm_size"
@@ -157,6 +162,8 @@ class OpenSandboxPlatform:
                 volume_paths=tuple(v.mount_path for v in spec.volumes),
                 shm_size_bytes=spec.shm_size_bytes,
             )
+            if missing := sorted(spec.devices - self.caps.devices):
+                raise ValueError(f"deployment does not support devices {missing}")
         except ValueError as exc:
             raise FlotillaError(str(exc), stage="create", category=ErrorCategory.INVALID, retryable=False) from exc
         return await self._create(spec)
@@ -351,6 +358,7 @@ class OpenSandboxPlatform:
         if spec.group is not None and self._group_extension is not None:
             extensions[self._group_extension] = spec.group
         extensions.update(self._filesystem.extensions(spec))
+        extensions.update({DEVICE_EXTENSIONS[device]: "true" for device in sorted(spec.devices)})
         resources = {"cpu": spec.resources.cpu, "memory": spec.resources.memory}
         body: dict[str, Any] = {
             **self._create_fields,

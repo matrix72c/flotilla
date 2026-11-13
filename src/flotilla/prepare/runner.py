@@ -283,7 +283,7 @@ def _attrs(cfg: FlotillaConfig, environments: dict[str, PreparedEnvironment]) ->
         "services": len(manifest.units),
         "cpu": float(sum((Decimal(r.cpu) for r in resources), Decimal())),
         "memory_mib": math.ceil(sum(memory_bytes(r.memory) for r in resources) / (1 << 20)),
-        "privileged": any(unit.privileged for unit in manifest.units.values()),
+        "privileged": any(unit.privileged or unit.devices for unit in manifest.units.values()),
         "has_verifier": "verifier" in environments,
     }
 

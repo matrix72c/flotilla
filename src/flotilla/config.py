@@ -605,29 +605,25 @@ class FlotillaConfig(_Model):
         report = report or self.load_report()
         caps = report.to_capabilities()
         rt = report.runtime
-        caps = replace(
-            caps,
-            privileged_runtime=(
-                rt.privileged_runtime.passed_for("privileged")
-                and rt.privileged_storage.passed_for("privileged")
-                and rt.privileged_network.passed_for("privileged")
-                and (
-                    rt.privileged_no_auto_mount.passed_for("privileged")
-                    or "no_auto_mount" in self.security.accept_insecure
-                )
-                and (rt.privileged_exec_auth.passed_for("privileged") or "exec_auth" in self.security.accept_insecure)
-                and (
-                    rt.privileged_inbound_isolation.passed_for("privileged")
-                    or "inbound_isolation" in self.security.accept_insecure
-                )
-            ),
+        isolated = (
+            rt.privileged_storage.passed_for("privileged")
+            and rt.privileged_network.passed_for("privileged")
+            and (
+                rt.privileged_no_auto_mount.passed_for("privileged") or "no_auto_mount" in self.security.accept_insecure
+            )
+            and (rt.privileged_exec_auth.passed_for("privileged") or "exec_auth" in self.security.accept_insecure)
+            and (
+                rt.privileged_inbound_isolation.passed_for("privileged")
+                or "inbound_isolation" in self.security.accept_insecure
+            )
         )
         caps = replace(
             caps,
+            privileged_runtime=isolated and rt.privileged_runtime.passed_for("privileged"),
             devices=frozenset(
                 name
-                for name, item in (("fuse", rt.fuse), ("kvm", rt.kvm))
-                if caps.privileged_runtime and item.ok and item.scope == "privileged"
+                for name, item in (("fuse", rt.fuse), ("kvm", rt.kvm), ("tun", rt.tun))
+                if isolated and item.ok and item.scope == "privileged"
             ),
         )
         return load_backend(self.backend).capabilities(self.backend_settings, self, caps)

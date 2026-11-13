@@ -133,7 +133,7 @@ class Capabilities:
     exec_auth: bool  # security
     # Optional runtimes
     privileged_runtime: bool
-    devices: frozenset[str]  # subset of {"fuse", "kvm"}
+    devices: frozenset[str]  # subset of `Device`
     cluster_dns: tuple[str, ...] = ()  # explicitly declared resolver IPs; only TCP/UDP 53 may be implicit
     sandbox_ingress: bool = False  # backend configured to enforce ingress using sandbox identity rules
     readonly_rootfs: bool = False
@@ -230,6 +230,11 @@ class ExternalPolicy:
 
 # Internal creation profile selected by trusted deployment wiring, never task data.
 InstanceProfile = Literal["default", "management"]
+#: Host devices a capability report can record.
+Device = Literal["fuse", "kvm", "tun"]
+#: Devices a task may request, by the device node it declares. They need the privileged runtime.
+TaskDevice = Literal["kvm", "tun"]
+TASK_DEVICE_PATHS: Mapping[str, TaskDevice] = {"/dev/kvm": "kvm", "/dev/net/tun": "tun"}
 
 
 @dataclass(frozen=True)
@@ -255,6 +260,7 @@ class InstanceSpec:
     readonly_rootfs: bool = False
     tmpfs_mounts: tuple[TmpfsMount, ...] = ()
     shm_size_bytes: int | None = None  # None keeps the platform's default `/dev/shm`
+    devices: frozenset[TaskDevice] = frozenset()  # requires `privileged`
     # Independent of task privileged permission; only workspace anchors select management.
     profile: InstanceProfile = "default"
 
@@ -263,6 +269,10 @@ class InstanceSpec:
             raise ValueError("instance profile must be default or management")
         if self.profile == "management" and self.privileged:
             raise ValueError("management profile cannot be combined with task privileged permission")
+        if not self.devices <= set(TASK_DEVICE_PATHS.values()):
+            raise ValueError(f"unknown devices: {sorted(self.devices - set(TASK_DEVICE_PATHS.values()))}")
+        if self.devices and not self.privileged:
+            raise ValueError("devices require the privileged runtime")
 
 
 @dataclass(frozen=True)

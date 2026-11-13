@@ -27,7 +27,7 @@ from flotilla.compose.model import (
 )
 from flotilla.compose.paths import valid_name
 from flotilla.compose.units import parse_duration
-from flotilla.platform.base import TmpfsMount
+from flotilla.platform.base import TASK_DEVICE_PATHS, TaskDevice, TmpfsMount
 from flotilla.platform.filesystem import memory_bytes, validate_mounts
 
 DEFAULT_NETWORK = "default"
@@ -61,9 +61,7 @@ _REJECT = {
     "profiles": "not implemented yet (not seen in task data)",
     "secrets": "not implemented yet (not seen in task data)",
     "configs": "not implemented yet (not seen in task data)",
-    "devices": "devices not implemented yet (not seen in task data)",
     "sysctls": "not implemented yet (not seen in task data)",
-    "cap_add": "not implemented yet (not seen in task data)",
     "links": "not implemented yet (not seen in task data)",
     "extra_hosts": "not implemented yet (not seen in task data)",
     "domainname": "not implemented yet (not seen in task data)",
@@ -72,7 +70,7 @@ _REJECT = {
 _HANDLED = {
     "image", "build", "command", "entrypoint", "environment", "working_dir", "user", "healthcheck", "depends_on",
     "networks", "network_mode", "volumes", "tmpfs", "shm_size", "restart", "privileged", "hostname", "ports",
-    "cpus", "mem_limit", "deploy", "container_name",
+    "cpus", "mem_limit", "deploy", "container_name", "devices", "cap_add",
 }  # fmt: skip
 
 
@@ -210,6 +208,8 @@ def _service(
 
     if raw.get("privileged"):
         c.reject(f"{path}.privileged", "a privileged sandbox is not equivalent to Docker privileged mode")
+    devices = _devices(raw.get("devices"), f"{path}.devices", c)
+    _cap_add(raw.get("cap_add"), f"{path}.cap_add", devices, c)
     if "image" not in raw and "build" not in raw:
         c.reject(path, "neither image nor build")
     hc, hc_disabled = _healthcheck(raw.get("healthcheck"), f"{path}.healthcheck", c)
@@ -239,10 +239,73 @@ def _service(
         readonly_rootfs=_boolean(raw.get("read_only", False), f"{path}.read_only", c),
         restart=_restart(raw.get("restart"), f"{path}.restart", c),
         privileged=_boolean(raw.get("privileged", False), f"{path}.privileged", c),
+        devices=devices,
         container_name=_hostname(raw.get("container_name"), f"{path}.container_name", c),
         hostname=_hostname(raw.get("hostname"), f"{path}.hostname", c),
         udp_ports=_ports(raw.get("ports"), f"{path}.ports", c),
     )
+
+
+def _devices(value: object, path: str, c: _Collector) -> frozenset[TaskDevice]:
+    """Host device nodes: only `/dev/kvm` and `/dev/net/tun`, at the same path, with full `rwm` access.
+
+    Accepts short syntax (`src[:dst[:perms]]`) and the long form the official Compose config emits.
+    """
+    if value is None:
+        return frozenset()
+    if not isinstance(value, list):
+        c.reject(path, "must be a list")
+        return frozenset()
+    out: set[TaskDevice] = set()
+    for i, item in enumerate(value):
+        p = f"{path}[{i}]"
+        source: object
+        target: object
+        permissions: object
+        if isinstance(item, str):
+            parts = item.split(":")
+            if len(parts) > 3:
+                c.reject(p, "must be source[:target[:permissions]]")
+                continue
+            source = parts[0]
+            target = parts[1] if len(parts) > 1 else source
+            permissions = parts[2] if len(parts) > 2 else None
+        elif isinstance(item, dict):
+            extra = sorted(set(item) - {"source", "target", "permissions"})
+            if extra:
+                c.reject(f"{p}.{extra[0]}", "unsupported device field")
+                continue
+            source, target, permissions = item.get("source"), item.get("target"), item.get("permissions")
+        else:
+            c.reject(p, "must be a string or mapping")
+            continue
+        device = TASK_DEVICE_PATHS.get(source) if isinstance(source, str) else None
+        if device is None:
+            c.reject(p, f"only {', '.join(sorted(TASK_DEVICE_PATHS))} are supported")
+        elif target != source:
+            c.reject(p, "device must keep its host path inside the sandbox")
+        elif permissions not in (None, "rwm"):
+            c.reject(p, "device permissions other than rwm are not supported")
+        else:
+            out.add(device)
+    return frozenset(out)
+
+
+def _cap_add(value: object, path: str, devices: frozenset[TaskDevice], c: _Collector) -> None:
+    """Only `NET_ADMIN` alongside `/dev/net/tun`: root in the privileged runtime holds it in its own network
+    namespace, which the TUN probe verifies by creating a TAP interface. Other capabilities are rejected."""
+    if value is None or value == []:
+        return
+    if not isinstance(value, list) or not all(isinstance(cap, str) for cap in value):
+        c.reject(path, "must be a list of capability names")
+        return
+    names = {cap.upper().removeprefix("CAP_") for cap in value}
+    if names != {"NET_ADMIN"}:
+        c.reject(path, "only NET_ADMIN together with /dev/net/tun is supported")
+    elif "tun" not in devices:
+        c.reject(path, "NET_ADMIN is supported only together with /dev/net/tun")
+    else:
+        c.equivalent(path, "root in the privileged runtime holds NET_ADMIN in the sandbox network namespace")
 
 
 def _boolean(value: object, path: str, c: _Collector) -> bool:

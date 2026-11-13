@@ -13,11 +13,11 @@ from typing import Annotated, Any, Literal, cast
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from flotilla.platform.base import Capabilities
+from flotilla.platform.base import Device as Device
 from flotilla.platform.network import cluster_dns_address
 
 SCHEMA_VERSION: Literal[2] = 2
 ExternalForm = Literal["none", "any", "allowlist"]
-Device = Literal["fuse", "kvm"]
 SecurityProperty = Literal["inbound_isolation", "exec_auth", "no_auto_mount"]
 SECURITY_FIELDS: tuple[SecurityProperty, ...] = ("inbound_isolation", "exec_auth", "no_auto_mount")
 
@@ -199,6 +199,7 @@ class Runtime(_Model):
     privileged_inbound_isolation: Item = UNMEASURED
     fuse: Item = UNMEASURED
     kvm: Item = UNMEASURED
+    tun: Item = UNMEASURED
     image_digest: Item = UNMEASURED
     readonly_rootfs: Item = UNMEASURED
 
@@ -262,14 +263,16 @@ class CapabilityReport(_Model):
         forms = net.external_forms
         if not net.network_acceptance.ok:
             forms = forms - {"none"}
-        privileged = (
-            rt.privileged_runtime.passed_for("privileged")
-            and rt.privileged_storage.passed_for("privileged")
+        # Isolation of the privileged runtime; Docker (`privileged_runtime`) is additional evidence for privileged
+        # services only, devices need their own device check instead.
+        isolated = (
+            rt.privileged_storage.passed_for("privileged")
             and rt.privileged_no_auto_mount.passed_for("privileged")
             and rt.privileged_exec_auth.passed_for("privileged")
             and rt.privileged_network.passed_for("privileged")
             and rt.privileged_inbound_isolation.passed_for("privileged")
         )
+        privileged = isolated and rt.privileged_runtime.passed_for("privileged")
         return Capabilities(
             max_label_value_len=self.lifecycle.max_label_value_len,
             list_visibility_s=self.lifecycle.list_visibility_s,
@@ -290,8 +293,8 @@ class CapabilityReport(_Model):
             privileged_runtime=privileged,
             devices=frozenset(
                 name
-                for name, item in (("fuse", rt.fuse), ("kvm", rt.kvm))
-                if privileged and item.ok and item.scope == "privileged"
+                for name, item in (("fuse", rt.fuse), ("kvm", rt.kvm), ("tun", rt.tun))
+                if isolated and item.ok and item.scope == "privileged"
             ),
             readonly_rootfs=rt.readonly_rootfs.ok,
             native_tmpfs=st.native_tmpfs.ok,

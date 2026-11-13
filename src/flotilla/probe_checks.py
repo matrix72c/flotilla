@@ -11,7 +11,14 @@ from pathlib import Path
 from typing import Any
 
 from flotilla.capabilities import Exec, Item, Lifecycle, Network, Runtime, Storage
-from flotilla.platform.base import ErrorCategory, FlotillaError, InstanceHandle, ProcessSpec, SharedVolume
+from flotilla.platform.base import (
+    ErrorCategory,
+    FlotillaError,
+    InstanceHandle,
+    ProcessSpec,
+    SharedVolume,
+    TaskDevice,
+)
 from flotilla.platform.opensandbox.platform import OpenSandboxPlatform
 from flotilla.probe import _probed, _Run, _sh
 from flotilla.probe_opensandbox import authentication
@@ -78,6 +85,8 @@ async def storage_extra(run: _Run, *, privileged: bool = False) -> dict[str, Ite
     scope = "privileged" if privileged else "ordinary"
     base = f"launches/{run.anchor.launch_id}/{run.run_id}/shared-{scope}"
     await run.anchor.mkdir(base + "/visible", stage="prepare")
+    if privileged:  # the runtime path does the same for writable mounts of privileged-runtime units
+        await run.anchor.open_permissions(base + "/visible", stage="prepare")
     spec = replace(
         run._spec("shared-" + scope, (SharedVolume(base + "/visible", "/probe", False),)),
         privileged=privileged,
@@ -208,10 +217,10 @@ async def no_auto_mount(run: _Run, mounted: InstanceHandle, *, privileged: bool)
 
 
 async def privileged(run: _Run) -> dict[str, Item]:
-    if not run.settings.privileged_image or not run.settings.inner_image:
+    if not run.settings.privileged_image:
         return {
             "privileged_runtime": Item(
-                status="skipped", evidence="probe privileged_image/inner_image not configured", scope="privileged"
+                status="skipped", evidence="probe privileged_image not configured", scope="privileged"
             )
         }
     p = run.platform
@@ -220,34 +229,8 @@ async def privileged(run: _Run) -> dict[str, Item]:
     unit = await run._create(replace(run._spec("privileged"), image=run.settings.privileged_image, privileged=True))
     # Address readiness uses the exact configured protocol and real privileged create path.
     await p.internal_address(unit)
-    tool = await p.exec(unit, _sh("command -v docker >/dev/null"))
-    if tool.exit_code != 0:
-        return {
-            "privileged_runtime": Item(status="error", evidence="privileged image lacks docker", scope="privileged")
-        }
-    info = await p.exec(unit, _sh("docker info >/dev/null", timeout_s=60))
-    if info.exit_code != 0:
-        return {
-            "privileged_runtime": Item(
-                status="error", evidence="Docker daemon positive control unavailable", scope="privileged"
-            )
-        }
-    image = shlex.quote(run.settings.inner_image)
-    token = shlex.quote(run.run_id)
-    command = f"docker run --rm --network none --memory 64m --cpus 0.5 {image} /bin/sh -c " + shlex.quote(
-        f"printf '%s\\n' {token}; cat /sys/fs/cgroup/memory.max /sys/fs/cgroup/cpu.max"
-    )
-    result = await p.exec(unit, _sh(command, timeout_s=180))
-    fields = result.stdout.decode().split()
-    good = (
-        result.exit_code == 0
-        and not result.timed_out
-        and fields[:2] == [run.run_id, str(64 * 1024 * 1024)]
-        and len(fields) == 4
-        and fields[2].isdigit()
-        and fields[3].isdigit()
-        and int(fields[2]) / max(int(fields[3]), 1) == 0.5
-    )
+    # Docker evidence admits `privileged` services only; isolation and device checks below do not depend on it.
+    docker = await attempt(lambda: _docker(run, unit), scope="privileged")
     auth = await attempt(lambda: authentication(p, unit, run_id=run.run_id, scope="privileged"), scope="privileged")
     fuse_item = await attempt(lambda: fuse(run, unit), scope="privileged")
     storage = await attempt(lambda: storage_extra(run, privileged=True), scope="privileged")
@@ -280,15 +263,18 @@ async def privileged(run: _Run) -> dict[str, Item]:
         )
         ingress_item = net.inbound_isolation.model_copy(update={"scope": "privileged"})
     gone = await run._delete(unit.iid)
+    kvm_item = await attempt(lambda: device(run, "kvm"), scope="privileged")
+    tun_item = await attempt(lambda: device(run, "tun"), scope="privileged")
     return {
         "privileged_runtime": Item(
-            status="passed" if good and gone else "failed",
+            status=docker.status if docker.status != "passed" or gone else "failed",
             scope="privileged",
             evidence=(
                 "configured privileged create; docker info; digest inner container output/exit/resource limits; "
                 "outer deletion"
             ),
             measurements={
+                "docker": docker.evidence,
                 "extensions": sorted(p._privileged_extensions),
                 "inner_memory_bytes": 64 * 1024 * 1024,
                 "inner_cpu": 0.5,
@@ -298,9 +284,86 @@ async def privileged(run: _Run) -> dict[str, Item]:
         "privileged_no_auto_mount": no_mount,
         "privileged_exec_auth": auth,
         "fuse": fuse_item,
+        "kvm": kvm_item,
+        "tun": tun_item,
         "privileged_network": network_item,
         "privileged_inbound_isolation": ingress_item,
     }
+
+
+async def _docker(run: _Run, unit: InstanceHandle) -> Item:
+    """Docker daemon positive control plus a digest-pinned inner container's output, exit and resource limits."""
+    if not run.settings.inner_image:
+        return Item(status="skipped", evidence="probe inner_image not configured", scope="privileged")
+    p = run.platform
+    tool = await p.exec(unit, _sh("command -v docker >/dev/null"))
+    if tool.exit_code != 0:
+        return Item(status="error", evidence="privileged image lacks docker", scope="privileged")
+    info = await p.exec(unit, _sh("docker info >/dev/null", timeout_s=60))
+    if info.exit_code != 0:
+        return Item(status="error", evidence="Docker daemon positive control unavailable", scope="privileged")
+    image = shlex.quote(run.settings.inner_image)
+    token = shlex.quote(run.run_id)
+    command = f"docker run --rm --network none --memory 64m --cpus 0.5 {image} /bin/sh -c " + shlex.quote(
+        f"printf '%s\\n' {token}; cat /sys/fs/cgroup/memory.max /sys/fs/cgroup/cpu.max"
+    )
+    result = await p.exec(unit, _sh(command, timeout_s=180))
+    fields = result.stdout.decode().split()
+    good = (
+        result.exit_code == 0
+        and not result.timed_out
+        and fields[:2] == [run.run_id, str(64 * 1024 * 1024)]
+        and len(fields) == 4
+        and fields[2].isdigit()
+        and fields[3].isdigit()
+        and int(fields[2]) / max(int(fields[3]), 1) == 0.5
+    )
+    return Item(
+        status="passed" if good else "failed",
+        evidence="docker info; digest inner container output/exit/resource limits",
+        scope="privileged",
+    )
+
+
+# Root opens the device node and exercises it: KVM_GET_API_VERSION (must be 12) then KVM_CREATE_VM; TUNSETIFF
+# creates a TAP interface (IFF_TAP | IFF_NO_PI), which needs CAP_NET_ADMIN in the sandbox network namespace.
+# The interface is looked up by name; sysbox's sysfs does not resolve /sys/class/net/<name> links.
+_DEVICE_SCRIPTS: dict[TaskDevice, str] = {
+    "kvm": (
+        "import fcntl, os\n"
+        "fd = os.open('/dev/kvm', os.O_RDWR | os.O_CLOEXEC)\n"
+        "assert fcntl.ioctl(fd, 0xAE00) == 12\n"
+        "os.close(fcntl.ioctl(fd, 0xAE01, 0))\n"
+        "os.close(fd)\n"
+    ),
+    "tun": (
+        "import fcntl, os, socket, struct\n"
+        "fd = os.open('/dev/net/tun', os.O_RDWR | os.O_CLOEXEC)\n"
+        "fcntl.ioctl(fd, 0x400454CA, struct.pack('16sH22x', b'flotilla-tap0', 0x1002))\n"
+        "socket.if_nametoindex('flotilla-tap0')\n"
+        "os.close(fd)\n"
+    ),
+}
+
+_DEVICE_EVIDENCE: dict[TaskDevice, str] = {
+    "kvm": "create with only the kvm extension; root opens /dev/kvm, API version 12, creates a VM; outer deletion",
+    "tun": "create with only the tun extension; root creates a TAP interface; outer deletion",
+}
+
+
+async def device(run: _Run, name: TaskDevice) -> Item:
+    """A privileged instance requesting exactly one device; the device must be usable by root, then deleted."""
+    spec = replace(
+        run._spec(f"device-{name}"), image=run.settings.privileged_image, privileged=True, devices=frozenset({name})
+    )
+    unit = await run._create(spec)
+    result = await run.platform.exec(unit, _sh("python3 -I -c " + shlex.quote(_DEVICE_SCRIPTS[name]), timeout_s=60))
+    gone = await run._delete(unit.iid)
+    return Item(
+        status="passed" if result.exit_code == 0 and not result.timed_out and gone else "failed",
+        evidence=_DEVICE_EVIDENCE[name],
+        scope="privileged",
+    )
 
 
 async def fuse(run: _Run, unit: InstanceHandle) -> Item:

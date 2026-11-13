@@ -181,6 +181,16 @@ class Trial:
                 )
             elif vol.owner is not None:
                 await self._anchor.chown(key, *vol.owner, stage="prepare")
+        # Privileged-runtime root cannot write anchor-owned content; open what such units mount writable.
+        writable = {
+            f"{base}/{m.key}"
+            for u in self._plan.units.values()
+            if u.privileged_runtime
+            for m in u.mounts
+            if m.scope == "trial" and not m.read_only
+        }
+        for key in sorted(writable):
+            await self._anchor.open_permissions(key, stage="prepare")
 
     async def _create_all(self) -> None:
         await run_all(self._create_unit(u) for u in sorted(self._plan.units))
@@ -232,7 +242,8 @@ class Trial:
                 trial_id=self._trial_id,
             ),
             external=network.external_policy(self._plan, unit, self._settings.external),
-            privileged=u.privileged,
+            privileged=u.privileged_runtime,
+            devices=u.devices,
             readonly_rootfs=u.readonly_rootfs,
             tmpfs_mounts=u.tmpfs_mounts,
             shm_size_bytes=u.shm_size_bytes,

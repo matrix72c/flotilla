@@ -408,6 +408,8 @@ class FakePlatform:
                 volume_paths=tuple(m.mount_path for m in spec.volumes),
                 shm_size_bytes=spec.shm_size_bytes,
             )
+            if missing := sorted(spec.devices - self.caps.devices):
+                raise ValueError(f"deployment does not support devices {missing}")
         except ValueError as exc:
             raise FlotillaError(str(exc), stage="create", category=ErrorCategory.INVALID, retryable=False) from exc
         max_ttl = self.caps.max_ttl_seconds
@@ -711,7 +713,16 @@ class SharedTree:
         if op not in {"chmod", "mkdir", "chown", "rm", "ls"}:
             raise AssertionError(f"unsupported SharedTree command: {proc.argv!r}")
         path = self._rel(proc.argv[-1], write=op != "ls")
-        if op == "chmod":
+        if op == "chmod" and proc.argv[1:3] == ("-R", "a+rwX"):
+            if path not in self.dirs and path not in self.files:
+                return missing
+            for entry in {*self.dirs, *self.files}:
+                if entry == path or entry.startswith(path + "/"):
+                    old = int(self.modes.get(entry, "0755" if entry in self.dirs else "0644"), 8)
+                    executable = entry in self.dirs or old & 0o111
+                    self.modes[entry] = f"{old | 0o666 | (0o111 if executable else 0):04o}"
+            self.events.append(f"open {path}")
+        elif op == "chmod":
             if path not in self.dirs and path not in self.files:
                 return missing
             self.modes[path] = proc.argv[1]

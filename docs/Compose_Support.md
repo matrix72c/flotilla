@@ -70,7 +70,9 @@ Top-level networks support `internal: true`. `driver` must be `bridge`, `ipam` m
 | `cpus`, `mem_limit`, `deploy.resources.limits.{cpus,memory}` | Supported; if both forms are given they must agree. Memory units are binary (`g` = GiB) |
 | `init`, `labels`, `logging`, `stop_signal`, `stop_grace_period`, `pull_policy` | Equivalent (recorded only) |
 | `ulimits`, `tty`, `stdin_open`, `group_add`, `cap_drop`, `security_opt`, `pid`, `ipc`, `userns_mode`, `runtime` | Rejected: not available in a sandbox |
-| `cap_add`, `devices`, `sysctls`, `extra_hosts`, `domainname`, `links`, `profiles`, `secrets`, `configs`, `extends`, `volumes_from`, `scale` | Rejected: not implemented |
+| `devices` | Only `/dev/kvm` and `/dev/net/tun`, at the same path with `rwm` (the default). The service runs on the privileged runtime with the matching platform extension; requires verified `kvm`/`tun` devices. Read-only rootfs, tmpfs and `shm_size` are not available on that runtime. Trial volumes such a service mounts writable are opened to every identity (`chmod -R a+rwX`), because its root does not own anchor-created storage. Other devices are rejected |
+| `cap_add` | Only `[NET_ADMIN]` together with `/dev/net/tun` (equivalent: root in the privileged runtime holds it in the sandbox network namespace). Other capabilities are rejected |
+| `sysctls`, `extra_hosts`, `domainname`, `links`, `profiles`, `secrets`, `configs`, `extends`, `volumes_from`, `scale` | Rejected: not implemented |
 | Any other key, including `deploy` keys other than resource limits and `x-*` | Rejected |
 
 A service can have dependents requiring health and others requiring successful completion. Both conditions are tracked independently. A service required only for successful completion does not need to pass its healthcheck.

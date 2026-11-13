@@ -6,7 +6,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
-from flotilla.platform.base import TmpfsMount
+from flotilla.platform.base import TaskDevice, TmpfsMount
 
 SCHEMA_VERSION = 7
 
@@ -60,6 +60,13 @@ class Unit(_Model):
     readonly_rootfs: bool = False
     tmpfs_mounts: list[TmpfsMount] = []
     shm_size_bytes: Annotated[int, Field(gt=0)] | None = None
+    devices: list[TaskDevice] = []  # sorted, unique; run on the privileged runtime
+
+    @model_validator(mode="after")
+    def _sorted_devices(self) -> Unit:
+        if self.devices != sorted(set(self.devices)):
+            raise ValueError("devices must be sorted and unique")
+        return self
 
 
 class Network(_Model):
