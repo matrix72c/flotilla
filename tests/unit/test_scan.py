@@ -75,7 +75,10 @@ def test_privileged_needs_runtime(caps: Capabilities) -> None:
     svc = {"k": {"image": "k", "privileged": True}}
     assert scan("t", _project(svc), caps).status == "rejected"
     r = scan("t", _project(svc), replace(caps, privileged_runtime=True))
-    assert r.status == "rejected"  # platform privilege is not full Docker privileged semantics
+    assert r.status == "accepted"
+    assert [(f.path, f.kind) for f in r.findings] == [("services.k.privileged", "warn")]
+    readonly = _project({"k": {"image": "k", "privileged": True, "read_only": True}})
+    assert scan("t", readonly, replace(caps, privileged_runtime=True, readonly_rootfs=True)).status == "rejected"
 
 
 def test_share_mount_conflict(caps: Capabilities) -> None:

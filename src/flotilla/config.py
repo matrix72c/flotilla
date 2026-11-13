@@ -619,7 +619,7 @@ class FlotillaConfig(_Model):
         )
         caps = replace(
             caps,
-            privileged_runtime=isolated and rt.privileged_runtime.passed_for("privileged"),
+            privileged_runtime=isolated,
             devices=frozenset(
                 name
                 for name, item in (("fuse", rt.fuse), ("kvm", rt.kvm), ("tun", rt.tun))

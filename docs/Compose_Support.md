@@ -65,7 +65,7 @@ Top-level networks support `internal: true`. `driver` must be `bridge`, `ipam` m
 | `ports`, `expose` | Equivalent: nothing is published, and services on a shared network reach every port. Port ranges and protocols other than TCP/UDP are rejected; UDP requires the deployment's `link_udp` capability |
 | `restart` | `no` is supported. `always` and `unless-stopped` are equivalent: services are not restarted, and the run is marked void if a service exits in a way Docker would have restarted. `on-failure` is rejected |
 | `read_only` | Service root filesystem protection; `true` requires verified `readonly_rootfs`. Independent of volume read-only flags |
-| `privileged` | Requires the deployment's `privileged_runtime` capability (warning when supported) |
+| `privileged` | Runs the service on the privileged runtime (`opensandbox.privileged_extensions`, e.g. sysbox): root holds all capabilities inside its own user namespace, which is not Docker privileged mode on the host (warning). Requires the deployment's `privileged_runtime` capability, i.e. passed privileged isolation evidence. Read-only rootfs, tmpfs and `shm_size` are not available; writable trial volumes are opened as for devices |
 | `hostname`, `container_name` | Added as names other services can resolve. `hostname` is a warning: `gethostname()` inside the sandbox still returns the platform's name |
 | `cpus`, `mem_limit`, `deploy.resources.limits.{cpus,memory}` | Supported; if both forms are given they must agree. Memory units are binary (`g` = GiB) |
 | `init`, `labels`, `logging`, `stop_signal`, `stop_grace_period`, `pull_policy` | Equivalent (recorded only) |

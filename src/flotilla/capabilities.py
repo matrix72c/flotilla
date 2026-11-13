@@ -263,16 +263,16 @@ class CapabilityReport(_Model):
         forms = net.external_forms
         if not net.network_acceptance.ok:
             forms = forms - {"none"}
-        # Isolation of the privileged runtime; Docker (`privileged_runtime`) is additional evidence for privileged
-        # services only, devices need their own device check instead.
-        isolated = (
+        # Isolation of the privileged runtime admits `privileged` services; devices also need their own check.
+        # `runtime.privileged_runtime` (create, optional Docker measurement, deletion) is recorded, not required:
+        # every check above creates privileged instances and confirmed cleanup is required separately.
+        privileged = (
             rt.privileged_storage.passed_for("privileged")
             and rt.privileged_no_auto_mount.passed_for("privileged")
             and rt.privileged_exec_auth.passed_for("privileged")
             and rt.privileged_network.passed_for("privileged")
             and rt.privileged_inbound_isolation.passed_for("privileged")
         )
-        privileged = isolated and rt.privileged_runtime.passed_for("privileged")
         return Capabilities(
             max_label_value_len=self.lifecycle.max_label_value_len,
             list_visibility_s=self.lifecycle.list_visibility_s,
@@ -294,7 +294,7 @@ class CapabilityReport(_Model):
             devices=frozenset(
                 name
                 for name, item in (("fuse", rt.fuse), ("kvm", rt.kvm), ("tun", rt.tun))
-                if isolated and item.ok and item.scope == "privileged"
+                if privileged and item.ok and item.scope == "privileged"
             ),
             readonly_rootfs=rt.readonly_rootfs.ok,
             native_tmpfs=st.native_tmpfs.ok,

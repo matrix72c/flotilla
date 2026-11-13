@@ -59,6 +59,14 @@ def test_unknown_address_cannot_enable_links() -> None:
     assert not report(**{"network.internal_address": "none"}).to_capabilities().link
 
 
+def test_privileged_admission_does_not_need_the_docker_measurement() -> None:
+    from flotilla.testing.config import config
+
+    value = report(**{"runtime.privileged_runtime": {"status": "skipped", "scope": "privileged"}})
+    assert value.to_capabilities().privileged_runtime
+    assert config().platform_capabilities(value).privileged_runtime
+
+
 def test_ordinary_security_does_not_cover_privileged_runtime() -> None:
     for check in ("privileged_storage", "privileged_exec_auth", "privileged_no_auto_mount"):
         caps = report(**{f"runtime.{check}": {"status": "skipped"}}).to_capabilities()
@@ -68,7 +76,6 @@ def test_ordinary_security_does_not_cover_privileged_runtime() -> None:
 @pytest.mark.parametrize(
     "check",
     [
-        "privileged_runtime",
         "privileged_storage",
         "privileged_network",
         "privileged_exec_auth",

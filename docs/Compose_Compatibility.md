@@ -4,7 +4,8 @@ Flotilla translates a supported Compose subset into sandbox processes and mounts
 It does **not** run Docker Compose containers and does not promise full Docker,
 PID 1, signal-delivery, process-tree, or container-inspection equivalence.
 Unsupported declarations fail closed; there is no automatic Docker-in-Docker
-fallback and a privileged sandbox is not treated as Docker privileged mode.
+fallback. `privileged: true` runs on the privileged runtime with a warning;
+that sandbox is not treated as Docker privileged mode on the host.
 
 ## Production normalization
 

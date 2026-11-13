@@ -222,7 +222,6 @@ def test_null_and_empty_command_entrypoint(entrypoint: str | list[str] | None, c
         ("init", False),
         ("stop_signal", "SIGQUIT"),
         ("stop_grace_period", "30s"),
-        ("privileged", True),
         ("logging", {"driver": "json-file"}),
         ("pull_policy", "always"),
     ],

@@ -294,3 +294,14 @@ def test_missing_main_is_rejected() -> None:
 def test_unknown_top_level_key_rejected() -> None:
     p = normalize({"services": {"main": {"image": "m"}}, "secrets": {}}, {})
     assert "secrets" in _paths(p, "reject")
+
+
+def test_privileged_is_a_warning_on_the_privileged_runtime() -> None:
+    project = normalize({"services": {"main": {"image": "r.io/app", "privileged": True}}}, {})
+    assert not project.rejected
+    assert [(f.path, f.kind) for f in project.findings] == [("services.main.privileged", "warn")]
+    assert project.services["main"].privileged
+    off = normalize({"services": {"main": {"image": "r.io/app", "privileged": False}}}, {})
+    assert not off.findings and not off.services["main"].privileged
+    bad = normalize({"services": {"main": {"image": "r.io/app", "privileged": "yes"}}}, {})
+    assert [f.path for f in bad.findings if f.kind == "reject"] == ["services.main.privileged"]
