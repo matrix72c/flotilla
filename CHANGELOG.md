@@ -16,6 +16,8 @@ All notable changes to this project are documented here. The format follows [Kee
 - Compose fields that only change local Docker behavior are recorded instead of rejected: `init`, `logging`, `stop_signal`, `stop_grace_period`, `pull_policy`, `ports`, network `gw_priority`, bridge name/MTU/`gateway_mode` options, and `depends_on.*.restart`. `restart` `always`/`unless-stopped`/`on-failure[:N]` never restart and void the run on an exit Docker would restart. `hostname` (warning) and `container_name` become resolvable names. Harbor `storage_mb` is a selection warning.
 - `flotilla prepare` reuses base digests for config-only Dockerfiles and publishes other builds under content-keyed `bk-<key>` tags that later runs reuse; USER0 adaptations are reused by tag. Prepare reports carry per-service `dispositions` (`link`, `mirror`, `config-only`, `cache-hit`, `built`) and `adapted`; selection reports carry image sources and warnings. `BuildOutcome.dispositions` no longer marks adapted services as `build`; see `adapted`.
 - `Registry` gains `find(name, reference)`, returning `None` for a missing tag.
+- A named volume with several copy-enabled sources is seeded when the extracted sources agree: absent or empty paths contribute nothing, and only differing contents or root identities are rejected.
+- Volume seeds keep symlinks that resolve inside the volume; symlinks leaving it and entries reached through a symlinked directory are rejected with a field path.
 
 ### Added
 

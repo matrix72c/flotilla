@@ -560,3 +560,47 @@ def test_select_reports_tasks_compose_refuses_and_stops_on_tool_failure(tmp_path
     assert (refused["status"], refused["code"]) == ("rejected", "invalid_task")
     with pytest.raises(PreparationError, match="selection failed"):
         select(root, caps=_caps(), compose_adapter=_RefusingAdapter(ComposeToolError("Compose unavailable")))
+
+
+def test_failed_seed_extraction_retries_cleanly_for_the_next_task(tmp_path: Path) -> None:
+    """A task failing during seed export must not poison the cache directory of the next one."""
+    from flotilla.build.images import ImageError
+    from flotilla.prepare.release import _Exports, _Metrics
+
+    class Failing:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def extract(self, image: str, path: str, dest: Path, **_: Any) -> bool:
+            self.calls += 1
+            (dest / "partial").write_text("half extracted")
+            raise ImageError("image volume contains an unsupported link or special file")
+
+    exporter = Failing()
+    exports = _Exports(exporter, tmp_path / "seeds", _Metrics())
+    (tmp_path / "seeds").mkdir()
+    for _ in range(2):
+        with pytest.raises(ImageError, match="unsupported link"):
+            exports.extract("r.io/a@" + DIGEST, "/data", tmp_path / "dest")
+    assert exporter.calls == 2
+
+
+def test_seed_cache_keeps_symlinks_instead_of_copying_their_targets(tmp_path: Path) -> None:
+    """Shared-library aliases must stay links: copying them multiplies a release's size."""
+    from flotilla.prepare.release import _Exports, _Metrics
+
+    class Linking:
+        def extract(self, image: str, path: str, dest: Path, **_: Any) -> bool:
+            (dest / "libclntsh.so.19.1").write_bytes(b"elf payload")
+            (dest / "libclntsh.so").symlink_to("libclntsh.so.19.1")
+            return True
+
+    root = tmp_path / "seeds"
+    root.mkdir()
+    exports = _Exports(Linking(), root, _Metrics())
+    for name in ("first", "second"):  # the second call is served from the cache
+        dest = tmp_path / name
+        assert exports.extract("r.io/a@" + DIGEST, "/tmp", dest)
+        link = dest / "libclntsh.so"
+        assert link.is_symlink() and link.readlink().name == "libclntsh.so.19.1"
+        assert link.read_bytes() == b"elf payload"

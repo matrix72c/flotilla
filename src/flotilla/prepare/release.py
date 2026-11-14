@@ -284,6 +284,10 @@ class _Exports:
         key = (image.rpartition("@")[2], path)
         if key not in self.cached:
             directory = self.root / hashlib.sha256(_json(key).encode()).hexdigest()
+            # A failed extraction records nothing, so a later task with the same image and
+            # path retries it: start from a clean directory instead of the partial attempt.
+            if directory.exists():
+                shutil.rmtree(directory)
             directory.mkdir(parents=True)
             owners: dict[str, Any] = {}
             populated = self.metrics.call(
@@ -293,7 +297,10 @@ class _Exports:
         else:
             self.metrics.counts["seed_cache_hits"] += 1
         directory, populated, owners = self.cached[key]
-        self.metrics.call("seed_cache_copy", shutil.copytree, directory, dest, dirs_exist_ok=True)
+        # symlinks=True: a seed's links must stay links, not become copies of their targets.
+        self.metrics.call(
+            "seed_cache_copy", partial(shutil.copytree, symlinks=True), directory, dest, dirs_exist_ok=True
+        )
         if identities is not None:
             identities.update(owners)
         return populated

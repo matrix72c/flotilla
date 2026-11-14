@@ -70,11 +70,16 @@ merge/interpolation implementation or a production fallback.
 - Named volumes start empty with `volume.nocopy: true`. Copy-enabled references
   can supply image content and numeric root/file metadata through a seed tar.
   A nocopy reference cannot provide a seed but still sees content initialized by
-  another copy-enabled reference. Multiple copy-enabled references must identify
-  the same pinned image digest and image path (registry aliases are allowed).
-  Different image/path sources are rejected before extraction because identical
-  initialization content cannot be proven; the exporter never silently chooses
-  the first populated source or approximates Docker's initialization race.
+  another copy-enabled reference. With several copy-enabled references every
+  source is extracted: Docker copies image content only into an empty volume, so
+  absent or empty paths contribute nothing. One distinct populated content (or,
+  when all are empty, one root identity) seeds the volume; differing contents or
+  root identities are rejected rather than resolved by start order.
+- A volume seed keeps symlinks whose target stays inside the volume, which
+  applications rely on (shared-library version aliases, for example). A symlink
+  leaving the volume, and any entry reached through a symlinked directory, are
+  rejected: the seed is unpacked with `tar` on shared storage, where writing
+  through such a link would escape the volume directory.
 - Null command/entrypoint means inherit; an empty string/list means explicitly
   empty. An explicit entrypoint drops the image CMD unless command supplies a
   replacement. Command strings are argv, not an implicit shell. These are argv
