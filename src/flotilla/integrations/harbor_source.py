@@ -6,7 +6,7 @@ import tomllib
 from collections.abc import Mapping
 from pathlib import Path
 
-from flotilla.compose.adapter import ComposeConfigAdapter
+from flotilla.compose.adapter import ComposeConfigAdapter, ComposeToolError
 from flotilla.compose.paths import confined
 from flotilla.compose.task import HarborTask, TaskError, load_environment
 
@@ -26,7 +26,7 @@ def task_environments(
             compose_files=compose_files,
             compose_environment=compose_environment,
         )
-    except TaskError:
+    except (TaskError, ComposeToolError):
         raise
     except (ValueError, OSError, RuntimeError) as exc:
         raise TaskError(f"Harbor environment definition: {exc}") from exc

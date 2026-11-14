@@ -104,10 +104,6 @@ def _deployment(project: Project, caps: Capabilities) -> Iterable[Finding]:
     for name, svc in project.services.items():
         if svc.volumes and not caps.shared_volume:
             yield Finding(f"services.{name}.volumes", "reject", "file-backed mounts require attempt-owned storage")
-        if svc.restart != "no":
-            yield Finding(f"services.{name}.restart", "reject", "Docker restart supervision is not implemented")
-        if svc.hostname is not None or svc.container_name is not None:
-            yield Finding(f"services.{name}.hostname", "reject", "actual Docker container identity is not implemented")
         try:
             caps.require_filesystem(
                 svc.readonly_rootfs,

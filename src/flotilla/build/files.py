@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import shutil
@@ -169,7 +170,13 @@ def _populate(
     volume: str,
     identities: dict[str, tuple[int, int, int]],
 ) -> bool:
-    """Seed only when all copy-enabled references identify the same image content and path."""
+    """Seed from the copy-enabled references' image content, as Docker initializes an empty volume.
+
+    Docker copies image content only into an empty volume, so references whose path is absent or
+    empty never change what another reference provides. Sources are therefore extracted and
+    compared: at most one distinct populated content (or, with none, one root identity) is
+    unambiguous. Differing contents or root identities are rejected.
+    """
     sources: dict[tuple[str, str], tuple[str, str]] = {}
     for unit, mount, _, nocopy in references:
         if nocopy:
@@ -184,25 +191,62 @@ def _populate(
         # have identical content; unpinned lower-layer fixtures compare literally.
         content = image.rpartition("@")[2] or image
         sources.setdefault((content, mount), (image, mount))
-    if len(sources) > 1:
-        raise ExportError(
-            f"volume {volume!r} has multiple copy-enabled image/path sources; "
-            "identical initialization content cannot be proven (use one source or volume.nocopy)"
-        )
     identities.clear()
     if not sources:
         return False
-    image, mount = next(iter(sources.values()))
     assert image_export is not None
-    if image_export.extract(image, mount, dest, identities=identities):
+    # Candidate extractions live beside `dest` and are removed with it, never inside published files.
+    with TemporaryDirectory(prefix=".sources-", dir=dest.parent) as temporary:
+        populated: dict[str, tuple[Path, dict[str, tuple[int, int, int]]]] = {}
+        roots: set[tuple[int, int, int]] = set()
+        for index, (image, mount) in enumerate(sources.values()):
+            staged = Path(temporary) / str(index)
+            staged.mkdir()
+            owners: dict[str, tuple[int, int, int]] = {}
+            if image_export.extract(image, mount, staged, identities=owners):
+                populated.setdefault(_fingerprint(staged, owners), (staged, owners))
+            elif "." in owners:
+                roots.add(owners["."])
+        if len(populated) > 1:
+            raise ExportError(
+                f"volume {volume!r} has copy-enabled sources with different initial content "
+                "(use one source or volume.nocopy)"
+            )
+        _reset(dest)
+        if populated:
+            staged, owners = next(iter(populated.values()))
+            for child in staged.iterdir():  # rename keeps hardlinks within the extracted tree
+                child.rename(dest / child.name)
+            identities.update(owners)
+            return True
+    if len(roots) > 1:
+        raise ExportError(f"volume {volume!r} has copy-enabled sources with different empty root identities")
+    if roots:
+        identities["."] = next(iter(roots))
         return True
-    empty_root = identities.get(".")
-    _reset(dest)
-    identities.clear()
-    if empty_root is None:
-        return False
-    identities["."] = empty_root
-    return True
+    return False
+
+
+def _fingerprint(root: Path, owners: Mapping[str, tuple[int, int, int]]) -> str:
+    """Content, numeric metadata and link targets of one extraction, without following symlinks."""
+    digest = hashlib.sha256()
+    entries: list[tuple[str, str, bytes]] = []
+    for current, directories, files in os.walk(root, followlinks=False):
+        directories.sort()
+        for name in sorted(directories + files):
+            path = Path(current) / name
+            relative = path.relative_to(root).as_posix()
+            if path.is_symlink():
+                entries.append((relative, "link", os.readlink(path).encode()))
+            elif path.is_dir():
+                entries.append((relative, "dir", b""))
+            else:
+                entries.append((relative, "file", path.read_bytes()))
+    for relative, kind, payload in sorted(entries):
+        digest.update(f"{relative}\0{kind}\0{owners.get(relative)}\0".encode())
+        digest.update(payload)
+    digest.update(repr(owners.get(".")).encode())
+    return digest.hexdigest()
 
 
 def _reset(path: Path) -> None:

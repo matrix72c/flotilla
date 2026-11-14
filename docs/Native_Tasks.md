@@ -21,9 +21,17 @@ flotilla prepare selected.jsonl --deployment deployment.toml --env prepare.env \
 
 `probe` writes to the capability path declared in the deployment. An explicit `--out` must resolve to that same path. Probe applies the deployment's required capabilities and security policy and requires confirmed instance, Anchor and storage cleanup. Choosing a filesystem protocol is not proof of its behavior; measured evidence is bound to the deployment and includes missing mount targets.
 
-`select` discovers and normalizes tasks on the preparation host. It does not create sandboxes, export image contents, build, publish, tokenize or split train/eval data. It writes importer inputs, not runnable native tasks. Multi-step Harbor tasks are rejected by the native protocol itself — the consume-only lifecycle is one agent run plus one verification — not by any consumer option. `voyager select` additionally requires published application images.
+`select` discovers and normalizes tasks on the preparation host. It does not create sandboxes, export image contents, build, publish, tokenize or split train/eval data. It writes importer inputs, not runnable native tasks. Multi-step Harbor tasks are rejected by the native protocol itself — the consume-only lifecycle is one agent run plus one verification — not by any consumer option. The selection report lists each service's image source — `image`, `build`, or `config-only` (a Dockerfile that only sets configuration) — and importer warnings. `--require-prebuilt-images` rejects tasks that need builds, for hosts without Docker.
 
 `prepare` resolves application execution identity, commands, environment, healthchecks and image digests **before** adaptation. Root-compatible images are reused. Non-root default images receive a minimal `FROM <source digest>` / `USER 0:0` image, while the original application UID/GID remains in the task. This does not enable privileged execution. tmpfs and readonly rootfs remain real runtime features; directory creation alone is not an image build reason. Unsupported image paths and identities are rejected, not approximated.
+
+A service with `build` gets its image in one of three ways, recorded per service in the prepare report as `dispositions` (`link`, `mirror`, `config-only`, `cache-hit`, `built`) and `adapted` (USER0):
+
+- **config-only**: a single-stage Dockerfile using only `FROM`, `ARG`, `ENV`, `WORKDIR`, `USER`, `CMD`, `ENTRYPOINT`, `LABEL`, `EXPOSE`, `MAINTAINER` and `STOPSIGNAL` on a linkable or mirrored base. The base digest is used directly and the configuration Docker would produce is written into the task. It is built instead when the result depends on the build: base `ONBUILD` triggers, a `WORKDIR` other than `/` or the base working directory (a build creates it), variables the Dockerfile and base do not define, proxy arguments, a custom base `SHELL` for shell-form commands, or substitution forms other than `$VAR`, `${VAR}`, `${VAR:-word}` and `${VAR:+word}`.
+- **cache-hit**: other Dockerfiles are keyed by content — Dockerfile, pinned base digests, build arguments other than proxies, base substitutions and the complete context tree (paths, bytes, modes and link targets). The image is published as `<target>:bk-<key>`; an existing tag is reused without building, across tasks and runs. A first non-reproducible build (unpinned package installs) is what later runs reuse. A base that cannot be pinned (`FROM $ARG`, unreachable registry) disables reuse for that build.
+- **built**: built and pushed under the cache tag.
+
+USER0 adaptations are tagged by source digest and target and likewise reused when the tag exists.
 
 **Executing prepare may build and publish necessary images.** `--image-repo` is a repository without tag/digest and overrides `build.target`. It does not mean mirror every source image. Mirroring is explicit, no `latest` tag is moved, and final references use the remote manifest digest, not a local Docker image ID. Missing publication targets fail before the necessary build. Registry authentication remains outside the release and is not required by consume-only execution.
 
@@ -31,7 +39,7 @@ A failed selected row fails the release: no partial successful dataset is silent
 
 `--name` names the release. Every dataset row carries it, and the consumer's deployment binds it as `[task_releases.<name>]`. A task selected several times is packaged once; its rows repeat.
 
-The prepare report includes invocation-local `metrics`: total `elapsed_s`, per-phase `calls`/`failed`/`seconds`, and cache-hit counts. `import_normalize` combines importing and official Compose normalization; `user0_build_push` and `application_build_push` each measure the builder's combined build/publication call. Phase times are inclusive and may overlap, so do not sum them. Tool calls exclude cache hits and failures remain counted. The Compose executable's version is checked once per process.
+The prepare report includes invocation-local `metrics`: total `elapsed_s`, per-phase `calls`/`failed`/`seconds` (`registry_lookup` counts cache-tag lookups), and counts of registry/seed cache hits, `build_cache_hits` and `config_only` services. `import_normalize` combines importing and official Compose normalization; `user0_build_push` and `application_build_push` each measure the builder's combined build/publication call. Phase times are inclusive and may overlap, so do not sum them. Tool calls exclude cache hits and failures remain counted. The Compose executable's version is checked once per process.
 
 ## Static publication belongs to the user
 

@@ -263,7 +263,13 @@ def test_wrong_empty_table_types_are_not_missing(field: str, value: object) -> N
     assert any(f.kind == "reject" and f.path == field for f in project.findings)
 
 
-@pytest.mark.parametrize("value", ["on-failure:3", "on-failure-arbitrary", "on-failure:"])
-def test_restart_counts_and_prefix_matches_are_rejected(value: str) -> None:
+@pytest.mark.parametrize("value", ["on-failure-arbitrary", "on-failure:", "on-failure:0", "on-failure:x"])
+def test_restart_malformed_policies_are_rejected(value: str) -> None:
     project = normalize({"services": {"main": {"image": "alpine", "restart": value}}}, {})
     assert any(f.kind == "reject" and f.path == "services.main.restart" for f in project.findings)
+
+
+def test_restart_count_is_on_failure() -> None:
+    project = normalize({"services": {"main": {"image": "alpine", "restart": "on-failure:3"}}}, {})
+    assert project.services["main"].restart == "on-failure"
+    assert [f.kind for f in project.findings if f.path == "services.main.restart"] == ["equivalent"]

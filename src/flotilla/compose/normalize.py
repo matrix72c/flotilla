@@ -37,14 +37,14 @@ KEEPALIVE = ("sh", "-c", "sleep infinity")
 _EQUIVALENT = {
     "labels": "metadata only; not applied as Docker container labels",
     "expose": "does not publish ports or restrict peer connectivity in Compose",
+    "init": "recorded only; the sandbox supplies its own PID 1",
+    "logging": "recorded only; output is collected through the exec API",
+    "stop_signal": "recorded only; sandboxes are deleted, not stopped",
+    "stop_grace_period": "recorded only; sandboxes are deleted, not stopped",
+    "pull_policy": "recorded only; images are pinned by digest at preparation",
 }
 # Rejected service fields (including platform capability gaps).
 _REJECT = {
-    "init": "Docker init/PID1 signal forwarding and reaping semantics are not implemented",
-    "logging": "Docker logging driver semantics are not implemented",
-    "stop_signal": "Docker stop signal semantics are not implemented",
-    "stop_grace_period": "Docker stop grace-period semantics are not implemented",
-    "pull_policy": "Docker pull policy semantics are not implemented",
     "group_add": "requires supplementary_groups; not supported yet",
     "cap_drop": "requires per-command capability control; not supported yet",
     "security_opt": "requires per-command capability control; not supported yet",
@@ -67,6 +67,15 @@ _REJECT = {
     "domainname": "not implemented yet (not seen in task data)",
     "scale": "replicas not implemented yet (not seen in task data)",
 }
+# Bridge driver options with no effect on platform networks.
+_BRIDGE_OPTIONS = frozenset(
+    {
+        "com.docker.network.bridge.name",
+        "com.docker.network.driver.mtu",
+        "com.docker.network.bridge.gateway_mode_ipv4",
+        "com.docker.network.bridge.gateway_mode_ipv6",
+    }
+)
 _HANDLED = {
     "image", "build", "command", "entrypoint", "environment", "working_dir", "user", "healthcheck", "depends_on",
     "networks", "network_mode", "volumes", "tmpfs", "shm_size", "restart", "privileged", "hostname", "ports",
@@ -243,8 +252,8 @@ def _service(
         restart=_restart(raw.get("restart"), f"{path}.restart", c),
         privileged=_boolean(raw.get("privileged", False), f"{path}.privileged", c),
         devices=devices,
-        container_name=_hostname(raw.get("container_name"), f"{path}.container_name", c),
-        hostname=_hostname(raw.get("hostname"), f"{path}.hostname", c),
+        container_name=_hostname(raw.get("container_name"), f"{path}.container_name", c, field="container_name"),
+        hostname=_hostname(raw.get("hostname"), f"{path}.hostname", c, field="hostname"),
         udp_ports=_ports(raw.get("ports"), f"{path}.ports", c),
     )
 
@@ -483,7 +492,7 @@ def _depends_on(value: object, path: str, c: _Collector) -> dict[str, Dependency
         for key in spec:
             if key == "restart":
                 if spec[key]:
-                    c.reject(f"{path}.{dep}.restart", "dependency restart propagation is not implemented")
+                    c.equivalent(f"{path}.{dep}.restart", "services are never restarted during a run")
             elif key not in ("condition", "required"):
                 c.reject(f"{path}.{dep}.{key}", "unsupported depends_on field")
         out[str(dep)] = Dependency(
@@ -520,7 +529,9 @@ def _service_networks(raw: Mapping[str, Any], path: str, c: _Collector) -> dict[
         for key in spec:
             if key in ("gw_priority", "priority"):
                 if spec[key] != 0:
-                    c.reject(f"{path}.networks.{net}.{key}", "Docker network attachment priorities are not implemented")
+                    c.equivalent(
+                        f"{path}.networks.{net}.{key}", "egress follows the sandbox policy, not a gateway choice"
+                    )
             elif key in ("ipv4_address", "ipv6_address"):
                 c.reject(f"{path}.networks.{net}.{key}", "addresses are platform-assigned; fixed-IP access cannot hold")
             elif key != "aliases":
@@ -694,28 +705,39 @@ def _shm_size(value: object, path: str, c: _Collector) -> int | None:
         return None
 
 
-_RESTART: dict[str, RestartPolicy] = {"no": "no", "always": "always", "unless-stopped": "unless-stopped"}
+_RESTART: dict[str, RestartPolicy] = {
+    "no": "no",
+    "always": "always",
+    "unless-stopped": "unless-stopped",
+    "on-failure": "on-failure",
+}
+_ON_FAILURE_COUNT = re.compile(r"on-failure:[1-9][0-9]*")
 
 
 def _restart(value: object, path: str, c: _Collector) -> RestartPolicy:
     if value is None or value is False:
         return "no"
     text = str(value)
+    if _ON_FAILURE_COUNT.fullmatch(text):
+        text = "on-failure"
     if text in _RESTART:
         if text != "no":
-            c.reject(path, "Docker restart supervision is not implemented")
+            c.equivalent(path, "services are not restarted; an exit Docker would restart voids the sample")
         return _RESTART[text]
     c.reject(path, f"unknown restart policy: {text!r}")
     return "no"
 
 
-def _hostname(value: object, path: str, c: _Collector) -> str | None:
+def _hostname(value: object, path: str, c: _Collector, *, field: str) -> str | None:
     if value is None:
         return None
     if not valid_name(value):
         c.reject(path, "must be a valid hostname")
         return None
-    c.reject(path, "actual Docker container identity/hostname cannot be set; DNS aliases are not equivalent")
+    if field == "hostname":
+        c.warn(path, "added as a name peers resolve; gethostname() in the sandbox returns the platform's name")
+    else:
+        c.equivalent(path, "added as a name peers resolve")
     return str(value)
 
 
@@ -726,7 +748,7 @@ def _ports(value: object, path: str, c: _Collector) -> tuple[int, ...]:
         c.reject(path, f"unrecognized syntax: {value!r}")
         return ()
     if value:
-        c.reject(path, "published ports (including automatic host-port allocation) are not implemented")
+        c.equivalent(path, "nothing is published; peers on a shared network reach every port")
     udp: list[int] = []
     for index, port in enumerate(value):
         field = f"{path}[{index}]"
@@ -774,7 +796,10 @@ def _networks(value: object, c: _Collector) -> dict[str, NetworkDef]:
                     c.reject(f"{path}.ipam", "subnets, ranges, or gateways specified: addresses are platform-assigned")
             elif key == "driver_opts":
                 for opt in _mapping(v, f"{path}.driver_opts", c):
-                    c.reject(f"{path}.driver_opts.{opt}", "Docker bridge driver options are not implemented")
+                    if opt in _BRIDGE_OPTIONS:
+                        c.equivalent(f"{path}.driver_opts.{opt}", "no effect on platform networks")
+                    else:
+                        c.reject(f"{path}.driver_opts.{opt}", "Docker bridge driver options are not implemented")
             elif key == "external":
                 c.reject(f"{path}.external", "external networks shared across trials do not exist in training")
             else:

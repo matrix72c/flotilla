@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import io
+import os
 import tarfile
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
+from flotilla.build.docker import extract_archive
 from flotilla.build.driver import build_task
 from flotilla.build.files import ExportError, export_task_files
+from flotilla.build.images import ImageError
 from flotilla.build.meta import ImageAccounts, parse_user
 from flotilla.compose.manifest_gen import build_manifest, synthesize_command
 from flotilla.compose.model import ImageMeta, Project, Service, VolumeMount
@@ -156,10 +160,13 @@ def test_tmpfs_is_inspected_not_derived_without_approximating_container_identity
     assert manifest.networks["default"].names == {"main": ["main"]}
     compose = task.env_dir / "docker-compose.yaml"
     compose.write_text(compose.read_text().replace("image: r.io/a", "image: r.io/a\n    container_name: agent-alias"))
-    rejected_builder = FakeBuilder()
-    rejected = build_task(load_task(task.path), tmp_path / "rejected", replace(ctx, builder=rejected_builder))
-    assert rejected.status == "rejected" and "identity" in rejected.reason
-    assert not rejected_builder.requests
+    aliased = build_task(
+        load_task(task.path), tmp_path / "aliased", replace(ctx, caps=replace(ctx.caps, native_tmpfs=True))
+    )
+    assert aliased.status == "built", aliased.reason
+    assert aliased.manifest_path
+    names = Manifest.load_json(aliased.manifest_path.read_bytes()).networks["default"].names
+    assert names == {"agent-alias": ["main"], "main": ["main"]}
 
 
 def test_mount_path_inspection_rejects_image_symlink(tmp_path: Path) -> None:
@@ -177,26 +184,78 @@ def test_mount_path_inspection_rejects_image_symlink(tmp_path: Path) -> None:
     assert export.inspected  # the rejection came from real path inspection, not a silent skip
 
 
-@pytest.mark.parametrize("different_path", [False, True])
-def test_seed_rejects_ambiguous_initialization_before_extracting(tmp_path: Path, different_path: bool) -> None:
-    from unittest.mock import Mock
+class _ImageContents:
+    """Exporter double keyed by (image, path); `None` content is an existing empty directory."""
 
+    def __init__(self, contents: dict[tuple[str, str], dict[str, str] | None]) -> None:
+        self.contents = contents
+        self.calls: list[tuple[str, str]] = []
+
+    def extract(
+        self, image: str, path: str, dest: Path, *, identities: dict[str, tuple[int, int, int]] | None = None
+    ) -> bool:
+        self.calls.append((image, path))
+        if (image, path) not in self.contents:
+            return False
+        files = self.contents[(image, path)]
+        if identities is not None:
+            identities["."] = (0, 0, 0o755)
+        for name, text in (files or {}).items():
+            (dest / name).write_text(text)
+            if identities is not None:
+                identities[name] = (1000, 1000, 0o644)
+        return bool(files)
+
+
+A, B = "r.io/a@sha256:" + "a" * 64, "r.io/b@sha256:" + "b" * 64
+
+
+def _seed(tmp_path: Path, exporter: _ImageContents, other: str = "/data") -> dict[str, object]:
     services = {
         "main": Service("main", volumes=(VolumeMount("volume", "data", "/data"),)),
-        "db": Service("db", volumes=(VolumeMount("volume", "data", "/other" if different_path else "/data"),)),
+        "db": Service("db", volumes=(VolumeMount("volume", "data", other),)),
     }
-    digest_a, digest_b = "sha256:" + "a" * 64, "sha256:" + "b" * 64
-    images = {"main": f"r.io/a@{digest_a}", "db": f"r.io/b@{digest_a if different_path else digest_b}"}
-    exporter = Mock()
-    with pytest.raises(ExportError, match="multiple copy-enabled image/path sources"):
-        export_task_files(
-            Project(services, {}, frozenset({"data"})),
-            tmp_path,
-            tmp_path / "files",
-            images=images,
-            image_export=exporter,
-        )
-    exporter.extract.assert_not_called()
+    files = tmp_path / "files"
+    export_task_files(
+        Project(services, {}, frozenset({"data"})), tmp_path, files, images={"main": A, "db": B}, image_export=exporter
+    )
+    seeds = sorted(p.name for p in (files / "seeds").glob("*")) if (files / "seeds").exists() else []
+    leftovers = [p.name for p in files.iterdir() if p.name.startswith(".")] if files.exists() else []
+    return {"seeds": seeds, "leftovers": leftovers}
+
+
+def test_seed_with_one_populated_source_uses_it(tmp_path: Path) -> None:
+    exporter = _ImageContents({(A, "/data"): {"secret": "s"}})
+    assert _seed(tmp_path, exporter, "/run/secrets") == {"seeds": ["data.tar"], "leftovers": []}
+    assert sorted(exporter.calls) == [(A, "/data"), (B, "/run/secrets")]
+
+
+def test_seed_with_all_sources_absent_is_empty(tmp_path: Path) -> None:
+    assert _seed(tmp_path, _ImageContents({}), "/run/secrets")["seeds"] == []
+
+
+def test_seed_with_identical_contents_is_accepted(tmp_path: Path) -> None:
+    exporter = _ImageContents({(A, "/data"): {"f": "same"}, (B, "/other"): {"f": "same"}})
+    assert _seed(tmp_path, exporter, "/other")["seeds"] == ["data.tar"]
+
+
+def test_seed_rejects_different_contents(tmp_path: Path) -> None:
+    exporter = _ImageContents({(A, "/data"): {"f": "one"}, (B, "/other"): {"f": "two"}})
+    with pytest.raises(ExportError, match="different initial content"):
+        _seed(tmp_path, exporter, "/other")
+
+
+def test_seed_rejects_different_empty_root_identities(tmp_path: Path) -> None:
+    class Roots(_ImageContents):
+        def extract(
+            self, image: str, path: str, dest: Path, *, identities: dict[str, tuple[int, int, int]] | None = None
+        ) -> bool:
+            assert identities is not None
+            identities["."] = (0, 0, 0o755) if image == A else (999, 999, 0o700)
+            return False
+
+    with pytest.raises(ExportError, match="different empty root identities"):
+        _seed(tmp_path, Roots({}), "/other")
 
 
 def test_seed_allows_same_digest_and_path_across_registry_aliases(tmp_path: Path) -> None:
@@ -294,3 +353,79 @@ def test_rl_corpus_memory_alias_is_applied_not_silently_defaulted(tmp_path: Path
     metadata.write_text('[environment]\nmemory="12G"\nmemory_mb=2048\n')
     with pytest.raises(ValueError, match="only one"):
         load_task(path)
+
+
+def _archive(*members: tuple[tarfile.TarInfo, bytes | None]) -> io.BytesIO:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as tar:
+        for info, payload in members:
+            tar.addfile(info, io.BytesIO(payload) if payload is not None else None)
+    buffer.seek(0)
+    return buffer
+
+
+def _symlink(name: str, linkname: str) -> tuple[tarfile.TarInfo, None]:
+    info = tarfile.TarInfo(name)
+    info.type, info.linkname, info.mode = tarfile.SYMTYPE, linkname, 0o777
+    return info, None
+
+
+def _file(name: str, payload: bytes = b"x") -> tuple[tarfile.TarInfo, bytes]:
+    info = tarfile.TarInfo(name)
+    info.size, info.mode = len(payload), 0o644
+    return info, payload
+
+
+def _directory(name: str) -> tuple[tarfile.TarInfo, None]:
+    info = tarfile.TarInfo(name)
+    info.type, info.mode = tarfile.DIRTYPE, 0o755
+    return info, None
+
+
+def test_volume_seed_keeps_symlinks_that_stay_inside(tmp_path: Path) -> None:
+    """Shared-library aliases like libclntsh.so -> libclntsh.so.19.1 must survive export."""
+    identities: dict[str, tuple[int, int, int]] = {}
+    archive = _archive(
+        _directory("./lib"),
+        _file("./lib/libclntsh.so.19.1", b"elf"),
+        _symlink("./lib/libclntsh.so", "libclntsh.so.19.1"),
+        _symlink("./lib/nested", "../lib"),
+    )
+    assert extract_archive(archive, tmp_path, identities)
+    link = tmp_path / "lib" / "libclntsh.so"
+    assert link.is_symlink() and os.readlink(link) == "libclntsh.so.19.1"
+    assert link.read_bytes() == b"elf"
+    assert (tmp_path / "lib" / "nested").is_symlink()
+    assert identities["lib/libclntsh.so"][2] == 0o777
+
+
+@pytest.mark.parametrize(
+    ("name", "linkname"),
+    [
+        ("./lib/escape", "/etc"),
+        ("./lib/escape", "/etc/passwd"),
+        ("./escape", "../outside"),
+        ("./lib/escape", "../../outside"),
+        ("./lib/escape", "lib/../../../outside"),
+        ("./lib/escape", ""),
+    ],
+)
+def test_volume_seed_rejects_symlinks_leaving_the_volume(tmp_path: Path, name: str, linkname: str) -> None:
+    archive = _archive(_directory("./lib"), _symlink(name, linkname))
+    with pytest.raises(ImageError, match=r"points outside the volume|unsafe to extract"):
+        extract_archive(archive, tmp_path, {})
+    assert not (tmp_path / name.removeprefix("./")).exists()
+
+
+def test_volume_seed_keeps_symlinks_resolving_within_the_volume(tmp_path: Path) -> None:
+    """A target reached through `..` is still inside: only leaving the root is refused."""
+    archive = _archive(_directory("./lib"), _file("./shared", b"data"), _symlink("./lib/up", "../shared"))
+    assert extract_archive(archive, tmp_path, {})
+    assert (tmp_path / "lib" / "up").read_bytes() == b"data"
+
+
+def test_volume_seed_rejects_writing_through_a_symlinked_directory(tmp_path: Path) -> None:
+    """`tar` unpacking the seed would follow the link, writing outside the volume directory."""
+    archive = _archive(_symlink("./here", "."), _file("./here/passwd", b"root:x:0:0"))
+    with pytest.raises(ImageError, match="reached through a symlink"):
+        extract_archive(archive, tmp_path, {})

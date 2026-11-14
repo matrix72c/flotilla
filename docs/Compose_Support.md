@@ -55,15 +55,15 @@ Top-level networks support `internal: true`. `driver` must be `bridge`, `ipam` m
 | `env_file` | A path or list of paths inside `environment/`, strict `KEY=VALUE` lines. The long form (`path`/`required`) and escaped values are rejected. `environment` entries win |
 | `working_dir` | Supported |
 | `user` | Supported; resolved to numeric uid/gid from the image |
-| `depends_on` | List or map. Conditions `service_started`, `service_healthy`, `service_completed_successfully`, and `required` are supported |
+| `depends_on` | List or map. Conditions `service_started`, `service_healthy`, `service_completed_successfully`, and `required` are supported; `restart` is equivalent (services are never restarted) |
 | `healthcheck` | `test`, `interval`, `timeout`, `retries`, `start_period`, `start_interval`, `disable`. `test` must be given (inheriting the image's test is rejected); `["NONE"]` or `disable: true` turns the image's healthcheck off |
 | `volumes` | See [Volumes and bind mounts](#volumes-and-bind-mounts) |
 | `tmpfs`, `type: tmpfs` | Native memory mounts; requires verified `native_tmpfs`. Short syntax supports size/mode/uid/gid; long syntax supports size/mode. No directory emulation |
 | `shm_size` | `/dev/shm` capacity; requires verified `shm_size` (internal filesystem dialect only, rejected on upstream OpenSandbox). Counts against the same memory budget as tmpfs. Without it the platform default applies. See [shared memory](Readonly_Rootfs_and_Tmpfs.md#shared-memory-shm_size) |
-| `networks` | List or map with `aliases`. Static `ipv4_address`/`ipv6_address` are rejected |
+| `networks` | List or map with `aliases`. `gw_priority`/`priority` are equivalent: egress follows the sandbox policy. Static `ipv4_address`/`ipv6_address` are rejected |
 | `network_mode` | Only `none`. `host`, `bridge`, `service:*`, and `container:*` are rejected |
 | `ports`, `expose` | Equivalent: nothing is published, and services on a shared network reach every port. Port ranges and protocols other than TCP/UDP are rejected; UDP requires the deployment's `link_udp` capability |
-| `restart` | `no` is supported. `always` and `unless-stopped` are equivalent: services are not restarted, and the run is marked void if a service exits in a way Docker would have restarted. `on-failure` is rejected |
+| `restart` | `no` is supported. `always`, `unless-stopped`, `on-failure` and `on-failure:N` are equivalent: services are not restarted, and the run is marked void if a service exits in a way Docker would have restarted |
 | `read_only` | Service root filesystem protection; `true` requires verified `readonly_rootfs`. Independent of volume read-only flags |
 | `privileged` | Runs the service on the privileged runtime (`opensandbox.privileged_extensions`, e.g. sysbox): root holds all capabilities inside its own user namespace, which is not Docker privileged mode on the host (warning). Requires the deployment's `privileged_runtime` capability, i.e. passed privileged isolation evidence. Read-only rootfs, tmpfs and `shm_size` are not available; writable trial volumes are opened as for devices |
 | `hostname`, `container_name` | Added as names other services can resolve. `hostname` is a warning: `gethostname()` inside the sandbox still returns the platform's name |

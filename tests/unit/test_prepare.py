@@ -152,14 +152,14 @@ async def test_multiple_verifiers_fail_the_task(
 @pytest.mark.asyncio
 async def test_each_dataset_pushes_to_its_own_repository(cfg: FlotillaConfig, anchors: Anchors, tmp_path: Path) -> None:
     builder = FakeBuilder()
-    _task(tmp_path / "My_Set" / "group", "t", Dockerfile="FROM r.io/ns/base:1\n")  # main needs a build
+    _task(tmp_path / "My_Set" / "group", "t", Dockerfile="FROM r.io/ns/base:1\nRUN true\n")  # main needs a build
     out = tmp_path / "set.jsonl"
     await prepare(
         cfg, [tmp_path / "My_Set"], out, anchor=anchors.factory(), context=lambda journal: _ctx(builder=builder)
     )
     assert [row.id for row in load_prepared(out)] == ["My_Set/group/t"]
     (tag,) = {request.tag for request in builder.requests if "-runtime" not in request.tag}
-    assert tag.startswith("r.io/ns/out/my-set:group--t--main--main--")
+    assert tag.startswith("r.io/ns/out/my-set:bk-")
 
 
 @pytest.mark.asyncio

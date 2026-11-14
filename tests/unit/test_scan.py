@@ -68,7 +68,7 @@ def test_too_many_members(caps: Capabilities) -> None:
 def test_udp_needs_link_udp(caps: Capabilities) -> None:
     svc = {"dns": {"image": "d", "ports": [{"target": 53, "protocol": "udp"}]}}
     assert scan("t", _project(svc), caps).status == "rejected"
-    assert scan("t", _project(svc), replace(caps, link_udp=True)).status == "rejected"
+    assert scan("t", _project(svc), replace(caps, link_udp=True)).status == "accepted"
 
 
 def test_privileged_needs_runtime(caps: Capabilities) -> None:
