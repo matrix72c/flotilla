@@ -18,14 +18,24 @@ from flotilla.compose.normalize import normalize
 from flotilla.compose.task import TaskError, load_task
 
 
-def test_undefined_variable_is_refused_instead_of_blanked(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "warning",
+    [
+        'WARN[0000] The "TAG" variable is not set. Defaulting to a blank string. \n',
+        # Newer Compose logs structurally, escaping the quotes around the name. A format
+        # the pattern misses would make the check below a silent no-op.
+        'time="2026-01-01T00:00:00Z" level=warning msg="The \\"TAG\\" variable is not set.'
+        ' Defaulting to a blank string."\n',
+    ],
+    ids=["warn-prefix", "structured"],
+)
+def test_undefined_variable_is_refused_instead_of_blanked(tmp_path: Path, warning: str) -> None:
     """Compose exits 0 and substitutes a blank string; preparation must not bake that in."""
     (tmp_path / "docker-compose.yaml").write_text("services:\n  main:\n    image: r.io/app:${TAG}\n")
 
     def run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         if args[-2:] == ["version", "--short"]:
             return subprocess.CompletedProcess(args, 0, f"v{COMPOSE_VERSION}\n", "")
-        warning = 'WARN[0000] The "TAG" variable is not set. Defaulting to a blank string. \n'
         output = {"services": {"main": {"image": "r.io/app:"}}}
         return subprocess.CompletedProcess(args, 0, json.dumps(output), warning)
 
