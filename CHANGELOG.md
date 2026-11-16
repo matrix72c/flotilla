@@ -22,6 +22,7 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Fixed
 
+- A native release prepared against manifest schema 7 loads again. Schema 8 dropped two fields, but the migration stripped only `runtime_params`; every such release also carries `task_files_published`, which `extra="forbid"` then rejected, so binding any existing release failed. Both are now dropped when empty and refused when populated.
 - An undefined Compose variable is refused again. The in-repo parser rejected it, but `docker compose config` substitutes a blank string and exits 0, and both backstops for the deferred form were unreachable, so a task referencing `${TAG}` with no value baked an empty string into its release. The adapter now reads Compose's own "variable is not set" warning and fails the task; a reference with a default (`${VAR:-x}`) is unaffected.
 - `flotilla inspect` loads through the deployment's pinned Compose tool, so its findings and resources match what preparation computes for the same task. It previously used the in-repo parser and could disagree.
 - `OfflineComposeAdapter` refuses interpolation and `env_file` instead of leaving a `${VAR}` reference to reach `normalize()` as a literal string.
