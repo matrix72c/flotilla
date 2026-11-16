@@ -186,6 +186,10 @@ def _ctx(**kw: Any) -> BuildContext:
     return BuildContext(**{**defaults, **kw})
 
 
+# Public name for downstream test suites; `_ctx` is the in-repo spelling.
+build_context = _ctx
+
+
 def prepared_task(
     path: Path,
     cfg: FlotillaConfig | None = None,
