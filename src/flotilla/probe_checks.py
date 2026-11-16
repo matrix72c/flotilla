@@ -232,7 +232,7 @@ async def privileged(run: _Run) -> dict[str, Item]:
     # Optional Docker measurement (DinD daemon and inner container limits); recorded, never required for admission.
     docker = await attempt(lambda: _docker(run, unit), scope="privileged")
     auth = await attempt(lambda: authentication(p, unit, run_id=run.run_id, scope="privileged"), scope="privileged")
-    fuse_item = await attempt(lambda: fuse(run, unit), scope="privileged")
+    fuse_item = await attempt(lambda: fuse(run), scope="privileged")
     storage = await attempt(lambda: storage_extra(run, privileged=True), scope="privileged")
     if isinstance(storage, Item):
         storage_item = no_mount = storage
@@ -363,15 +363,21 @@ async def device(run: _Run, name: TaskDevice) -> Item:
     )
 
 
-async def fuse(run: _Run, unit: InstanceHandle) -> Item:
+async def fuse(run: _Run) -> Item:
+    """A privileged instance requesting only the FUSE device; root must complete a real mount cycle.
+
+    Scoped like the kvm and tun probes rather than reading the deployment's extension tables:
+    flotilla writes the device extension per instance, so a task can declare `/dev/fuse` on one
+    service without every privileged sandbox carrying FUSE.
+    """
     p = run.platform
-    if not isinstance(p, OpenSandboxPlatform):
-        raise NotImplementedError("backend has no FUSE runtime probe")
-    extensions = {**p._extensions, **p._privileged_extensions}
-    if str(extensions.get("fuse", "")).lower() != "true":
-        return Item(status="skipped", evidence="actual runtime extensions do not enable FUSE", scope="privileged")
+    spec = replace(
+        run._spec("device-fuse"), image=run.settings.privileged_image, privileged=True, devices=frozenset({"fuse"})
+    )
+    unit = await run._create(spec)
     tools = await p.exec(unit, _sh("command -v fuse-overlayfs >/dev/null && command -v fusermount3 >/dev/null"))
     if tools.exit_code != 0:
+        await run._delete(unit.iid)
         return Item(
             status="error", evidence="local FUSE probe needs fuse-overlayfs and fusermount3", scope="privileged"
         )
@@ -386,9 +392,10 @@ async def fuse(run: _Run, unit: InstanceHandle) -> Item:
         f'test "$(cat {base}/upper/write)" = write; trap - EXIT'
     )
     result = await p.exec(unit, _sh(script))
+    gone = await run._delete(unit.iid)
     return Item(
-        status="passed" if result.exit_code == 0 and not result.timed_out else "failed",
-        evidence="local FUSE mount, read, write and unmount",
+        status="passed" if result.exit_code == 0 and not result.timed_out and gone else "failed",
+        evidence="create with only the fuse extension; root mounts, reads, writes and unmounts; outer deletion",
         scope="privileged",
     )
 

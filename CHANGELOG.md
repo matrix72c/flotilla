@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Added
+
+- Top-level Compose `x-*` extension fields are recorded instead of rejected. The config adapter resolves YAML anchors before normalization, so a surviving `x-` key is leftover metadata; Compose strips the service-, network- and volume-level extension fields itself, so only the top level needed this.
+- Compose `devices: /dev/fuse`, alongside the existing `/dev/kvm` and `/dev/net/tun`. The service runs on the privileged runtime with the `fuse` extension written per instance, gated on `runtime.fuse` in the capability report. **Breaking for deployments that set `fuse` in a static extensions table**: like `kvm` and `tun`, that key is now rejected there, because flotilla writes it per instance. The FUSE probe is correspondingly scoped like the other two — its own privileged instance requesting only that device, instead of inspecting the deployment's extension tables, where it reported `skipped` unless every privileged sandbox carried FUSE. The platform asks for no special runtime for FUSE, but this evidence is privileged-scoped, so a task declaring it runs privileged too.
+
+### Changed
+
+- Compose rejection reasons for fields the sandbox API has no counterpart for now say so, instead of "not supported yet" or "not seen in task data": `cap_drop`, `security_opt`, `ulimits`, `sysctls`, `extra_hosts`, `group_add`, `pid`, `ipc` and `network_mode: service:`/`container:`. `pids_limit`, `dns`, `dns_search`, `dns_opt`, `platform`, `memswap_limit` and `cgroup` were previously unclassified and fell through to a generic "unsupported field"; they are now listed with their reason and appear in the support table.
+
 ### Removed
 
 - **Breaking: the legacy Harbor source-task API.** `HarborAttempt`, `HarborVerification`, the `prepare/runner.py` and `share/publish.py` entry points, the compile/restore half of `flotilla.integrations.workspace`, and the `WorkspaceStore` file operations only they used. `flotilla.integrations.workspace` keeps its metadata/describe path. Task executions enter through `NativeAttempt` with a native release binding.

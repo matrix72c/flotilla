@@ -233,8 +233,14 @@ InstanceProfile = Literal["default", "management"]
 #: Host devices a capability report can record.
 Device = Literal["fuse", "kvm", "tun"]
 #: Devices a task may request, by the device node it declares. They need the privileged runtime.
-TaskDevice = Literal["kvm", "tun"]
-TASK_DEVICE_PATHS: Mapping[str, TaskDevice] = {"/dev/kvm": "kvm", "/dev/net/tun": "tun"}
+#: The platform does not require a special runtime for FUSE, but the probe only measures it on a
+#: privileged instance, so admitting it elsewhere would claim a configuration nothing verified.
+TaskDevice = Literal["fuse", "kvm", "tun"]
+TASK_DEVICE_PATHS: Mapping[str, TaskDevice] = {
+    "/dev/fuse": "fuse",
+    "/dev/kvm": "kvm",
+    "/dev/net/tun": "tun",
+}
 
 
 @dataclass(frozen=True)

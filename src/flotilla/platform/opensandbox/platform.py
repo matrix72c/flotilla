@@ -50,7 +50,7 @@ MIN_TTL_SECONDS = 60  # minimum timeout
 DEFAULT_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 DEFAULT_MAX_CONNECTIONS = 100  # per pool; each in-flight foreground exec holds one connection
 #: Device extension keys, written per instance (`"true"`) for services that declare the device node.
-DEVICE_EXTENSIONS: Mapping[TaskDevice, str] = {"kvm": "kvm", "tun": "tun"}
+DEVICE_EXTENSIONS: Mapping[TaskDevice, str] = {"fuse": "fuse", "kvm": "kvm", "tun": "tun"}
 #: Create request fields managed by flotilla, forbidden in `create_fields`. Includes `env`: it holds only the execd
 #: access token; workload env is passed per execution.
 MANAGED_CREATE_FIELDS = frozenset(

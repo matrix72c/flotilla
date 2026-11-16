@@ -27,7 +27,7 @@ from flotilla.platform.base import (
     Resources,
 )
 from flotilla.probe import _Run
-from flotilla.probe_checks import device
+from flotilla.probe_checks import device, fuse
 from flotilla.runtime.manager import Manager
 from flotilla.runtime.planning import to_plan
 from flotilla.runtime.types import RunRequest, Task
@@ -77,7 +77,6 @@ def test_kvm_and_tun_are_normalized(devices: list[object]) -> None:
     ("devices", "path"),
     [
         (["/dev/sda"], "services.main.devices[0]"),
-        (["/dev/fuse"], "services.main.devices[0]"),
         (["/dev/kvm:/dev/kvm0"], "services.main.devices[0]"),
         (["/dev/kvm:/dev/kvm:r"], "services.main.devices[0]"),
         (["/dev/kvm:/dev/kvm:rwm:x"], "services.main.devices[0]"),
@@ -109,7 +108,7 @@ def test_cap_prefix_is_accepted() -> None:
 
 
 def _device_caps(caps: Capabilities) -> Capabilities:
-    return replace(caps, privileged_runtime=True, devices=frozenset({"kvm", "tun"}))
+    return replace(caps, privileged_runtime=True, devices=frozenset({"fuse", "kvm", "tun"}))
 
 
 def test_scan_requires_device_evidence(caps: Capabilities) -> None:
@@ -148,7 +147,7 @@ def test_manifest_devices_are_sorted_and_known() -> None:
     with pytest.raises(ValidationError, match="sorted"):
         type(unit).model_validate({**data, "devices": ["tun", "kvm"]})
     with pytest.raises(ValidationError):
-        type(unit).model_validate({**data, "devices": ["fuse"]})
+        type(unit).model_validate({**data, "devices": ["sda"]})
 
 
 def test_instance_spec_devices_need_the_privileged_runtime() -> None:
@@ -166,7 +165,7 @@ def test_instance_spec_devices_need_the_privileged_runtime() -> None:
     with pytest.raises(ValueError, match="privileged runtime"):
         replace(spec, privileged=False)
     with pytest.raises(ValueError, match="unknown devices"):
-        replace(spec, devices=frozenset({"fuse"}))  # type: ignore[arg-type]
+        replace(spec, devices=frozenset({"sda"}))  # type: ignore[arg-type]
 
 
 @pytest.mark.asyncio
@@ -213,6 +212,51 @@ SETTINGS = ProbeSettings(
     endpoint="http://os.test",
     evidence_profile="test",
 )
+
+
+def test_fuse_is_normalized_and_needs_the_privileged_runtime() -> None:
+    project = normalize(_service(devices=["/dev/fuse"]))
+    assert not project.rejected, project.findings
+    assert project.services["main"].devices == {"fuse"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tools", "mount", "status"),
+    [(0, 0, "passed"), (0, 1, "failed"), (1, 0, "error")],
+    ids=["mounts", "mount-fails", "tools-missing"],
+)
+async def test_fuse_probe_requests_only_the_fuse_device(
+    platform: FakePlatform, clock: ManualClock, tools: int, mount: int, status: str
+) -> None:
+    """The deployment's extension tables are not consulted: the probe asks for the device itself."""
+    SharedTree(platform)
+    anchor = Anchor(platform, clock, "fuse-test", AnchorSettings(image="anchor"))
+    await clock.run(anchor.start())
+    run = _Run(platform, clock, anchor, SETTINGS, "p1")
+    platform.caps = _device_caps(platform.caps)
+    original = platform.exec_handler
+    specs: dict[str, InstanceSpec] = {}
+    platform.on_create = lambda iid, spec: specs.__setitem__(iid, spec)
+    scripts: list[str] = []
+
+    def execute(iid: str, proc: ProcessSpec) -> ExecResult:
+        if iid == anchor.iid:
+            return original(iid, proc)
+        script = proc.argv[-1]
+        scripts.append(script)
+        return ExecResult(tools if "command -v" in script else mount, b"", b"")
+
+    platform.set_exec_handler(execute)
+    result = await clock.run(fuse(run))
+    assert isinstance(result, Item) and result.scope == "privileged"
+    assert result.status == status
+    (spec,) = specs.values()
+    assert spec.privileged and spec.devices == {"fuse"}
+    # A missing tool is reported before anything is mounted.
+    assert any("fuse-overlayfs -o lowerdir" in script for script in scripts) == (tools == 0)
+    # The instance is deleted on every path, including the two failures.
+    assert not run._created and platform.iids() == [anchor.iid]
 
 
 @pytest.mark.asyncio

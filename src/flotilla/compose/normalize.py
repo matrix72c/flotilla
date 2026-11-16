@@ -216,7 +216,7 @@ def _service(
 
 
 def _devices(value: object, path: str, c: _Collector) -> frozenset[TaskDevice]:
-    """Host device nodes: only `/dev/kvm` and `/dev/net/tun`, at the same path, with full `rwm` access.
+    """Host device nodes: only `/dev/fuse`, `/dev/kvm` and `/dev/net/tun`, at the same path, with `rwm` access.
 
     Accepts short syntax (`src[:dst[:perms]]`) and the long form the official Compose config emits.
     """
