@@ -1,7 +1,7 @@
 """Native Trial I/O contracts with test-only transient role injection.
 
 Native Trial's local-task lifecycle is not a supported remote task entrypoint;
-production enters HarborAttempt. This harness preserves pinned native contracts.
+production enters NativeAttempt. This harness preserves pinned native contracts.
 """
 
 from __future__ import annotations
@@ -77,7 +77,7 @@ async def test_native_harbor_trial(
     compiled = prepared_task(source, cfg, environments=task_environments)
 
     def transient_role(environment: FlotillaEnvironment) -> PreparedEnvironment:
-        return compiled.environment("main" if Path(environment.environment_dir).name == "environment" else "verifier")
+        return compiled["main" if Path(environment.environment_dir).name == "environment" else "verifier"]
 
     monkeypatch.setattr(FlotillaEnvironment, "_prepared_environment", transient_role)
 

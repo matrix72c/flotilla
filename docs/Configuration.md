@@ -192,7 +192,7 @@ Precedence, lowest first: `[resources.default]`, resources declared in the Compo
 
 ### `[prepare]` and `[build]`
 
-Host `flotilla prepare` uses these settings to create immutable native releases. The host requires the optional Harbor importer, fixed Compose and build tools. Native attempts do not use preparation tools or management build settings. The `workspace_*` and `management_*` fields below apply only to the explicit legacy `HarborAttempt` source-task path, not native preparation/consumption.
+Host `flotilla prepare` uses these settings to create immutable native releases. The host requires the optional Harbor importer, fixed Compose and build tools. Native attempts do not use host preparation tools. The `workspace_*` and `management_*` fields configure the launch anchor that reads task metadata, which every client creates; the remaining keys are host-only.
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -215,23 +215,22 @@ Host `flotilla prepare` uses these settings to create immutable native releases.
 | `build.attestations` | `false` | Enable provenance/SBOM attestations; requires `oci_mediatypes=true` |
 | `build.image_replacements` | `{}` | Map of image references to substitutes, e.g. to use an internal mirror |
 
-For the **legacy source-task path only**, a deployment whose management runtime supports Kata and local Docker can opt in without changing the ordinary task runtime:
+The launch anchor that reads task metadata can be sized and placed separately from the ordinary task runtime:
 
 ```toml
 [prepare]
 management_profile = "management"
 management_resources = { cpu = "2", memory = "4Gi" }
-management_env = { DOCKER_HOST = "unix:///var/run/docker.sock" }
 
 [opensandbox.management_extensions]
-runtimeClassName = "kata"
+nodeSelector = { "example.com/pool" = "metadata" }
 ```
 
-These are operator-owned deployment settings, not Compose fields or task runtime parameters. The internal profile is closed (`default` or `management`); selecting it does not grant task privileged permission, and combining management with `privileged=True` is rejected. Ordinary task, probe, bootstrap and GC requests retain their existing extensions and resource allocations. Management resource sizing also works with the default runtime. Management extensions may override global deployment extensions but cannot set Flotilla-managed placement-group or shared-memory keys.
+These are operator-owned deployment settings, not Compose fields or task runtime parameters. The internal profile is closed (`default` or `management`); selecting it does not grant task privileged permission, and combining management with `privileged=True` is rejected. Ordinary task, probe, bootstrap and GC requests retain their existing extensions and resource allocations. Management extensions may override global deployment extensions but cannot set Flotilla-managed placement-group or shared-memory keys.
 
-The management image still comes from `reaper.anchor_image`, and the anchor retains its explicit entrypoint. Verify that the platform starts Docker with that exact image, runtime and entrypoint; merely selecting Kata does not prove daemon readiness. This configuration does not add a daemon-start lifecycle. Keep Docker on a local Unix socket (or an explicitly authenticated remote endpoint), never an unauthenticated TCP listener. Mount credentials explicitly and read-only; do not put them in extensions, environment values or build contexts.
+The management image still comes from `reaper.anchor_image`, and the anchor retains its explicit entrypoint. Metadata and resource inspection run `compose config` only; they need no Docker daemon in the anchor.
 
-Management-only extensions/profile/resources are excluded from the task capability fingerprint because probes do not use them. Task capability reports therefore do **not** validate Kata management builds. Record separate management diagnostics against the exact management image digest, extensions and resources before using local builds.
+Management-only extensions/profile/resources are excluded from the task capability fingerprint because probes do not use them. Record separate management diagnostics against the exact management image digest, extensions and resources when changing them.
 
 ### `runtime_params` and `[agent_overlay]`
 

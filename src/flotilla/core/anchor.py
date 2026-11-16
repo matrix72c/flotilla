@@ -222,25 +222,6 @@ class Anchor:
             await self.mkdir(parent, stage=stage)
         await self._run(("cp", "-a", "--", self._path(src_key, src_root), self._path(dest_key)), stage)
 
-    async def copy_source_tree(self, src_key: str, dest_key: str, *, stage: Stage) -> None:
-        """Copy a dataset directory, never a symlink to another namespace.
-
-        The dataset is operator-published and must remain immutable during a run.
-        Check each source component so cp cannot leave the copy itself as a link
-        back to canonical data. Interior links are validated by the task reader.
-        """
-        parts = src_key.split("/")
-        self._path(src_key)
-        for end in range(1, len(parts) + 1):
-            result = await self._run(
-                ("/.flotilla/bin/busybox", "stat", "-c", "%F", "--", self._path("/".join(parts[:end]))), stage
-            )
-            if result.stdout.strip() != b"directory":
-                raise ValueError("task source and its ancestors must be real directories, not symlinks")
-        if await self.exists(dest_key, stage=stage):
-            raise ValueError("workspace copy destination already exists")
-        await self.copy_tree(src_key, dest_key, stage=stage)
-
     async def copy_contents(self, src_key: str, dest_key: str, *, stage: Stage, src_root: StorageRoot = "work") -> None:
         """Copy directory contents, including dotfiles, into an owned directory."""
         await self.mkdir(dest_key, stage=stage)

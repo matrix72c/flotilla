@@ -112,9 +112,7 @@ def adapter(
         task_env_config=EnvironmentConfig(docker_image="r.io/main:1"),
         network_policy=network_policy,
         deployment=str(config),
-        prepared_environment=compiled.environment("main" if environment == "environment" else "verifier")
-        if prepared
-        else None,
+        prepared_environment=compiled["main" if environment == "environment" else "verifier"] if prepared else None,
         fleet=fleet,
         **kwargs,  # type: ignore[arg-type]
     )
@@ -141,11 +139,11 @@ async def test_harbor_requires_attempt_and_rejects_legacy_prepared_and_force_bui
 ) -> None:
     cfg, platform, _ = deployment
     async with Flotilla(deployment=cfg) as fleet:
-        with pytest.raises(ValueError, match="HarborAttempt"):
+        with pytest.raises(ValueError, match="NativeAttempt"):
             await adapter(tmp_path, cfg, fleet, prepared=False).start()
         with pytest.raises(ValueError, match="force_build is unsupported"):
             await adapter(tmp_path, cfg, fleet).start(force_build=True)
-        with pytest.raises(ValueError, match="legacy prepared JSONL"):
+        with pytest.raises(ValueError, match="prepared JSONL"):
             FlotillaEnvironment(
                 environment_dir=tmp_path / "remote-only",
                 environment_name="task",

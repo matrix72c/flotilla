@@ -124,7 +124,7 @@ class Task(Model):
             if manifest.schema_ != SCHEMA_VERSION:
                 raise ValueError("unsupported nested manifest version")
             PreparedEnvironment(manifest)
-            if manifest.task_files is not None or manifest.task_files_published is not None:
+            if manifest.task_files is not None:
                 raise ValueError("native manifests cannot contain publication paths")
             for unit in manifest.units.values():
                 if not _IMAGE.fullmatch(unit.image):

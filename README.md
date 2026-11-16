@@ -93,7 +93,7 @@ asyncio.run(main())
 
 `NativeAttempt` consumes the bound task definition and assets, creates attempt-private writable state and opens its roles. Hidden tests are staged only for verification. No source-task or builder fallback is permitted. Dataset rows name their release and task and keep order and duplicates. Metadata and capacity inspection use the prepared definitions rather than recompiling source tasks.
 
-Harbor and Voyager share this lifecycle. Harbor remains optional, using a pinned patched build for its source/runtime interfaces. The old source-workspace APIs are legacy interfaces, not the native consumption path.
+Harbor and Voyager share this lifecycle. Harbor remains optional, using a pinned patched build for its source/runtime interfaces.
 
 ## Features
 

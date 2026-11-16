@@ -573,6 +573,4 @@ def _file_paths(manifest: Manifest, prefix: str) -> Manifest:
         )
         for volume in manifest.trial_volumes
     ]
-    return manifest.model_copy(
-        update={"units": units, "trial_volumes": volumes, "task_files": None, "task_files_published": None}
-    )
+    return manifest.model_copy(update={"units": units, "trial_volumes": volumes, "task_files": None})

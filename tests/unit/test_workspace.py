@@ -21,7 +21,7 @@ from flotilla.testing.platform import FakePlatform, ManualClock, SharedTree
 
 def store() -> tuple[WorkspaceStore, Mock]:
     anchor = Mock(launch_id="launch-test")
-    for name in ("copy_source_tree", "remove", "mkdir", "upload", "download", "copy_tree", "copy_contents"):
+    for name in ("remove", "mkdir", "upload", "download", "copy_tree", "copy_contents"):
         setattr(anchor, name, AsyncMock())
     return WorkspaceStore(anchor, config()), anchor
 
@@ -33,31 +33,16 @@ def test_relative_key_rejects_ambiguous_paths(key: str | None) -> None:
 
 
 @pytest.mark.asyncio
-async def test_same_basename_and_repeated_keys_create_independent_attempts() -> None:
-    workspaces, anchor = store()
-    a, b, c = [await workspaces.create(key) for key in ("dataset/one/t", "dataset/two/t", "dataset/one/t")]
-    assert a.task_id == b.task_id == c.task_id == "t"
-    assert len({a.id, b.id, c.id}) == 3
-    for value in (a, b, c):
-        assert value.source_key == f"{value.key}/source/t"
-        anchor.copy_source_tree.assert_any_await(value.task_key, value.source_key, stage="prepare")
-    await workspaces.remove(a.id)
-    assert a.id not in workspaces.records
-    assert workspaces.owned(b.id) and workspaces.owned(c.id)
-    anchor.remove.assert_awaited_once_with(a.key, stage="run")
-
-
-@pytest.mark.asyncio
-async def test_cancelled_copy_settles_before_removing_workspace() -> None:
+async def test_cancelled_create_settles_before_removing_workspace() -> None:
     workspaces, anchor = store()
     started, finish = asyncio.Event(), asyncio.Event()
 
-    async def copy(*args: object, **kwargs: object) -> None:
+    async def make(*args: object, **kwargs: object) -> None:
         started.set()
         await finish.wait()
 
-    anchor.copy_source_tree.side_effect = copy
-    task = asyncio.create_task(workspaces.create("dataset/t"))
+    anchor.mkdir.side_effect = make
+    task = asyncio.create_task(workspaces.create_empty("dataset/t"))
     await started.wait()
     task.cancel()
     await asyncio.sleep(0)
@@ -71,12 +56,12 @@ async def test_cancelled_copy_settles_before_removing_workspace() -> None:
 
 
 @pytest.mark.asyncio
-async def test_copy_failure_preserves_cleanup_failure_for_retry() -> None:
+async def test_create_failure_preserves_cleanup_failure_for_retry() -> None:
     workspaces, anchor = store()
-    anchor.copy_source_tree.side_effect = ValueError("copy failed")
+    anchor.mkdir.side_effect = ValueError("create failed")
     anchor.remove.side_effect = RuntimeError("delete failed")
-    with pytest.raises(ValueError, match="copy failed") as failure:
-        await workspaces.create("dataset/t")
+    with pytest.raises(ValueError, match="create failed") as failure:
+        await workspaces.create_empty("dataset/t")
     assert "delete failed" in str(failure.value.__notes__)
     [wid] = workspaces.records
     with pytest.raises(ValueError, match="released"):
@@ -89,7 +74,7 @@ async def test_copy_failure_preserves_cleanup_failure_for_retry() -> None:
 @pytest.mark.asyncio
 async def test_workspace_removal_waits_for_inflight_operation() -> None:
     workspaces, anchor = store()
-    info = await workspaces.create("dataset/t")
+    info = await workspaces.create_empty("dataset/t")
     started, finish = asyncio.Event(), asyncio.Event()
 
     async def operation(_: WorkspaceInfo) -> None:
@@ -105,24 +90,7 @@ async def test_workspace_removal_waits_for_inflight_operation() -> None:
     await task
     await removal
     with pytest.raises(ValueError):
-        await workspaces.read(info.id, "result.json")
-
-
-@pytest.mark.asyncio
-async def test_copy_and_contents_have_distinct_anchor_contracts() -> None:
-    workspaces, anchor = store()
-    info = await workspaces.create("dataset/t")
-    await workspaces.copy(info.id, "source/t/tests", "private-tests")
-    await workspaces.copy_contents(info.id, "private-tests", "roles/main/tests")
-    anchor.copy_tree.assert_awaited_once_with(
-        info.key + "/source/t/tests", info.key + "/private-tests", stage="prepare"
-    )
-    anchor.copy_contents.assert_awaited_once_with(
-        info.key + "/private-tests", info.key + "/roles/main/tests", stage="prepare"
-    )
-    with pytest.raises(ValueError):
-        await workspaces.write(info.id, "../other", b"x")
-    anchor.upload.assert_not_awaited()
+        workspaces.owned(info.id)
 
 
 @pytest.mark.asyncio
@@ -130,9 +98,9 @@ async def test_store_shutdown_rejects_new_work() -> None:
     workspaces, anchor = store()
     await workspaces.settle()
     with pytest.raises(RuntimeError, match="closing"):
-        await workspaces.create("dataset/t")
+        await workspaces.create_empty("dataset/t")
     assert not workspaces.records
-    anchor.copy_source_tree.assert_not_awaited()
+    anchor.mkdir.assert_not_awaited()
 
 
 def metadata_store(concurrency: int = 4) -> tuple[WorkspaceStore, Mock, list[dict[str, Any]]]:
@@ -178,7 +146,6 @@ async def test_metadata_batches_deduplicate_full_keys_without_attempts_or_copies
     assert all("/launches/launch-test/metadata/" in request["workspace"] for request in requests)
     assert all(result[key]["instruction"] == key for key in keys)
     assert not workspaces.records and not workspaces.jobs
-    anchor.copy_source_tree.assert_not_awaited()
     anchor.copy_tree.assert_not_awaited()
     anchor.copy_contents.assert_not_awaited()
     assert anchor.remove.await_count == 3
@@ -530,7 +497,8 @@ async def test_resource_batches_and_runtime_params(monkeypatch: pytest.MonkeyPat
     assert all(r["runtime_params"] == {"A": "request", "B": "base"} for r in requests)
     assert params == {"A": "request"}
     assert all(call.args[0][-2] == "--describe-task-resources" for call in anchor.execute.await_args_list)
-    anchor.copy_source_tree.assert_not_awaited()
+    anchor.copy_tree.assert_not_awaited()
+    anchor.copy_contents.assert_not_awaited()
     assert anchor.remove.await_count == 3
     monkeypatch.setattr(workspace, "METADATA_REQUEST_BYTES", 600)
     before = len(requests)

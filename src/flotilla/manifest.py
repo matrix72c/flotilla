@@ -109,10 +109,6 @@ class Finding(_Model):
     reason: str
 
 
-class Published(_Model):
-    storage_root: str  # `StorageSettings.root` at publication time
-
-
 class Manifest(_Model):
     schema_: Annotated[int, Field(alias="schema")] = SCHEMA_VERSION
     task: str
@@ -122,7 +118,6 @@ class Manifest(_Model):
     depends_on: dict[str, dict[str, Dependency]] = {}
     trial_volumes: list[TrialVolume] = []
     task_files: str | None = None  # relative to the shared root; None without task files
-    task_files_published: Published | None = None  # written by file publication
     runtime_params: list[RuntimeParam] = []
     external_units: list[str] = []
     findings: list[Finding] = []

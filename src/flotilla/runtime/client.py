@@ -31,7 +31,7 @@ from flotilla.runtime.types import (
 from flotilla.runtime.worker import Worker
 
 if TYPE_CHECKING:
-    from flotilla.runtime.workspace import Workspace
+    pass
 
 
 class Flotilla:
@@ -168,22 +168,10 @@ class Flotilla:
             for key, roles in declared.items()
         }
 
-    async def workspace(self, task_key: str) -> Workspace:
-        """Copy one original Harbor directory into an independent platform-side attempt."""
-        from flotilla.runtime.workspace import Workspace
-
-        await self.start()
-        info = await self._call(
-            lambda manager: manager.workspaces.create(task_key),
-            settle_cancel=True,
-            cancel_result=lambda manager, value: manager.release_workspace(value.id),
-        )
-        return Workspace(self, info)
-
     async def open(self, prepared: PreparedEnvironment, options: OpenOptions | None = None) -> Environment:
-        """Open a transient compiled environment; Harbor callers should use HarborAttempt."""
+        """Open a transient compiled environment; Harbor callers should use NativeAttempt."""
         if not isinstance(prepared, PreparedEnvironment):
-            raise TypeError("open takes a transient PreparedEnvironment; use HarborAttempt for a platform task_key")
+            raise TypeError("open takes a transient PreparedEnvironment; use NativeAttempt for a native release row")
         options = copy.deepcopy(options or OpenOptions())
         admission = options.admission_timeout or self._deployment.limits.admission_timeout
         startup = options.startup_timeout or self._deployment.runtime.startup_timeout_s

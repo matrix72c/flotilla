@@ -320,9 +320,9 @@ async def test_staging_collection_removes_only_old_timestamped_entries(
     now = int(clock.now().timestamp())
     old, fresh = f"a.{now - 90_000}.0123456789ab", f"b.{now - 60}.0123456789ab"
     tree.dirs.update(
-        {"tasks", "tasks/.staging", f"tasks/.staging/{old}", f"tasks/.staging/{fresh}", "tasks/.staging/legacy"}
+        {"share", "share/staging", f"share/staging/{old}", f"share/staging/{fresh}", "share/staging/unnamed"}
     )
     report = await clock.run(gc.collect_staging(24 * 3600))
-    assert report.removed == (f"tasks/.staging/{old}",)
-    assert report.unrecognized == ("tasks/.staging/legacy",)
-    assert f"tasks/.staging/{fresh}" in tree.dirs and "tasks/.staging/legacy" in tree.dirs
+    assert report.removed == (f"share/staging/{old}",)
+    assert report.unrecognized == ("share/staging/unnamed",)
+    assert f"share/staging/{fresh}" in tree.dirs and "share/staging/unnamed" in tree.dirs

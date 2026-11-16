@@ -63,5 +63,5 @@ def test_removed_in_open_preparation_has_migration_errors() -> None:
 
 def test_open_rejects_task_paths(deployment: tuple[FlotillaConfig, FakePlatform, SharedTree]) -> None:
     cfg, _, _ = deployment
-    with pytest.raises(TypeError, match="HarborAttempt"):
+    with pytest.raises(TypeError, match="NativeAttempt"):
         asyncio.run(Flotilla(deployment=cfg).open("tasks/x"))  # type: ignore[arg-type]

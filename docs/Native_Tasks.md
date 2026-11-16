@@ -114,9 +114,8 @@ A new container verifies helpers and tools without network or source/credential 
 ## Migration
 
 - Old task-key/Harbor lists and prepared `env`/`task_dir` rows must be reselected and prepared. They are not interpreted as native releases.
-- Old `flotilla prepare` meant platform warmup. Its library behavior is available only through the explicitly named `legacy_warmup` entry; the new command requires host selected inputs, an output release and a report.
+- Old `flotilla prepare` meant platform warmup. The command now requires host selected inputs, an output release and a report.
 - Old capability evidence must be regenerated for the native execution profile and cleanup requirement.
 - Old jobs stay pinned to their old code and image. Do not rewrite snapshots, running worktrees, registry history or deployment evidence to change product names.
-- Explicit legacy application-build APIs remain separate from native consumption. They do not authorize a consumer fallback.
 
 Installation, fake-platform tests, real platform behavior and GPU training are different verification scopes. Consult the release's recorded acceptance results rather than assuming one proves the others.
