@@ -22,13 +22,13 @@ For production native tasks use `NativeAttempt.create(fleet, bound_task)` from `
 
 The native Anchor requires installed Flotilla and filesystem helpers, not Harbor, Compose, Docker or push credentials. Actual platform acceptance remains separate from package/unit checks.
 
-`OpenOptions` accepts `request_id`, `admission_timeout`, `startup_timeout`, `lifetime`, `runtime_params`, per-service `exec_env` and `resources`, and `disable_internet`. Resource overrides support CPU and memory.
+`OpenOptions` accepts `request_id`, `admission_timeout`, `startup_timeout`, `lifetime`, per-service `exec_env` and `resources`, `disable_internet`, `external_mounts`, `workspace_id` and `workspace_mounts`. Resource overrides support CPU and memory. Compose variables are resolved at preparation, so there is nothing to substitute here.
 
 Each phase of an open has its own budget. Client start (once per client) is bounded by `timeouts.client_start`. Waiting for a `trial_concurrency` / `instance_budget` slot is bounded by `admission_timeout` (default `limits.admission_timeout`) and raises `AdmissionTimeout` with the current counts. `startup_timeout` (default `runtime.startup_timeout_s`) starts at admission and ends when the environment is ready. `lifetime` starts at readiness and cannot exceed `runtime.run_timeout_s`. Runtime parameters are literal substitution values; only explicit network-policy targets are interpreted as network destinations.
 
 ## Platform metadata read recovery
 
-`await fleet.describe_tasks(task_keys)` reads instruction/config metadata from native tasks without creating attempts. `await fleet.describe_task_resources(task_keys, runtime_params=...)` inspects declared resources without building images. The management image must contain the matching workspace helper. Inputs remain immutable throughout a run; metadata reuse does not deduplicate dataset rows or rename task IDs.
+`await fleet.describe_tasks(task_keys)` reads instruction/config metadata from native tasks without creating attempts. `await fleet.describe_task_resources(task_keys, runtime_params=...)` inspects declared resources without building images. The helper runs in the launch anchor built from `reaper.anchor_image`, invoked with `prepare.workspace_command`, so that image must contain the matching Flotilla install. Inputs remain immutable throughout a run; metadata reuse does not deduplicate dataset rows or rename task IDs.
 
 The helper recovers actual `OSError(ESTALE)` in native description and explicit source-path/resource-discovery reads. Each logical read gets at most five attempts, with 0.5, 1, 2 and 4 second delays. No new retry is admitted after 30 seconds for that read, and one metadata request (at most 128 unique keys) shares 15 seconds of added sleep. A failed description rereads and reparses metadata directly, without constructing a filesystem Harbor `Task`; previously successful tasks are not reread. Metadata-only reads do not validate unrelated payload trees. Resource inspection validates the private copy it works on, and enumeration errors there propagate instead of accepting an incomplete tree. No partial metadata batch is published.
 

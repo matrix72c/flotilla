@@ -163,6 +163,9 @@ async def test_harbor_requires_attempt_and_rejects_legacy_prepared_and_force_bui
                 fleet=fleet,
                 prepared="obsolete.jsonl",
             )
+        # Resolved at preparation: accepting these at open would silently do nothing.
+        with pytest.raises(ValueError, match="resolved at preparation"):
+            adapter(tmp_path, cfg, fleet, runtime_params={"SEED": "2"})
     assert not await platform.list({labels.ROLE: labels.ROLE_UNIT})
 
 

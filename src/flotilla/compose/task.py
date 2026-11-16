@@ -12,7 +12,7 @@ from typing import Any
 from flotilla.compose.adapter import ComposeConfigAdapter
 from flotilla.compose.model import MAIN, Finding, Project
 from flotilla.compose.paths import confined
-from flotilla.compose.resources import cpu, memory
+from flotilla.resources import cpu, memory
 
 TASK_FILE = "task.toml"
 ENV_DIR = "environment"

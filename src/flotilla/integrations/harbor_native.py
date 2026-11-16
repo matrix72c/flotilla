@@ -217,6 +217,8 @@ class NativeFlotillaRuntime:
             )
         if config.verifier.env:
             raise ValueError("verifier.env is baked into the release; prepare a new release to change it")
+        if runtime_params:
+            raise ValueError("runtime parameters are resolved at preparation; set them on the dataset row")
         if not config.environment.delete:
             raise ValueError("native Flotilla always releases trial resources; environment.delete must be true")
         self.bound = source.bound_for(task)
@@ -229,7 +231,6 @@ class NativeFlotillaRuntime:
         self.run_timeout = deployment_config.runtime.run_timeout_s if run_timeout is None else run_timeout
         if not 0 < self.run_timeout <= deployment_config.runtime.run_timeout_s:
             raise ValueError("run_timeout must be positive and within the deployment lifetime")
-        self.runtime_params = dict(runtime_params or {})
         self.fleet = Flotilla(deployment=deployment_config)
         self.attempt: NativeAttempt | None = None
         self._main: NativeFlotillaEnvironment | None = None
@@ -258,7 +259,6 @@ class NativeFlotillaRuntime:
                     request_id=environment.session_id,
                     lifetime=self.run_timeout,
                     resources={"main": environment._resource_overrides} if environment._resource_overrides else {},
-                    runtime_params=self.runtime_params,
                     disable_internet=environment._network_policy.network_mode == "no-network",
                 ),
             )

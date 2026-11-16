@@ -164,7 +164,7 @@ class Manager:
             raise invalid("workspace mounts require an owned workspace")
         if set(request.exec_env) - set(manifest.units):
             raise invalid("exec_env contains unknown services")
-        cfg = self.cfg.model_copy(update={"runtime_params": {**self.cfg.runtime_params, **request.runtime_params}})
+        cfg = self.cfg
         cfg.check_against(self.capability_report)
         resources = cfg.resources.for_manifest(manifest)
         if set(request.resources) - set(manifest.units):

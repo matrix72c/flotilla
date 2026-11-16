@@ -182,7 +182,6 @@ class Flotilla:
         request = RunRequest(
             prepared,
             options.request_id or eid,
-            runtime_params=options.runtime_params,
             exec_env=options.exec_env,
             disable_internet=options.disable_internet,
             resources=options.resources,

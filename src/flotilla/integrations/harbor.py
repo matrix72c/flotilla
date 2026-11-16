@@ -66,6 +66,8 @@ class FlotillaEnvironment(BaseEnvironment):  # type: ignore[misc]
     ) -> None:
         if prepared is not None:
             raise ValueError("prepared JSONL is unsupported; use NativeAttempt with a native release binding")
+        if runtime_params:
+            raise ValueError("runtime parameters are resolved at preparation; set them on the dataset row")
         self._transient_prepared = prepared_environment
         self._cfg = fleet.config if fleet is not None else FlotillaConfig.load(deployment)
         self._cfg.check_against(self._cfg.load_report())
@@ -77,7 +79,6 @@ class FlotillaEnvironment(BaseEnvironment):  # type: ignore[misc]
         self._stopped: set[str] = set()
         self._stopping: dict[str, asyncio.Task[None]] = {}
         self._run_timeout = run_timeout
-        self._runtime_params = dict(runtime_params or {})
         self._resource_overrides = {}
         if override_cpus is not None:
             self._resource_overrides["cpu"] = str(override_cpus)
@@ -175,7 +176,6 @@ class FlotillaEnvironment(BaseEnvironment):  # type: ignore[misc]
                     request_id=self.session_id,
                     lifetime=self._run_timeout,
                     resources={"main": self._resource_overrides} if self._resource_overrides else {},
-                    runtime_params=self._runtime_params,
                     disable_internet=mode == "no-network",
                 ),
             )

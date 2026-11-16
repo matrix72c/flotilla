@@ -8,7 +8,7 @@ import shlex
 from collections.abc import Mapping
 from typing import Any, cast
 
-from flotilla.compose import resources as resource_values
+from flotilla import resources as resource_values
 from flotilla.compose.model import (
     MAIN,
     Build,
@@ -24,9 +24,9 @@ from flotilla.compose.model import (
     VolumeMount,
 )
 from flotilla.compose.paths import valid_name
-from flotilla.compose.units import parse_duration
 from flotilla.platform.base import TASK_DEVICE_PATHS, TaskDevice, TmpfsMount
 from flotilla.platform.filesystem import memory_bytes, validate_mounts
+from flotilla.units import parse_duration
 
 DEFAULT_NETWORK = "default"
 KEEPALIVE = ("sh", "-c", "sleep infinity")

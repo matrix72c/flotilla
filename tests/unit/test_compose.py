@@ -8,8 +8,8 @@ import pytest
 
 from flotilla.compose.model import Dependency, Healthcheck, NetworkAttachment, VolumeMount
 from flotilla.compose.normalize import KEEPALIVE, normalize
-from flotilla.compose.units import parse_duration
 from flotilla.platform.base import TmpfsMount
+from flotilla.units import parse_duration
 
 # ───────────────────────────── Interpolation ─────────────────────────────
 
