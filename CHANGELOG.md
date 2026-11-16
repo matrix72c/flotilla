@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Removed
+
+- **Breaking: the legacy Harbor source-task API.** `HarborAttempt`, `HarborVerification`, the `prepare/runner.py` and `share/publish.py` entry points, the compile/restore half of `flotilla.integrations.workspace`, and the `WorkspaceStore` file operations only they used. `flotilla.integrations.workspace` keeps its metadata/describe path. Task executions enter through `NativeAttempt` with a native release binding.
+- **Breaking: the in-repo Compose parser.** `compose_adapter` is now a required argument to `load_task` and `load_environment`, so every project is resolved by the pinned `docker compose config`. `compose/interpolate.py`, `runtime/values.py`, `RuntimeExpression`, the `variables`/`resolved` parameters of `normalize()`, `harbor_overlay`, `HARBOR_VARIABLES`, and the `compose/resources.py` and `compose/units.py` re-export shims are gone. Fixtures that need offline resolution use `flotilla.testing.compose.OfflineComposeAdapter`.
+- **Breaking: runtime parameters.** `OpenOptions.runtime_params`, `RunRequest.runtime_params` and `Manifest.runtime_params`. Every reference is resolved at preparation. Manifest schema 8 migrates a schema-7 manifest with an empty list and rejects one with a populated list, which must have its release prepared again.
+- Unreachable symbols: the `Backend.profile` / `FlotillaConfig.filesystem_profile` hook chain, `compile_host_volumes` and `compile_pvc_volumes` (use `StorageSettings.compile`), `derive_dockerfile`, and `share.release.release_json`.
+
+### Fixed
+
+- An undefined Compose variable is refused again. The in-repo parser rejected it, but `docker compose config` substitutes a blank string and exits 0, and both backstops for the deferred form were unreachable, so a task referencing `${TAG}` with no value baked an empty string into its release. The adapter now reads Compose's own "variable is not set" warning and fails the task; a reference with a default (`${VAR:-x}`) is unaffected.
+- `flotilla inspect` loads through the deployment's pinned Compose tool, so its findings and resources match what preparation computes for the same task. It previously used the in-repo parser and could disagree.
+- `OfflineComposeAdapter` refuses interpolation and `env_file` instead of leaving a `${VAR}` reference to reach `normalize()` as a literal string.
+
 ### Changed
 
 - **Breaking: native release format v2.** A release is a plain directory: `dataset.jsonl` plus `tasks/<task-key>/{task.json,instruction.md,files/,tests/}`. There is no `manifest.json`, no content addressing, no per-file inventory and no `release_id`/`task_digest`. Rows are `{release, task, annotations, parameters}`; `release` names the `[task_releases.<name>]` binding. Version 1 releases must be prepared again.
