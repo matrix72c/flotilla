@@ -110,14 +110,23 @@ class Manifest(_Model):
     @model_validator(mode="before")
     @classmethod
     def _upgrade_v7(cls, data: object) -> object:
-        """Schema 7 carried deferred runtime-parameter expressions. The Compose
-        config adapter now resolves every reference at preparation, so an empty
-        list migrates and a populated one needs the release prepared again."""
+        """Schema 7 carried two fields this version resolves or no longer writes.
+
+        `runtime_params` held deferred expressions; the Compose config adapter now
+        resolves every reference at preparation. `task_files_published` recorded the
+        storage root of the removed file-publication path, which a native release
+        never used. Either is dropped when empty, so a release prepared against
+        schema 7 keeps loading, and refused when populated, because that manifest
+        carries state this version cannot honor.
+        """
         if not isinstance(data, dict) or data.get("schema", data.get("schema_")) != 7:
             return data
         if data.get("runtime_params"):
             raise ValueError("manifest defers runtime parameters; prepare its release again")
-        upgraded = {key: value for key, value in data.items() if key != "runtime_params"}
+        if data.get("task_files_published"):
+            raise ValueError("manifest records published task files; prepare its release again")
+        dropped = ("runtime_params", "task_files_published")
+        upgraded = {key: value for key, value in data.items() if key not in dropped}
         upgraded["schema"] = SCHEMA_VERSION
         upgraded.pop("schema_", None)
         return upgraded

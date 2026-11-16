@@ -188,16 +188,26 @@ def test_manifest_networks_names_and_external_units() -> None:
     assert m.external_units == ["proxy"]  # only proxy is on a non-internal network
 
 
-def test_schema_seven_drops_resolved_runtime_parameters() -> None:
+def test_schema_seven_drops_both_fields_this_version_removed() -> None:
+    """Both keys a schema-7 manifest carries, as a release on shared storage actually holds them.
+
+    Building the fixture from the current model and adding one key back is what let a
+    release prepared against schema 7 fail to load: the other key was still there.
+    """
     data = _manifest(_project({"main": {"image": "m"}})).model_dump(by_alias=True)
     data["schema"] = 7
     data["runtime_params"] = []
+    data["task_files_published"] = None
     manifest = Manifest.load(data)
     assert manifest.schema_ == SCHEMA_VERSION
     assert Manifest.load_json(manifest.dump_json()) == manifest
+
     deferred = {**data, "runtime_params": [{"service": "main", "var": "URL", "expr": "${HOST}", "variables": {}}]}
     with pytest.raises(ValueError, match="prepare its release again"):
         Manifest.load(deferred)
+    published = {**data, "task_files_published": {"storage_root": "host:/mnt/shared"}}
+    with pytest.raises(ValueError, match="prepare its release again"):
+        Manifest.load(published)
 
 
 def test_manifest_json_roundtrip_and_strictness() -> None:
