@@ -171,6 +171,27 @@ def test_network_definitions(network: dict[str, Any], path: str | None, kind: st
         assert any(f.path.startswith(f"networks.n.{path}") and f.kind == kind for f in p.findings), p.findings
 
 
+def test_top_level_extension_fields_are_recorded_not_rejected() -> None:
+    """Anchors are resolved by the config adapter, so a surviving `x-` key carries nothing to act on."""
+    project = normalize(
+        {
+            "services": {"main": {"image": "a"}},
+            "x-common": {"image": "a", "restart": "no"},
+            "x-harbor-bridge": "v1",
+        }
+    )
+    assert not project.rejected, project.findings
+    assert sorted((f.path, f.kind) for f in project.findings) == [
+        ("x-common", "equivalent"),
+        ("x-harbor-bridge", "equivalent"),
+    ]
+
+
+def test_unknown_top_level_fields_are_still_rejected() -> None:
+    project = normalize({"services": {"main": {"image": "a"}}, "include": ["other.yaml"]})
+    assert [(f.path, f.kind) for f in project.findings] == [("include", "reject")]
+
+
 def test_equivalent_fields_are_recorded() -> None:
     p = _norm(
         {

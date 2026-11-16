@@ -24,7 +24,7 @@ A configuration contains exactly one backend table: `[opensandbox]` for the buil
 | `capabilities` | `"capabilities.json"` | Path to the capability report written by `flotilla probe` |
 | `filesystem_protocol` | `"upstream"` | Lifecycle filesystem mapping: `"upstream"` omits extension fields; `"sandbox-system-v1"` enables the internal wire format, subject to matching probe evidence |
 | `extensions` | `{}` | Extra `extensions` sent with every create request |
-| `privileged_extensions` | `{}` | Extra `extensions` sent only for privileged services, including services declaring `/dev/kvm` or `/dev/net/tun`. The device keys `kvm` and `tun` are written per instance and cannot be set in any extensions table |
+| `privileged_extensions` | `{}` | Extra `extensions` sent only for privileged services, including services declaring `/dev/fuse`, `/dev/kvm` or `/dev/net/tun`. The device keys `fuse`, `kvm` and `tun` are written per instance and cannot be set in any extensions table |
 | `management_extensions` | `{}` | Overrides of `extensions` sent only by workspace anchors explicitly selecting `prepare.management_profile = "management"`; never merged with `privileged_extensions` |
 | `create_fields` | `{}` | Extra top-level create-request fields. Fields managed by Flotilla (`image`, `entrypoint`, `metadata`, `timeout`, `resourceLimits`, `resourceRequests`, `volumes`, `networkPolicy`, `extensions`, `env`, `readOnlyRootFilesystem`, `tmpfsMounts`) are rejected |
 | `group_extension` | unset | Extension key used to place all sandboxes of one environment in one scheduling group. Set only if the deployment implements it |

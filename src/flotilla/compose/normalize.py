@@ -41,16 +41,29 @@ _EQUIVALENT = {
     "stop_grace_period": "recorded only; sandboxes are deleted, not stopped",
     "pull_policy": "recorded only; images are pinned by digest at preparation",
 }
-# Rejected service fields (including platform capability gaps).
+# Rejected service fields. A reason naming the sandbox API describes its request surface:
+# each sandbox is created from one image with cpu/memory, volumes, ports, tmpfs, a network
+# policy and a fixed set of extension keys. Those fields have no counterpart there, so the
+# task cannot be honored rather than merely being unimplemented here.
 _REJECT = {
-    "group_add": "requires supplementary_groups; not supported yet",
-    "cap_drop": "requires per-command capability control; not supported yet",
-    "security_opt": "requires per-command capability control; not supported yet",
-    "ulimits": "requires per-command rlimit; not supported yet",
+    "group_add": "the sandbox API exposes no supplementary groups",
+    "cap_drop": "the sandbox API exposes no capability control, and dropping is what the task relies on: "
+    "ignoring it would let an exploit that should fail succeed and grade as solved",
+    "security_opt": "the sandbox API exposes no seccomp, apparmor or no-new-privileges selection",
+    "ulimits": "the sandbox API exposes no per-process rlimits",
+    "pids_limit": "the sandbox API exposes no process-count limit",
+    "sysctls": "the sandbox API exposes no sysctl settings",
+    "extra_hosts": "the sandbox network policy can stop a name from resolving but cannot map one to an address",
+    "dns": "the sandbox API exposes no resolver configuration; cluster DNS is fixed and always reachable",
+    "dns_search": "the sandbox API exposes no resolver configuration",
+    "dns_opt": "the sandbox API exposes no resolver configuration",
+    "platform": "preparation pins every image by digest, which fixes its platform",
+    "memswap_limit": "the sandbox API takes cpu and memory only; swap is not separately accountable",
+    "cgroup": "the sandbox owns its own cgroup placement",
     "tty": "requires a pty; not supported yet",
     "stdin_open": "requires a pty; not supported yet",
-    "pid": "pid sharing requires multi-container instances; not supported yet",
-    "ipc": "ipc sharing requires multi-container instances; not supported yet",
+    "pid": "pid sharing needs two containers in one sandbox; a sandbox runs exactly one",
+    "ipc": "ipc sharing needs two containers in one sandbox; a sandbox runs exactly one",
     "userns_mode": "not meaningful in an isolated sandbox",
     "runtime": "choosing a container runtime is not supported",
     "volumes_from": "not implemented yet",
@@ -58,9 +71,7 @@ _REJECT = {
     "profiles": "not implemented yet (not seen in task data)",
     "secrets": "not implemented yet (not seen in task data)",
     "configs": "not implemented yet (not seen in task data)",
-    "sysctls": "not implemented yet (not seen in task data)",
     "links": "not implemented yet (not seen in task data)",
-    "extra_hosts": "not implemented yet (not seen in task data)",
     "domainname": "not implemented yet (not seen in task data)",
     "scale": "replicas not implemented yet (not seen in task data)",
 }
@@ -102,7 +113,12 @@ def normalize(compose: Mapping[str, Any]) -> Project:
     """
     c = _Collector()
     for key in compose:
-        if key not in ("services", "networks", "volumes", "name", "version"):
+        if key.startswith("x-"):
+            # The config adapter resolves anchors before this point, so a surviving
+            # extension field is leftover metadata. Compose strips the service-,
+            # network- and volume-level ones, which is why only the top level needs this.
+            c.equivalent(key, "extension field; recorded only, nothing here reads it")
+        elif key not in ("services", "networks", "volumes", "name", "version"):
             c.reject(key, "unsupported top-level field")
     raw_services = compose.get("services")
     if not isinstance(raw_services, dict) or not raw_services:
@@ -200,7 +216,7 @@ def _service(
 
 
 def _devices(value: object, path: str, c: _Collector) -> frozenset[TaskDevice]:
-    """Host device nodes: only `/dev/kvm` and `/dev/net/tun`, at the same path, with full `rwm` access.
+    """Host device nodes: only `/dev/fuse`, `/dev/kvm` and `/dev/net/tun`, at the same path, with `rwm` access.
 
     Accepts short syntax (`src[:dst[:perms]]`) and the long form the official Compose config emits.
     """
@@ -451,7 +467,7 @@ def _service_networks(raw: Mapping[str, Any], path: str, c: _Collector) -> dict[
         if mode == "none":
             return {}
         reason = (
-            "requires multi-container instances; not supported yet"
+            "sharing a network namespace needs two containers in one sandbox; a sandbox runs exactly one"
             if str(mode).startswith(("service:", "container:"))
             else "not meaningful in an isolated sandbox"
         )
