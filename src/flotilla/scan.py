@@ -14,8 +14,6 @@ from flotilla.compose.paths import confined
 from flotilla.compose.task import HarborTask
 from flotilla.platform.base import RESERVED_MOUNTS, Capabilities, overlaps
 
-SHARE_MOUNT = "/.flotilla"
-
 Status = Literal["accepted", "rejected"]
 
 

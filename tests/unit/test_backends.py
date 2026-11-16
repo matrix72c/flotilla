@@ -137,16 +137,6 @@ def test_unselected_backend_tables_are_rejected(registered: FakeBackend) -> None
         FlotillaConfig.from_mapping(builtin)
 
 
-def test_default_profile_tracks_backend_specific_settings(registered: FakeBackend) -> None:
-    base = FlotillaConfig.from_mapping(fake_data(region="cn-sh"))
-    retiered = FlotillaConfig.from_mapping(fake_data(region="cn-sh", tier="gpu"))
-    data = fake_data(region="cn-sh")
-    data["backends"]["fake"]["endpoint"] = "http://other.test"
-    assert base.filesystem_profile() != retiered.filesystem_profile()
-    # Common fields are checked separately (endpoint against the report), not through the profile.
-    assert base.filesystem_profile() == FlotillaConfig.from_mapping(data).filesystem_profile()
-
-
 def test_runtime_builds_the_selected_backend(
     registered: FakeBackend, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

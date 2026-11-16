@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 import shlex
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
@@ -107,29 +106,3 @@ class Builder(Protocol):
     """BuildKit builder. Builds and pushes, returning the pushed manifest digest (`sha256:...`)."""
 
     def build(self, request: BuildRequest) -> str: ...
-
-
-def derive_dockerfile(
-    base: str,
-    *,
-    directories: Sequence[str] = (),
-    user: str = "0:0",
-) -> str:
-    """Prepare empty mount-point directories as root; never bake mounted data into an image."""
-    if not re.fullmatch(r"[A-Za-z0-9_.-]+(?::[A-Za-z0-9_.-]+)?", user):
-        raise ImageError(f"invalid USER for derived image: {user!r}")
-    # File preparation needs root, but the final USER must be restored; other config is inherited via FROM.
-    # An explicit gid avoids BuildKit failing to look up uid 0's group on minimal images without /etc/passwd.
-    lines = [f"FROM {base}", "USER 0:0"]
-    for target in directories:
-        # Reject symlink components: the mounted directory must be the declared path,
-        # not an alias of a protected location such as /run.
-        parts = target.strip("/").split("/")
-        checks = " && ".join(f"test ! -L {shlex.quote('/' + '/'.join(parts[:i]))}" for i in range(1, len(parts) + 1))
-        lines.append(_run(f"{checks} && mkdir -p {shlex.quote(target)}"))
-    lines.append(f"USER {user}")
-    return "\n".join(lines) + "\n"
-
-
-def _run(script: str) -> str:
-    return f"RUN [{json.dumps('/bin/sh')}, {json.dumps('-c')}, {json.dumps(script)}]"

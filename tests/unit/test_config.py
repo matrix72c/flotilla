@@ -389,7 +389,6 @@ def test_management_settings_roundtrip_without_changing_task_evidence(tmp_path: 
         probe=probe,
     )
     assert cfg.evidence_profile() == config().evidence_profile()
-    assert cfg.filesystem_profile() == config().filesystem_profile()
     assert cfg.probe_settings() == config(probe=probe).probe_settings()
     assert cfg.platform_capabilities(report()) == config().platform_capabilities(report())
     restored = FlotillaConfig.from_mapping(cfg.to_mapping(), base_dir=tmp_path)

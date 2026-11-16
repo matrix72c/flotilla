@@ -119,17 +119,13 @@ def release_entries(root: Path) -> list[tuple[str, os.stat_result]]:
     return sorted(out, key=lambda item: item[0])
 
 
-def release_json(release: str, root: Path, components: Mapping[str, str]) -> tuple[bytes, str]:
+def _release_json(
+    release: str, root: Path, components: Mapping[str, str], entries: Sequence[tuple[str, os.stat_result]]
+) -> tuple[bytes, str]:
     """Content of `RELEASE.json` and its own sha256 (the latter is pinned in the deployment config).
 
     Serialization fixes key order, indentation and trailing newline so identical content yields the same digest.
     """
-    return _release_json(release, root, components, release_entries(root))
-
-
-def _release_json(
-    release: str, root: Path, components: Mapping[str, str], entries: Sequence[tuple[str, os.stat_result]]
-) -> tuple[bytes, str]:
     files: dict[str, object] = {}
     for rel, info in entries:
         files[rel] = {

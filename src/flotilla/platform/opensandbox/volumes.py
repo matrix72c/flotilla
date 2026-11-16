@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import posixpath
 import re
-from collections.abc import Sequence
 from typing import Any
 
 from flotilla.platform.base import SharedVolume
@@ -45,14 +44,6 @@ def check_root_subpath(root_subpath: str) -> None:
         raise ValueError(f"storage.root_subpath is not a valid relative path: {root_subpath!r}") from None
 
 
-def compile_host_volumes(
-    volumes: Sequence[SharedVolume], host_path: str, root_subpath: str = ""
-) -> list[dict[str, Any]]:
-    check_host_path(host_path)
-    check_root_subpath(root_subpath)
-    return [host_entry(i, vol, host_path, root_subpath) for i, vol in enumerate(volumes)]
-
-
 def host_entry(i: int, vol: SharedVolume, host_path: str, root_subpath: str = "") -> dict[str, Any]:
     return _entry(i, vol, {"host": {"path": host_path}}, _under(root_subpath, vol.key))
 
@@ -60,12 +51,6 @@ def host_entry(i: int, vol: SharedVolume, host_path: str, root_subpath: str = ""
 def check_pvc(claim_name: str, root_subpath: str) -> None:
     check_claim_name(claim_name)
     check_root_subpath(root_subpath)
-
-
-def compile_pvc_volumes(volumes: Sequence[SharedVolume], claim_name: str, root_subpath: str) -> list[dict[str, Any]]:
-    """`createIfNotExists` is always false: a mistyped claim fails creation instead of mounting a new empty volume."""
-    check_pvc(claim_name, root_subpath)
-    return [pvc_entry(i, vol, claim_name, root_subpath) for i, vol in enumerate(volumes)]
 
 
 def pvc_entry(i: int, vol: SharedVolume, claim_name: str, root_subpath: str) -> dict[str, Any]:

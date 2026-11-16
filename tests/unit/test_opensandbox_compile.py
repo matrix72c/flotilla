@@ -16,7 +16,6 @@ from flotilla.platform.base import ErrorCategory, ExternalPolicy, FlotillaError,
 from flotilla.platform.opensandbox.http import Http, RetryPolicy, error_fields, map_status
 from flotilla.platform.opensandbox.network import NetworkSettings, compile_policy
 from flotilla.platform.opensandbox.storage import StorageSettings, compile_volumes
-from flotilla.platform.opensandbox.volumes import compile_host_volumes, compile_pvc_volumes
 from flotilla.testing.platform import ManualClock
 
 NET = NetworkSettings(sandbox_cidrs=("10.0.0.0/16",), platform_cidrs=("192.168.0.0/24", "169.254.169.254/32"))
@@ -146,7 +145,7 @@ VOLS = [
 
 def test_host_volumes_compile_in_order() -> None:
     host = {"path": "/mnt/shared"}
-    assert compile_host_volumes(VOLS, "/mnt/shared") == [
+    assert StorageSettings(host_path="/mnt/shared").compile(VOLS) == [
         {"name": "v0", "host": host, "mountPath": "/.flotilla", "readOnly": True, "subPath": "share/releases/r1"},
         {"name": "v1", "host": host, "mountPath": "/srv", "readOnly": False, "subPath": "launches/L/t/static"},
         {"name": "v2", "host": host, "mountPath": "/flotilla-root", "readOnly": False},
@@ -157,7 +156,8 @@ def test_pvc_volumes_prefix_root_subpath() -> None:
     # One volume per reference with unique names; upstream merges the same claim into one pod volume, and
     # readOnly applies per mount.
     pvc = {"claimName": "shared-root", "createIfNotExists": False}
-    assert compile_pvc_volumes(VOLS, "shared-root", "opt/flotilla") == [
+    settings = StorageSettings(volumes="pvc", claim_name="shared-root", root_subpath="opt/flotilla")
+    assert settings.compile(VOLS) == [
         {
             "name": "v0",
             "pvc": pvc,
@@ -178,40 +178,42 @@ def test_pvc_volumes_prefix_root_subpath() -> None:
 
 
 def test_pvc_volumes_at_claim_root() -> None:
-    out = compile_pvc_volumes(VOLS, "shared-root", "")
+    out = StorageSettings(volumes="pvc", claim_name="shared-root").compile(VOLS)
     assert [v.get("subPath") for v in out] == ["share/releases/r1", "launches/L/t/static", None]
 
 
 @pytest.mark.parametrize(
-    ("vol", "host"),
+    "vol",
     [
-        (SharedVolume(key="a/../b", mount_path="/x", read_only=True), "/mnt"),
-        (SharedVolume(key="a", mount_path="rel", read_only=True), "/mnt"),
-        (SharedVolume(key="a", mount_path="/x", read_only=True), ""),
-        (SharedVolume(key="a", mount_path="/x", read_only=True), " @user"),
-        (SharedVolume(key="a", mount_path="/x", read_only=True), "@user\n"),
+        SharedVolume(key="a/../b", mount_path="/x", read_only=True),
+        SharedVolume(key="a", mount_path="rel", read_only=True),
     ],
 )
-def test_host_volumes_reject_bad_paths(vol: SharedVolume, host: str) -> None:
+@pytest.mark.parametrize(
+    "settings",
+    [StorageSettings(host_path="/mnt"), StorageSettings(volumes="pvc", claim_name="c")],
+    ids=["host", "pvc"],
+)
+def test_volume_keys_and_mount_paths_are_checked_per_entry(settings: StorageSettings, vol: SharedVolume) -> None:
     with pytest.raises(ValueError):
-        compile_host_volumes([vol], host)
+        settings.compile([vol])
 
 
 @pytest.mark.parametrize(
-    ("vol", "claim", "root"),
+    "kwargs",
     [
-        (SharedVolume(key="a/../b", mount_path="/x", read_only=True), "c", ""),
-        (SharedVolume(key="a", mount_path="rel", read_only=True), "c", ""),
-        (SharedVolume(key="a", mount_path="/x", read_only=True), "Bad_Claim", ""),
-        (SharedVolume(key="a", mount_path="/x", read_only=True), "", ""),
-        (SharedVolume(key="a", mount_path="/x", read_only=True), "c", "/abs"),
-        (SharedVolume(key="a", mount_path="/x", read_only=True), "c", "opt/../x"),
-        (SharedVolume(key="a", mount_path="/x", read_only=True), "c", "opt/"),
+        {"host_path": " @user"},
+        {"host_path": "@user\n"},
+        {"volumes": "pvc", "claim_name": "Bad_Claim"},
+        {"volumes": "pvc", "claim_name": ""},
+        {"volumes": "pvc", "claim_name": "c", "root_subpath": "/abs"},
+        {"volumes": "pvc", "claim_name": "c", "root_subpath": "opt/../x"},
+        {"volumes": "pvc", "claim_name": "c", "root_subpath": "opt/"},
     ],
 )
-def test_pvc_volumes_reject_bad_paths(vol: SharedVolume, claim: str, root: str) -> None:
+def test_storage_roots_are_checked_at_construction(kwargs: dict[str, str]) -> None:
     with pytest.raises(ValueError):
-        compile_pvc_volumes([vol], claim, root)
+        StorageSettings(**kwargs)  # type: ignore[arg-type]
 
 
 # ───────────────────────────── Storage settings (section 6) ─────────────────────────────
