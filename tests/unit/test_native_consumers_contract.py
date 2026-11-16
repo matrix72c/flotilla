@@ -15,7 +15,7 @@ from tests.contract.native_consumers import fixture_files
 def test_compose_fixture_overrides_image_entrypoint() -> None:
     files = fixture_files("compose", "registry.example/neutral@sha256:" + "a" * 64)
     document = json.loads(files["environment/docker-compose.yaml"])
-    project = normalize(document, {})
+    project = normalize(document)
     command = synthesize_command(
         project.services["db"], ImageMeta(entrypoint=("/.flotilla/bin/busybox", "sleep", "2147483647"))
     )

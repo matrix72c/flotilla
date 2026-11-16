@@ -11,7 +11,6 @@ import pytest
 from flotilla.build.driver import build_task
 from flotilla.compose.layout import classify
 from flotilla.compose.normalize import normalize
-from flotilla.compose.task import load_task
 from flotilla.config import FlotillaConfig
 from flotilla.manifest import SCHEMA_VERSION, Manifest
 from flotilla.platform.base import Capabilities, Resources, TmpfsMount
@@ -20,6 +19,7 @@ from flotilla.platform.opensandbox.filesystem import INTERNAL_LIMITS, parse_effe
 from flotilla.runtime.planning import _resolve_tmpfs, to_plan
 from flotilla.scan import scan
 from flotilla.testing.build import DIGEST, FakeBuilder, FakeExport, _ctx, _task
+from flotilla.testing.compose import offline_task as load_task
 from flotilla.testing.config import config_data
 from flotilla.testing.reports import ok, report
 
@@ -55,7 +55,7 @@ def test_compose_filesystem_fields_roundtrip_to_runtime(tmp_path: Path) -> None:
     outcome = build_task(task, tmp_path / "out", ctx)
     assert outcome.manifest_path, outcome.reason
     manifest = Manifest.load_json(outcome.manifest_path.read_bytes())
-    unit = to_plan(manifest, runtime_params={}).units["main"]
+    unit = to_plan(manifest).units["main"]
     assert unit.readonly_rootfs
     assert unit.tmpfs_mounts == (
         TmpfsMount("/tmp", 16 * 1024**2, 0o750, 1000, 1001),
@@ -88,12 +88,12 @@ def test_compose_filesystem_fields_roundtrip_to_runtime(tmp_path: Path) -> None:
     ],
 )
 def test_tmpfs_invalid_or_unrepresentable_options_are_rejected(fields: dict[str, Any]) -> None:
-    project = normalize({"services": {"main": {"image": "r.io/app", **fields}}}, {})
+    project = normalize({"services": {"main": {"image": "r.io/app", **fields}}})
     assert project.rejected, project
 
 
 def test_filesystem_admission_and_internal_limits(caps: Capabilities) -> None:
-    project = normalize({"services": {"main": {"image": "r.io/app", "read_only": True, "tmpfs": ["/tmp"]}}}, {})
+    project = normalize({"services": {"main": {"image": "r.io/app", "read_only": True, "tmpfs": ["/tmp"]}}})
     assert scan("fs", project, caps).status == "rejected"
     supported = replace(caps, readonly_rootfs=True, native_tmpfs=True, filesystem_limits=INTERNAL_LIMITS)
     assert scan("fs", project, supported).status == "accepted"
@@ -126,7 +126,7 @@ def test_scan_and_planning_agree_on_unsized_tmpfs_with_shm_size(caps: Capabiliti
     supported = replace(caps, native_tmpfs=True, shm_size=True, filesystem_limits=INTERNAL_LIMITS)
     for shm, status in (("1g", "accepted"), ("1100m", "rejected")):  # unsized /tmp takes 1 GiB of 2 GiB
         raw = {"services": {"main": {"image": "r.io/app", "tmpfs": ["/tmp"], "shm_size": shm, "mem_limit": "2g"}}}
-        project = normalize(raw, {})
+        project = normalize(raw)
         assert scan("fs", project, supported).status == status, shm
         svc = project.services["main"]
         planned = _resolve_tmpfs(svc.tmpfs, Resources(cpu="1", memory="2Gi"))
@@ -142,10 +142,10 @@ def test_readonly_rootfs_promotes_single_writer_mounts_to_real_storage() -> None
         "services": {"main": {"image": "app", "volumes": ["data:/db", "./seed:/work"]}},
         "volumes": {"data": {}},
     }
-    writable = classify(normalize(raw, {}).services)
+    writable = classify(normalize(raw).services)
     assert writable.volumes[0].mode == writable.binds[0].mode == "trial"
     raw["services"]["main"]["read_only"] = True
-    readonly = classify(normalize(raw, {}).services)
+    readonly = classify(normalize(raw).services)
     assert readonly.volumes[0].mode == readonly.binds[0].mode == "trial"
     assert {m.target for m in readonly.mounts["main"]} == {"/db", "/work"}
     assert all(not m.read_only for m in readonly.mounts["main"])

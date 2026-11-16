@@ -15,15 +15,14 @@ from flotilla.build.driver import build_task
 from flotilla.build.files import ExportError, export_task_files
 from flotilla.build.images import ImageError
 from flotilla.build.meta import ImageAccounts, parse_user
-from flotilla.compose.manifest_gen import build_manifest, synthesize_command
+from flotilla.compose.manifest_gen import synthesize_command
 from flotilla.compose.model import ImageMeta, Project, Service, VolumeMount
 from flotilla.compose.normalize import normalize
-from flotilla.compose.task import load_task
 from flotilla.config import ResourceDefaults
 from flotilla.manifest import Manifest, Resources
-from flotilla.runtime.planning import to_plan
 from flotilla.scan import scan
 from flotilla.testing.build import DIGEST, FakeBuilder, FakeExport, _caps, _ctx, _task
+from flotilla.testing.compose import offline_task as load_task
 
 
 def test_volume_name_never_controls_recursive_deletion(tmp_path: Path) -> None:
@@ -38,7 +37,7 @@ def test_volume_name_never_controls_recursive_deletion(tmp_path: Path) -> None:
         project = Project(services, {}, frozenset({name}))
         with pytest.raises(ExportError, match="unsafe volume"):
             export_task_files(project, tmp_path, tmp_path / "files")
-        parsed = normalize({"services": {"main": {"image": "r.io/a"}}, "volumes": {name: {}}}, {})
+        parsed = normalize({"services": {"main": {"image": "r.io/a"}}, "volumes": {name: {}}})
         assert parsed.rejected
         assert sentinel.read_text() == "keep"
 
@@ -76,7 +75,7 @@ def test_sibling_prefix_symlink_is_rejected_before_build(tmp_path: Path, kind: s
         if kind == "build"
         else {"image": "r.io/a", "volumes": [{"type": "bind", "source": "./escape", "target": "/data"}]}
     )
-    result = scan("t", normalize({"services": {"main": service}}, {}), _caps(), env_dir=str(env))
+    result = scan("t", normalize({"services": {"main": service}}), _caps(), env_dir=str(env))
     assert result.status == "rejected"
     assert any("escapes" in f.reason for f in result.findings)
 
@@ -88,29 +87,8 @@ def test_string_command_and_explicit_empty_preserve_entrypoint() -> None:
         ("", ("/app/server",)),
         (None, ("/app/server", "--old")),
     ]:
-        p = normalize({"services": {"main": {"image": "r.io/a", "command": value}}}, {})
+        p = normalize({"services": {"main": {"image": "r.io/a", "command": value}}})
         assert synthesize_command(p.services["main"], meta) == expected
-
-
-@pytest.mark.parametrize(
-    "environment",
-    [
-        {"ENDPOINT": "${KNOWN}/$${literal}/${HOST}:${PORT:-80}"},
-        ["ENDPOINT=${KNOWN}/$${literal}/${HOST}:${PORT:-80}"],
-    ],
-)
-def test_runtime_interpolation_preserves_all_references_and_literal_dollars(environment: object) -> None:
-    p = normalize({"services": {"main": {"image": "r.io/a", "environment": environment}}}, {"KNOWN": "build$value"})
-    m = build_manifest(
-        task="t",
-        project=p,
-        images={"main": "r.io/a"},
-        meta={"main": ImageMeta()},
-        resources={"main": Resources(cpu="1", memory="1Gi")},
-    )
-    assert len(m.runtime_params) == 1
-    plan = to_plan(m, runtime_params={"HOST": "db", "PORT": ""})
-    assert plan.units["main"].context.env["ENDPOINT"] == "build$value/${literal}/db:80"
 
 
 @pytest.mark.parametrize(
@@ -126,7 +104,7 @@ def test_runtime_interpolation_preserves_all_references_and_literal_dollars(envi
     ],
 )
 def test_invalid_nested_fields_are_visible_rejections(field: dict[str, object]) -> None:
-    assert normalize({"services": {"main": {"image": "r.io/a", **field}}, "volumes": {"data": {}}}, {}).rejected
+    assert normalize({"services": {"main": {"image": "r.io/a", **field}}, "volumes": {"data": {}}}).rejected
 
 
 def test_tmpfs_is_inspected_not_derived_without_approximating_container_identity(tmp_path: Path) -> None:
@@ -303,25 +281,6 @@ def test_image_user_and_group_have_distinct_namespaces() -> None:
     assert parse_user("123", lookup=accounts.user) == (123, 456)
     assert parse_user("999", lookup=accounts.user) == (999, 0)
     assert parse_user("app:writers", lookup=accounts.user, group_lookup=accounts.group) == (123, 42)
-
-
-def test_env_file_order_explicit_environment_and_literal_dollar(tmp_path: Path) -> None:
-    path = _task(
-        tmp_path,
-        "env-files",
-        compose="""services:
-  main:
-    image: r.io/a
-    env_file: [first.env, second.env]
-    environment: [WINNER=explicit]
-""",
-    )
-    (path / "environment/first.env").write_text("WINNER=first\nLITERAL='${literal}'\n")
-    (path / "environment/second.env").write_text("WINNER=second\nDEFERRED=${TOKEN}\n")
-    project = load_task(path).project
-    assert project.services["main"].environment["WINNER"] == "explicit"
-    assert project.services["main"].environment["LITERAL"] == "${literal}"
-    assert set(project.runtime_params["main"]) == {"DEFERRED"}
 
 
 def test_resource_policy_is_task_scoped() -> None:

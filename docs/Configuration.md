@@ -236,7 +236,7 @@ Management-only extensions/profile/resources are excluded from the task capabili
 
 | Key | Meaning |
 |---|---|
-| `runtime_params` | Deployment-wide values for a task's runtime parameters; `OpenOptions.runtime_params` takes precedence |
+| `runtime_params` | Deployment-wide interpolation values for task Compose files, applied when a task is prepared or inspected; a per-call value for the same name wins |
 | `agent_overlay.env` | Environment variables added to the agent service. `${VAR}` refers to the service's original value, e.g. `PATH = "/opt/tools/bin:${PATH}"` |
 | `agent_overlay.services` | Services that receive the overlay instead of only the main service |
 

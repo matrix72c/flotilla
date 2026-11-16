@@ -19,9 +19,11 @@ from flotilla.compose.task import TaskError
 from flotilla.config import FlotillaConfig
 from flotilla.core import labels
 from flotilla.integrations.harbor import FlotillaEnvironment
-from flotilla.integrations.harbor_source import task_environments
 from flotilla.platform.base import ExecResult, FlotillaError, ProcessSpec
+from flotilla.prepare import inspect as inspect_module
 from flotilla.testing.build import prepared_task
+from flotilla.testing.compose import OfflineComposeAdapter
+from flotilla.testing.compose import offline_environments as task_environments
 from flotilla.testing.platform import FakePlatform, SharedTree
 from flotilla.testing.reports import report
 from flotilla.testing.runtime import deployment as runtime_deployment
@@ -29,7 +31,10 @@ from flotilla.testing.runtime import deployment as runtime_deployment
 deployment = runtime_deployment
 
 
-def test_scan_checks_verifier_context_and_continues_after_invalid_harbor_input(tmp_path: Path) -> None:
+def test_scan_checks_verifier_context_and_continues_after_invalid_harbor_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(inspect_module, "ComposeConfigAdapter", OfflineComposeAdapter)
     tasks = tmp_path / "tasks"
     for name in ("valid", "bad-verifier", "bad-config"):
         root = tasks / name
@@ -82,7 +87,11 @@ def test_harbor_resolves_compose_once_per_role(tmp_path: Path) -> None:
     (path / "tests/docker-compose.yaml").write_text("services:\n  main:\n    image: r.io/verifier:1\n")
     adapter = Mock()
     adapter.load.return_value = load_environment(
-        path, path / "environment", {"docker_image": "r.io/main:1"}, name=path.name
+        path,
+        path / "environment",
+        {"docker_image": "r.io/main:1"},
+        name=path.name,
+        compose_adapter=OfflineComposeAdapter(),
     ).project
     definitions = task_environments(path, compose_adapter=adapter)
     assert len(definitions) == adapter.load.call_count == 2

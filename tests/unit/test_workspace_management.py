@@ -122,5 +122,5 @@ def test_task_data_cannot_select_management_profile(field: str) -> None:
     }
     with pytest.raises(ValidationError, match=field):
         Unit.model_validate(raw)
-    project = normalize({"services": {"main": {"image": "reg/app:tag", field: "management"}}}, {})
+    project = normalize({"services": {"main": {"image": "reg/app:tag", field: "management"}}})
     assert any(f.kind == "reject" and f.path == f"services.main.{field}" for f in project.findings)

@@ -14,7 +14,7 @@ from flotilla.scan import scan
 
 
 def _project(services: dict[str, Any], **top: Any) -> Any:
-    return normalize({"services": {"main": {"image": "m", "command": list(KEEPALIVE)}, **services}, **top}, {})
+    return normalize({"services": {"main": {"image": "m", "command": list(KEEPALIVE)}, **services}, **top})
 
 
 def _rejects(result: Any) -> set[str]:
@@ -137,10 +137,3 @@ def test_undeclared_network_is_reported_without_aborting_scan(caps: Capabilities
     assert result.status == "rejected"
     assert any(f.path == "services.main.networks.missing" for f in result.findings)
     assert result.external_units == ()
-
-
-@pytest.mark.parametrize("udp", [False, True])
-def test_runtime_params_listed(caps: Capabilities, udp: bool) -> None:
-    p = _project({"proxy": {"image": "p", "environment": {"U": "${EXAMPLE_API_UPSTREAM:-x}"}}})
-    # Report the parameter name (provider runtime_params are keyed by it), not the service variable name.
-    assert scan("t", p, replace(caps, link_udp=udp)).runtime_params == ("EXAMPLE_API_UPSTREAM",)

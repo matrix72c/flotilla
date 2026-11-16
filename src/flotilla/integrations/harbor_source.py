@@ -14,7 +14,7 @@ from flotilla.compose.task import HarborTask, TaskError, load_environment
 def task_environments(
     path: Path,
     *,
-    compose_adapter: ComposeConfigAdapter | None = None,
+    compose_adapter: ComposeConfigAdapter,
     compose_files: tuple[Path, ...] | None = None,
     compose_environment: Mapping[str, str] | None = None,
 ) -> list[HarborTask]:
@@ -35,7 +35,7 @@ def task_environments(
 def _task_environments(
     path: Path,
     *,
-    compose_adapter: ComposeConfigAdapter | None,
+    compose_adapter: ComposeConfigAdapter,
     compose_files: tuple[Path, ...] | None,
     compose_environment: Mapping[str, str] | None,
 ) -> list[HarborTask]:

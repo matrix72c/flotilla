@@ -122,8 +122,6 @@ def import_task(
         if scan.status == "rejected":
             raise UnsupportedTask(f"{role}: " + "; ".join(f.reason for f in scan.findings if f.kind == "reject"))
         warnings.extend(f"{role}: {f.path}: {f.reason}" for f in scan.findings if f.kind == "warn")
-        if scan.runtime_params:
-            raise UnsupportedTask(f"{role}: unresolved prepare parameters: {', '.join(scan.runtime_params)}")
         roles[role] = environment
     instruction = strip_canary(confined(path, "instruction.md").read_text(encoding="utf-8"))
     tests = confined(path, "tests")

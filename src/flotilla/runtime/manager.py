@@ -183,7 +183,6 @@ class Manager:
         overlay = cfg.agent_overlay
         plan = to_plan(
             manifest,
-            runtime_params=cfg.runtime_params,
             resources=resources,
             external_mounts=request.external_mounts,
             workspace_mounts=request.workspace_mounts,

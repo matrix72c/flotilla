@@ -9,10 +9,13 @@ from pathlib import Path
 import pytest
 
 from flotilla.cli import main
-from flotilla.compose.task import TaskError, find_tasks, load_task
+from flotilla.compose.task import TaskError, find_tasks
 from flotilla.config import FlotillaConfig
 from flotilla.platform.base import Capabilities
+from flotilla.prepare import inspect as inspect_module
 from flotilla.scan import scan_task
+from flotilla.testing.compose import OfflineComposeAdapter
+from flotilla.testing.compose import offline_task as load_task
 from flotilla.testing.reports import report
 
 COMPOSE = """
@@ -20,9 +23,9 @@ services:
   main:
     build: .
   db:
-    image: postgres:${PG_TAG:-14}
+    image: postgres:14
     environment:
-      PASSWORD: ${DB_PASSWORD}
+      PASSWORD: secret
 """
 
 
@@ -57,34 +60,6 @@ def test_docker_image_from_task_toml(tmp_path: Path) -> None:
     task = load_task(_task(tmp_path, "img", '[environment]\ndocker_image = "reg/x:1"\n'))
     assert task.project.services["main"].image == "reg/x:1"
     assert task.project.services["main"].build is None
-
-
-def test_compose_with_dotenv(tmp_path: Path) -> None:
-    assert load_task(_task(tmp_path, "plain", compose=COMPOSE)).project.services["db"].image == "postgres:14"
-    task = load_task(_task(tmp_path, "multi", compose=COMPOSE, **{".env": "PG_TAG='16'\n# c\nexport X=1\n"}))
-    assert set(task.project.services) == {"main", "db"}
-    assert task.project.services["db"].image == "postgres:16"
-    # Variables the task does not provide become runtime parameters; the build machine environment is not read.
-    assert task.project.runtime_params["db"]["PASSWORD"].expr == "${DB_PASSWORD}"
-
-
-def test_harbor_compose_variables_like_webvuln(tmp_path: Path) -> None:
-    # Harbor injects CONTEXT_DIR (the environment directory) and tasks use nested alternatives for proxy lists.
-    compose = """
-services:
-  main:
-    environment:
-      NO_PROXY: ${NO_PROXY:+${NO_PROXY},}webapp,localhost
-  webapp:
-    build:
-      context: ${CONTEXT_DIR}
-      dockerfile: webapp.Dockerfile
-"""
-    task = load_task(_task(tmp_path, "webvuln", compose=compose, **{".env": "CONTEXT_DIR=/elsewhere\n"}))
-    assert not task.findings and not task.project.findings
-    build = task.project.services["webapp"].build
-    assert build is not None and build.context == "."  # Harbor's value wins over .env, as in Harbor
-    assert task.project.runtime_params["main"]["NO_PROXY"].expr == "${NO_PROXY:+${NO_PROXY},}webapp,localhost"
 
 
 def test_unreadable_task(tmp_path: Path) -> None:
@@ -163,14 +138,16 @@ def test_scan_task_merges_task_and_deployment_findings(tmp_path: Path, caps: Cap
     assert result.status == "rejected"
     assert result.services == ("db", "main")
     line = result.to_json()
-    assert line["runtime_params"] == ["DB_PASSWORD"]
     assert any(f["path"] == "task.toml:environment.network_mode" for f in line["findings"])
 
 
 # ───────────────────────────── CLI ─────────────────────────────
 
 
-def test_scan_cli_writes_one_line_per_task(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_scan_cli_writes_one_line_per_task(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(inspect_module, "ComposeConfigAdapter", OfflineComposeAdapter)
     caps = tmp_path / "caps.json"
     tasks = tmp_path / "tasks"
     _task(tasks, "solo")

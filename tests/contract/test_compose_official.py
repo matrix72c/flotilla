@@ -64,7 +64,6 @@ def test_official_interpolation_env_files_and_literals(tmp_path: Path, monkeypat
         "ABSENT": "absent",
     }
     assert project.services["main"].command == ("printf", "%s", "$HOME", "override")
-    assert not project.runtime_params
 
 
 @pytest.mark.parametrize("count", range(1, 6))
@@ -102,7 +101,6 @@ def test_official_dollar_transport_decoding_preserves_every_source(tmp_path: Pat
     assert main.healthcheck is not None
     assert main.healthcheck.test == ("echo", literal)
     assert main.working_dir == "/tmp/" + literal
-    assert not project.runtime_params
 
 
 def test_official_multifile_reset_override_and_mount_order(tmp_path: Path) -> None:

@@ -6,61 +6,12 @@ from typing import Any
 
 import pytest
 
-from flotilla.compose.interpolate import InterpolationError, interpolate
-from flotilla.compose.model import Dependency, Healthcheck, NetworkAttachment, RuntimeExpression, VolumeMount
-from flotilla.compose.normalize import KEEPALIVE, harbor_overlay, normalize
+from flotilla.compose.model import Dependency, Healthcheck, NetworkAttachment, VolumeMount
+from flotilla.compose.normalize import KEEPALIVE, normalize
 from flotilla.compose.units import parse_duration
 from flotilla.platform.base import TmpfsMount
 
 # ───────────────────────────── Interpolation ─────────────────────────────
-
-
-@pytest.mark.parametrize(
-    ("text", "variables", "expected", "unresolved"),
-    [
-        ("${A}", {"A": "1"}, "1", {}),
-        ("x${A}y", {"A": ""}, "xy", {}),
-        ("${A:-d}", {"A": ""}, "d", {}),  # :- also uses the default for an empty string
-        ("${A-d}", {"A": ""}, "", {}),  # - uses the default only when unset
-        ("${A:-d}", {}, "d", {"A": "d"}),
-        ("${A}", {}, "", {"A": None}),
-        ("${A}/${A:-fallback}", {}, "/fallback", {"A": None}),
-        ("${A:-fallback}/${A}", {}, "fallback/", {"A": None}),
-        ("$${HOSTNAME}", {"HOSTNAME": "h"}, "${HOSTNAME}", {}),  # $$ is a literal $, not interpolated
-        ("a$$b", {}, "a$b", {}),
-        ("${A:-http://127.0.0.1:9}", {}, "http://127.0.0.1:9", {"A": "http://127.0.0.1:9"}),
-        ("${A:+x}", {"A": "1"}, "x", {}),
-        ("${A:+x}", {"A": ""}, "", {}),  # :+ needs a nonempty value
-        ("${A+x}", {"A": ""}, "x", {}),  # + only needs the variable to be set
-        ("${A:+x}", {}, "", {"A": ""}),  # optional: unset yields the empty string
-        ("${P:+${P},}web", {"P": "a"}, "a,web", {}),  # nested reference inside the alternative
-        ("${P:+${P},}web", {}, "web", {"P": ""}),
-        ("${A:+${B}}", {}, "", {"A": ""}),  # an unused alternative records nothing
-        ("${A:-${B:-z}}", {}, "z", {"A": "z", "B": "z"}),
-    ],
-)
-def test_interpolate_strings(text: str, variables: dict[str, str], expected: str, unresolved: dict[str, Any]) -> None:
-    got = interpolate(text, variables)
-    assert got.value == expected
-    assert got.unresolved == unresolved
-
-
-@pytest.mark.parametrize("text", ["$A", "${A:?err}", "${}", "${1A}", "${A", "${A:-${B}", "${A:+$B}"])
-def test_interpolate_rejects_unsupported(text: str) -> None:
-    with pytest.raises(InterpolationError):
-        interpolate(text, {})
-
-
-def test_references_include_unused_alternatives_but_not_escaped_literals() -> None:
-    result = interpolate("${A:+${B}}/$${LITERAL}", {})
-    assert result.value == "/${LITERAL}" and result.unresolved == {"A": ""}
-    assert result.references == {"A", "B"}
-
-
-def test_interpolate_recurses_but_not_into_keys() -> None:
-    got = interpolate({"${K}": ["${A}", {"b": "${B:-2}"}], "n": 3}, {"A": "1"})
-    assert got.value == {"${K}": ["1", {"b": "2"}], "n": 3}
-    assert got.unresolved == {"B": "2"}
 
 
 @pytest.mark.parametrize(
@@ -79,25 +30,12 @@ def test_parse_duration_rejects(value: object) -> None:
 # ───────────────────────────── Harbor keep-alive override ─────────────────────────────
 
 
-def test_overlay_adds_keepalive_main_with_prebuilt_image() -> None:
-    merged = harbor_overlay({"services": {"db": {"image": "postgres"}}}, main_image="reg/x@sha256:1", main_build=False)
-    assert merged["services"]["main"] == {"command": list(KEEPALIVE), "image": "reg/x@sha256:1"}
-    assert merged["services"]["db"] == {"image": "postgres"}
-
-
-def test_task_compose_overrides_overlay() -> None:
-    # Same as `docker compose -f base -f task`: the task's explicit command wins; mappings merge recursively.
-    task = {"services": {"main": {"command": ["bash"], "environment": {"A": "1"}}}}
-    merged = harbor_overlay(task, main_image=None, main_build=True)
-    assert merged["services"]["main"] == {"command": ["bash"], "build": {"context": "."}, "environment": {"A": "1"}}
-
-
 # ───────────────────────────── Normalization ─────────────────────────────
 
 
 def _norm(services: dict[str, Any], **top: Any) -> Any:
     doc = {"services": {"main": {"image": "m", "command": list(KEEPALIVE)}, **services}, **top}
-    return normalize(doc, {})
+    return normalize(doc)
 
 
 def _paths(project: Any, kind: str) -> set[str]:
@@ -194,7 +132,6 @@ def test_volumes_long_syntax() -> None:
         ),
         ({"image": "a", "environment": {"FROM_HOST": None}}, "services.app.environment.FROM_HOST"),
         ({"image": "a", "depends_on": {"ghost": {"condition": "service_started"}}}, "services.app.depends_on.ghost"),
-        ({"image": "a", "command": "${NOPE}"}, "services.app"),  # unset variable outside environment
         # inheriting the image's healthcheck test is not implemented
         ({"image": "a", "healthcheck": {"interval": "5s"}}, "services.app.healthcheck"),
         ({"build": {"context": ".", "ssh": ["default"]}}, "services.app.build.ssh"),
@@ -279,35 +216,22 @@ def test_unsized_tmpfs_keeps_docker_semantics_until_planning() -> None:
     assert p.services["app"].tmpfs == (TmpfsMount("/tmp"), TmpfsMount("/cache", 8 * 1024**2))
 
 
-def test_runtime_params_recorded_from_environment() -> None:
-    p = _norm({"proxy": {"image": "p", "environment": {"UPSTREAM": "${EXAMPLE_API_UPSTREAM:-http://127.0.0.1:9}"}}})
-    assert not p.rejected
-    assert p.runtime_params == {"proxy": {"UPSTREAM": RuntimeExpression("${EXAMPLE_API_UPSTREAM:-http://127.0.0.1:9}")}}
-    assert p.services["proxy"].environment == {"UPSTREAM": "http://127.0.0.1:9"}  # default now, overridden at runtime
-
-
-def test_build_args_proxy_defaults_are_allowed() -> None:
-    p = _norm({"app": {"build": {"context": ".", "args": {"HTTP_PROXY": "${HTTP_PROXY:-}"}}}})
-    assert not p.rejected
-    assert p.services["app"].build is not None and p.services["app"].build.args == {"HTTP_PROXY": ""}
-
-
 def test_missing_main_is_rejected() -> None:
-    p = normalize({"services": {"db": {"image": "pg"}}}, {})
+    p = normalize({"services": {"db": {"image": "pg"}}})
     assert "services" in _paths(p, "reject")
 
 
 def test_unknown_top_level_key_rejected() -> None:
-    p = normalize({"services": {"main": {"image": "m"}}, "secrets": {}}, {})
+    p = normalize({"services": {"main": {"image": "m"}}, "secrets": {}})
     assert "secrets" in _paths(p, "reject")
 
 
 def test_privileged_is_a_warning_on_the_privileged_runtime() -> None:
-    project = normalize({"services": {"main": {"image": "r.io/app", "privileged": True}}}, {})
+    project = normalize({"services": {"main": {"image": "r.io/app", "privileged": True}}})
     assert not project.rejected
     assert [(f.path, f.kind) for f in project.findings] == [("services.main.privileged", "warn")]
     assert project.services["main"].privileged
-    off = normalize({"services": {"main": {"image": "r.io/app", "privileged": False}}}, {})
+    off = normalize({"services": {"main": {"image": "r.io/app", "privileged": False}}})
     assert not off.findings and not off.services["main"].privileged
-    bad = normalize({"services": {"main": {"image": "r.io/app", "privileged": "yes"}}}, {})
+    bad = normalize({"services": {"main": {"image": "r.io/app", "privileged": "yes"}}})
     assert [f.path for f in bad.findings if f.kind == "reject"] == ["services.main.privileged"]

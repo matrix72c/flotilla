@@ -99,22 +99,12 @@ class NetworkDef:
 
 
 @dataclass(frozen=True)
-class RuntimeExpression:
-    """Original expression and referenced values already fixed by the task's .env."""
-
-    expr: str
-    variables: Mapping[str, str] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
 class Project:
-    """A task's normalized Compose project. `runtime_params`: `environment` entries referencing variables the task
-    lacks (service -> environment variable -> deferred expression), valued by the provider at runtime."""
+    """A task's normalized Compose project, as resolved by the official Compose config adapter."""
 
     services: Mapping[str, Service]
     networks: Mapping[str, NetworkDef]
     volumes: frozenset[str]  # top-level named volumes
-    runtime_params: Mapping[str, Mapping[str, RuntimeExpression]] = field(default_factory=dict)
     findings: tuple[Finding, ...] = ()
 
     @property

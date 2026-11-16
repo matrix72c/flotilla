@@ -10,7 +10,7 @@ task/
   environment/
     Dockerfile             # optional
     docker-compose.yaml    # optional; the only Compose file name that is read
-    .env                   # optional; with CONTEXT_DIR, the only source of interpolation variables
+    .env                   # optional; interpolation values, together with CONTEXT_DIR and caller values
 ```
 
 - The main (agent) service is always named `main`. A task without a `main` service is rejected.
@@ -52,7 +52,7 @@ Top-level networks support `internal: true`. `driver` must be `bridge`, `ipam` m
 | `build` | `context`, `dockerfile`, and `args` only; paths must stay inside the task directory. `target`, `ssh`, `cache_from`, `secrets`, `platforms`, and others are rejected |
 | `command`, `entrypoint` | Supported (string form is split like a shell word list, without a shell). Docker semantics: `entrypoint` drops the image `CMD` |
 | `environment` | Supported, including names Docker accepts that are not shell identifiers (`discovery.type`). A key without a value (inherit from host) is rejected: there is no host environment |
-| `env_file` | A path or list of paths inside `environment/`, strict `KEY=VALUE` lines. The long form (`path`/`required`) and escaped values are rejected. `environment` entries win |
+| `env_file` | A path or list of paths inside `environment/`, in short or long (`path`, `required`) form. Paths must be literal and stay inside the task: a dynamic or escaping path is rejected before Compose opens anything. `environment` entries win |
 | `working_dir` | Supported |
 | `user` | Supported; resolved to numeric uid/gid from the image |
 | `depends_on` | List or map. Conditions `service_started`, `service_healthy`, `service_completed_successfully`, and `required` are supported; `restart` is equivalent (services are never restarted) |
@@ -81,13 +81,7 @@ A service can have dependents requiring health and others requiring successful c
 
 Short syntax `source:target[:ro|rw]` is a bind mount when the source starts with `.`, `/`, or `~`, and a named volume otherwise. Long syntax supports `type` (`volume`, `bind`, `tmpfs`), `source`, `target`, `read_only`, `volume.nocopy`, and `bind.create_host_path`. Anonymous volumes are rejected, the target must be absolute (and not `/` or under `/.flotilla`), and bind sources must be relative paths inside `environment/`.
 
-Flotilla decides how to provide each volume from how it is used:
-
-| Usage | Provided as |
-|---|---|
-| Only read-only references | Published with the task files and mounted read-only |
-| One writable reference | Copied into that service's image at build time |
-| Several references, at least one writable | A per-environment shared directory, seeded from the image or the bind source. Requires the deployment's `shared_volume` capability |
+Every file-backed mount uses attempt-owned storage and requires the deployment's `shared_volume` capability, including a single writable reference and an exclusively read-only one. Nothing is baked into an image. Equal bind sources, and a mounted source together with its mounted descendants, share one backing root while each mount keeps its own read-only flag.
 
 A missing bind source is rejected: the platform would mount an empty directory over the target, so a task whose files were never committed would run with empty tools and grade as unsolvable. `/tmp` must stay writable (framework file transfers and the platform exec daemon write there), so a read-only mount on it is rejected. Mounting a single file that is not copied into an image requires the `volume_file` capability.
 
@@ -105,13 +99,9 @@ Compose `network_mode: none` also excludes the service from peer links and requi
 
 ## Variable interpolation
 
-Only values under `services` are interpolated, and variables come only from `environment/.env`; the host environment is never read. As in Harbor, `CONTEXT_DIR` is always defined as the environment directory (`.`) and takes precedence over `.env`.
+The pinned `docker compose config` command performs interpolation, so the syntax it accepts is the syntax a task may use. The host environment is never read: values come from `environment/.env`, from `CONTEXT_DIR` (the absolute environment directory), and from the values the caller supplies for the run — the deployment's `runtime_params` table and, for one call, `describe_task_resources(runtime_params=...)` or a dataset row's `parameters` (the more specific wins).
 
-| Syntax | Status |
-|---|---|
-| `${VAR}`, `${VAR:-default}`, `${VAR-default}`, `${VAR:+alt}`, `${VAR+alt}`, `$$` | Supported; defaults and alternatives may contain nested references, e.g. `${NO_PROXY:+${NO_PROXY},}` |
-| `$VAR`, `${VAR:?err}`, `${VAR?err}` | Rejected |
+Interpolation happens once, at preparation or inspection, and the result is fixed in the prepared definition. There is no deferred substitution at open time.
 
-A variable referenced in a service's `environment` (or `env_file`) that `.env` does not define becomes a **runtime parameter**. Its value is supplied when the environment is opened, from `OpenOptions.runtime_params` or the deployment's `runtime_params` table (the request wins), or from the Compose default. Opening fails if a parameter has neither a value nor a default. An undefined variable without a default elsewhere in a service rejects the task.
+A reference that nothing defines and that has no default is **rejected**. Compose itself only warns and substitutes a blank string, so Flotilla refuses the task rather than preparing one whose variable silently became empty. A reference with a default (`${VAR:-x}`) needs no value.
 
-Values supplied by `.env` stay fixed, including inside nested defaults and alternatives. For example, `${A:-${B}}` with `B` defined in `.env` only needs runtime configuration for `A`; a runtime `B` does not override the task's value. Referenced fixed values are stored separately from expression syntax, preserving literal dollars and braces.

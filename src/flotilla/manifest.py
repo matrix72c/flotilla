@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from flotilla.platform.base import TaskDevice, TmpfsMount
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 Condition = Literal["service_started", "service_healthy", "service_completed_successfully"]
 RestartPolicy = Literal["no", "always", "unless-stopped", "on-failure"]
@@ -87,22 +87,6 @@ class TrialVolume(_Model):
     copy_from: str | None = None
 
 
-class RuntimeParam(_Model):
-    """An environment entry evaluated once at runtime, retaining referenced build-time values as literals."""
-
-    service: str
-    var: str
-    expr: str
-    variables: dict[str, str] = {}
-
-
-class _RuntimeParamV6(RuntimeParam):
-    """Schema 6 repeated each expression once per unresolved variable."""
-
-    param: str
-    default: str | None
-
-
 class Finding(_Model):
     path: str
     kind: Literal["equivalent", "warn", "reject"]
@@ -118,7 +102,6 @@ class Manifest(_Model):
     depends_on: dict[str, dict[str, Dependency]] = {}
     trial_volumes: list[TrialVolume] = []
     task_files: str | None = None  # relative to the shared root; None without task files
-    runtime_params: list[RuntimeParam] = []
     external_units: list[str] = []
     findings: list[Finding] = []
 
@@ -126,12 +109,16 @@ class Manifest(_Model):
 
     @model_validator(mode="before")
     @classmethod
-    def _upgrade_v6(cls, data: object) -> object:
-        if not isinstance(data, dict) or data.get("schema", data.get("schema_")) != 6:
+    def _upgrade_v7(cls, data: object) -> object:
+        """Schema 7 carried deferred runtime-parameter expressions. The Compose
+        config adapter now resolves every reference at preparation, so an empty
+        list migrates and a populated one needs the release prepared again."""
+        if not isinstance(data, dict) or data.get("schema", data.get("schema_")) != 7:
             return data
-        parameters = TypeAdapter(list[_RuntimeParamV6]).validate_python(data.get("runtime_params", []))
-        expressions = {(p.service, p.var): RuntimeParam(service=p.service, var=p.var, expr=p.expr) for p in parameters}
-        upgraded = {**data, "schema": SCHEMA_VERSION, "runtime_params": list(expressions.values())}
+        if data.get("runtime_params"):
+            raise ValueError("manifest defers runtime parameters; prepare its release again")
+        upgraded = {key: value for key, value in data.items() if key != "runtime_params"}
+        upgraded["schema"] = SCHEMA_VERSION
         upgraded.pop("schema_", None)
         return upgraded
 

@@ -14,12 +14,14 @@ from typing import Any
 from flotilla.build.builder import BuildRequest
 from flotilla.build.driver import BuildContext, build_task
 from flotilla.build.images import BuildSettings
+from flotilla.compose.adapter import ComposeConfigAdapter
 from flotilla.compose.task import HarborTask
 from flotilla.config import FlotillaConfig
 from flotilla.manifest import Manifest
 from flotilla.platform.base import Capabilities
 from flotilla.prepare.inspect import main_only
 from flotilla.prepared import ROLES, PreparedEnvironment
+from flotilla.testing.compose import OfflineComposeAdapter
 
 DIGEST = "sha256:" + "ab" * 32
 DIGEST2 = "sha256:" + "cd" * 32
@@ -188,7 +190,8 @@ def prepared_task(
     path: Path,
     cfg: FlotillaConfig | None = None,
     *,
-    environments: Callable[[Path], Sequence[HarborTask]] = main_only,
+    environments: Callable[..., Sequence[HarborTask]] = main_only,
+    compose_adapter: ComposeConfigAdapter | None = None,
     **ctx: Any,
 ) -> dict[str, PreparedEnvironment]:
     """Prepare a task directory into its role environments with the fakes above.
@@ -198,7 +201,8 @@ def prepared_task(
     caps = cfg.platform_capabilities() if cfg is not None else _caps()
     prepared: dict[str, PreparedEnvironment] = {}
     with TemporaryDirectory(prefix="flotilla-prepared-") as out:
-        for role, env in zip(ROLES, environments(path), strict=False):
+        roles = environments(path, compose_adapter=compose_adapter or OfflineComposeAdapter())
+        for role, env in zip(ROLES, roles, strict=False):
             outcome = build_task(env, Path(out) / role, _ctx(caps=caps, **ctx))
             if outcome.manifest_path is None:
                 raise ValueError(f"environment preparation {outcome.status}: {outcome.reason}")
