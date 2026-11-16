@@ -20,7 +20,10 @@ from flotilla.compose.paths import confined
 
 COMPOSE_VERSION = "2.39.4"
 # Compose reports an undefined reference on stderr and substitutes a blank string, exiting 0.
-_UNSET_VARIABLE = re.compile(r'The "?([A-Za-z_][A-Za-z0-9_]*)"? variable is not set')
+# The name is quoted in the `WARN[0000] The "X" ...` format and backslash-escaped in the
+# structured `msg="The \"X\" ..."` one, so accept both: a format this does not match would
+# turn the check below into a silent no-op.
+_UNSET_VARIABLE = re.compile(r'The \\?"?([A-Za-z_][A-Za-z0-9_]*)\\?"? variable is not set')
 
 
 def _input_path(root: Path, value: str) -> Path:
