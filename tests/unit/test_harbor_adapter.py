@@ -19,9 +19,11 @@ from flotilla.compose.task import TaskError
 from flotilla.config import FlotillaConfig
 from flotilla.core import labels
 from flotilla.integrations.harbor import FlotillaEnvironment
-from flotilla.integrations.harbor_source import task_environments
 from flotilla.platform.base import ExecResult, FlotillaError, ProcessSpec
+from flotilla.prepare import inspect as inspect_module
 from flotilla.testing.build import prepared_task
+from flotilla.testing.compose import OfflineComposeAdapter
+from flotilla.testing.compose import offline_environments as task_environments
 from flotilla.testing.platform import FakePlatform, SharedTree
 from flotilla.testing.reports import report
 from flotilla.testing.runtime import deployment as runtime_deployment
@@ -29,7 +31,10 @@ from flotilla.testing.runtime import deployment as runtime_deployment
 deployment = runtime_deployment
 
 
-def test_scan_checks_verifier_context_and_continues_after_invalid_harbor_input(tmp_path: Path) -> None:
+def test_scan_checks_verifier_context_and_continues_after_invalid_harbor_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(inspect_module, "ComposeConfigAdapter", OfflineComposeAdapter)
     tasks = tmp_path / "tasks"
     for name in ("valid", "bad-verifier", "bad-config"):
         root = tasks / name
@@ -82,7 +87,11 @@ def test_harbor_resolves_compose_once_per_role(tmp_path: Path) -> None:
     (path / "tests/docker-compose.yaml").write_text("services:\n  main:\n    image: r.io/verifier:1\n")
     adapter = Mock()
     adapter.load.return_value = load_environment(
-        path, path / "environment", {"docker_image": "r.io/main:1"}, name=path.name
+        path,
+        path / "environment",
+        {"docker_image": "r.io/main:1"},
+        name=path.name,
+        compose_adapter=OfflineComposeAdapter(),
     ).project
     definitions = task_environments(path, compose_adapter=adapter)
     assert len(definitions) == adapter.load.call_count == 2
@@ -112,9 +121,7 @@ def adapter(
         task_env_config=EnvironmentConfig(docker_image="r.io/main:1"),
         network_policy=network_policy,
         deployment=str(config),
-        prepared_environment=compiled.environment("main" if environment == "environment" else "verifier")
-        if prepared
-        else None,
+        prepared_environment=compiled["main" if environment == "environment" else "verifier"] if prepared else None,
         fleet=fleet,
         **kwargs,  # type: ignore[arg-type]
     )
@@ -141,11 +148,11 @@ async def test_harbor_requires_attempt_and_rejects_legacy_prepared_and_force_bui
 ) -> None:
     cfg, platform, _ = deployment
     async with Flotilla(deployment=cfg) as fleet:
-        with pytest.raises(ValueError, match="HarborAttempt"):
+        with pytest.raises(ValueError, match="NativeAttempt"):
             await adapter(tmp_path, cfg, fleet, prepared=False).start()
         with pytest.raises(ValueError, match="force_build is unsupported"):
             await adapter(tmp_path, cfg, fleet).start(force_build=True)
-        with pytest.raises(ValueError, match="legacy prepared JSONL"):
+        with pytest.raises(ValueError, match="prepared JSONL"):
             FlotillaEnvironment(
                 environment_dir=tmp_path / "remote-only",
                 environment_name="task",
@@ -156,6 +163,9 @@ async def test_harbor_requires_attempt_and_rejects_legacy_prepared_and_force_bui
                 fleet=fleet,
                 prepared="obsolete.jsonl",
             )
+        # Resolved at preparation: accepting these at open would silently do nothing.
+        with pytest.raises(ValueError, match="resolved at preparation"):
+            adapter(tmp_path, cfg, fleet, runtime_params={"SEED": "2"})
     assert not await platform.list({labels.ROLE: labels.ROLE_UNIT})
 
 

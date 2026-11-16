@@ -338,7 +338,6 @@ async def make_runtime(
     runtime.context_id = None  # type: ignore[assignment]
     runtime.deployment = str(deployment_file)
     runtime.run_timeout = 600.0
-    runtime.runtime_params = {"SEED": "2"}
     runtime.fleet = SimpleNamespace(  # type: ignore[assignment]
         close=AsyncMock(return_value=SimpleNamespace(clean=True))
     )

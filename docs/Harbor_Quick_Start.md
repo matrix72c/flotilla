@@ -68,7 +68,7 @@ The importer stores Harbor presentation metadata in `task.provenance.harbor.conf
 - A test script's nonzero exit with a valid reward may be a graded failure. Missing/malformed/nonfinite rewards and transport/cleanup failures are infrastructure errors, not reward zero.
 - `environment.delete: false` and `force_build` are rejected. `runtime.kwargs.run_timeout` must be positive and within the deployment lifetime.
 
-For non-Harbor applications, use the public `ReleaseBindings` and `NativeAttempt` API in [Native tasks](Native_Tasks.md). There is no task-key or old prepared-row fallback. The old source-workspace compiler is a legacy API, not this execution path.
+For non-Harbor applications, use the public `ReleaseBindings` and `NativeAttempt` API in [Native tasks](Native_Tasks.md).
 
 ## Acceptance
 

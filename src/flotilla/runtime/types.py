@@ -17,7 +17,6 @@ Task = PreparedEnvironment
 class RunRequest:
     task: Task
     request_id: str
-    runtime_params: dict[str, str] = field(default_factory=dict)
     exec_env: dict[str, dict[str, str]] = field(default_factory=dict, repr=False)
     disable_internet: bool = False
     resources: dict[str, dict[str, str]] = field(default_factory=dict)
@@ -97,7 +96,6 @@ class OpenOptions:
     admission_timeout: float | None = None
     startup_timeout: float | None = None
     lifetime: float | None = None
-    runtime_params: dict[str, str] = field(default_factory=dict)
     exec_env: dict[str, dict[str, str]] = field(default_factory=dict, repr=False)
     resources: dict[str, dict[str, str]] = field(default_factory=dict)
     disable_internet: bool = False

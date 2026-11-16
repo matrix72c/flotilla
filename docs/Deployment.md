@@ -8,8 +8,6 @@ Host preparation needs the optional Harbor importer, pinned official Compose and
 
 The platform Anchor needs the matching installed Flotilla runtime and filesystem tools. It does **not** need Harbor, Compose, Docker/BuildKit, registry-push credentials or source task directories. Never expose a host Docker socket or unauthenticated build endpoint to task/verifier sandboxes. Normal pulls of the final fixed images remain a platform responsibility.
 
-The old `images/management` compiler and workspace contracts describe the explicit legacy source-task path; they are not requirements or fallbacks for native consumption.
-
 ## 1. Build the installed Anchor
 
 Install this repository's fixed commit or controlled wheel in a clean Python 3.12 Linux x86_64 environment. Do not use the unrelated public PyPI `flotilla` package. The builder snapshots the exact installed non-editable distribution and runtime dependency closure, validates RECORD hashes and uses packaged resources rather than a checkout.

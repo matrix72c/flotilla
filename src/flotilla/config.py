@@ -698,10 +698,6 @@ class FlotillaConfig(_Model):
     def filesystem_settings(self) -> FilesystemSettings:
         return FilesystemSettings(self.opensandbox_settings().filesystem_protocol)
 
-    def filesystem_profile(self) -> str:
-        """Evidence applies to these creation/runtime settings, never just a hostname."""
-        return load_backend(self.backend).profile(self.backend_settings, self)
-
     def credential(self, environ: Mapping[str, str] | None = None) -> str:
         """Read the platform credential from the environment; the error names only the variable."""
         env = os.environ if environ is None else environ
@@ -894,17 +890,6 @@ class OpenSandboxBackend(Backend[OpenSandbox]):
     def capabilities(self, settings: OpenSandbox, cfg: FlotillaConfig, caps: Capabilities) -> Capabilities:
         caps = replace(caps, sandbox_ingress=caps.sandbox_ingress and settings.network.ingress == "sandbox")
         return FilesystemSettings(settings.filesystem_protocol).capabilities(caps)
-
-    def profile(self, settings: OpenSandbox, cfg: FlotillaConfig) -> str:
-        # Fixed field list: existing capability reports record this exact digest. management_extensions
-        # affect only workspace anchors, not the task/probe runtime this evidence describes.
-        data = [
-            settings.filesystem_protocol,
-            settings.extensions,
-            settings.privileged_extensions,
-            settings.create_fields,
-        ]
-        return hashlib.sha256(json.dumps(data, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
     def build(
         self,

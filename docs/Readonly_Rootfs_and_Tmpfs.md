@@ -95,11 +95,9 @@ Before business startup, a Running instance's effective configuration must match
 
 HTTP 400 and 501 are non-retryable configuration/capability failures. No filesystem fields are removed, and the task cannot proceed with a writable root or disk-directory approximation.
 
-## Migration and verification
+## Verification
 
-The previous build-time empty-directory approximation of tmpfs has been removed. Existing tasks declaring tmpfs now require native support; remove the declaration only if the task intentionally no longer requires tmpfs semantics. Ordinary upstream tasks require no new configuration.
-
-Native task releases preserve both requirements in their role manifests. The native release protocol is separately versioned; old prepared JSONL or task-key rows are not native datasets and must be selected/prepared again. Do not edit schema numbers to bypass compatibility checks. Internal legacy manifest conversion does not authorize legacy dataset consumption.
+A task that declares tmpfs requires native support; there is no disk-directory approximation. Native task releases preserve both requirements in their role manifests. The native release protocol is separately versioned; do not edit schema numbers to bypass its compatibility checks.
 
 After probing, run the opt-in public API contract to cover image preparation, service logs, directory transfers, actual mount behavior and confirmed cleanup:
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import posixpath
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -146,29 +145,6 @@ class WorkspaceStore:
             raise ValueError("workspace is not owned by this client or has been released")
         return self.records[wid]
 
-    async def create(self, task_key: str) -> WorkspaceInfo:
-        task_key = relative_key(task_key)
-        if task_key.split("/", 1)[0] in {"launches", "share"}:
-            raise ValueError("task source must be an original Harbor dataset, not a runtime/publication directory")
-        wid = uuid.uuid4().hex
-        key = f"launches/{self.anchor.launch_id}/attempts/{wid}"
-        name = posixpath.basename(task_key)
-        info = WorkspaceInfo(wid, key, task_key, name, f"{key}/source/{name}")
-        self.records[wid] = _Owned(info)
-
-        async def copy() -> WorkspaceInfo:
-            await self.anchor.copy_source_tree(task_key, info.source_key, stage="prepare")
-            return info
-
-        try:
-            return await self._settled(copy)
-        except BaseException as primary:
-            try:
-                await self.remove(wid)
-            except BaseException as cleanup:
-                primary.add_note(f"workspace cleanup also failed: {cleanup!r}")
-            raise
-
     async def operation[T](self, wid: str, action: Callable[[WorkspaceInfo], Awaitable[T]]) -> T:
         record = self.owned(wid)
 
@@ -178,63 +154,6 @@ class WorkspaceStore:
                 return await action(record.info)
 
         return await self._settled(run)
-
-    def path(self, wid: str, relative: str) -> str:
-        return f"{self.owned(wid).info.key}/{relative_key(relative)}"
-
-    async def read(self, wid: str, relative: str) -> bytes:
-        return await self.operation(wid, lambda _: self.anchor.download(self.path(wid, relative), stage="prepare"))
-
-    async def write(self, wid: str, relative: str, data: bytes) -> None:
-        async def run(_: WorkspaceInfo) -> None:
-            key = self.path(wid, relative)
-            await self.anchor.mkdir(posixpath.dirname(key), stage="prepare")
-            await self.anchor.upload(key, data, mode=0o600, uid=0, gid=0, stage="prepare")
-
-        await self.operation(wid, run)
-
-    async def mkdir(self, wid: str, relative: str) -> None:
-        await self.operation(wid, lambda _: self.anchor.mkdir(self.path(wid, relative), stage="prepare"))
-
-    async def copy(self, wid: str, source: str, destination: str) -> None:
-        await self.operation(
-            wid,
-            lambda _: self.anchor.copy_tree(self.path(wid, source), self.path(wid, destination), stage="prepare"),
-        )
-
-    async def copy_contents(self, wid: str, source: str, destination: str) -> None:
-        await self.operation(
-            wid,
-            lambda _: self.anchor.copy_contents(self.path(wid, source), self.path(wid, destination), stage="prepare"),
-        )
-
-    async def prepare(self, wid: str, runtime_params: dict[str, str], *, describe: bool = False) -> dict[str, Any]:
-        async def run(info: WorkspaceInfo) -> dict[str, Any]:
-            root = self.anchor.path(info.key)
-            request = {
-                "workspace": root,
-                "workspace_key": info.key,
-                "task_id": info.task_id,
-                "source": self.anchor.path(info.source_key),
-                "deployment": self.config.model_dump(mode="json"),
-                "capabilities": self.config.load_report().model_dump(mode="json", by_alias=True),
-                "runtime_params": runtime_params,
-                "describe": describe,
-            }
-            key = f"{info.key}/request.json"
-            await self.anchor.upload(key, json.dumps(request).encode(), mode=0o600, uid=0, gid=0, stage="prepare")
-            async with self.compile_slots:
-                await self.anchor.execute(
-                    (*self.config.prepare.workspace_command, self.anchor.path(key)),
-                    timeout_s=self.config.prepare.workspace_timeout,
-                    stage="prepare",
-                )
-            result = json.loads(await self.anchor.download(f"{info.key}/result.json", stage="prepare"))
-            if not isinstance(result, dict):
-                raise ValueError("workspace compiler returned a non-object result")
-            return result
-
-        return await self.operation(wid, run)
 
     def _metadata_batches(
         self, keys: list[str], options: dict[str, Any] | None = None
@@ -378,51 +297,14 @@ class WorkspaceStore:
 
 
 class Workspace:
-    """A caller-side handle to one platform-side attempt directory."""
+    """A caller-side handle to one attempt's platform-side directory."""
 
     def __init__(self, fleet: Flotilla, info: WorkspaceInfo) -> None:
         self._fleet = fleet
         self.id, self.key = info.id, info.key
-        self.task_key, self.task_id, self.source_key = info.task_key, info.task_id, info.source_key
         self._closed = False
-
-    async def read(self, relative: str) -> bytes:
-        return await self._fleet._call(lambda m: m.workspaces.read(self.id, relative), settle_cancel=True)
-
-    async def write(self, relative: str, data: bytes) -> None:
-        await self._fleet._call(lambda m: m.workspaces.write(self.id, relative, data), settle_cancel=True)
-
-    async def mkdir(self, relative: str) -> None:
-        await self._fleet._call(lambda m: m.workspaces.mkdir(self.id, relative), settle_cancel=True)
-
-    async def copy(self, source: str, destination: str) -> None:
-        """Copy an entry to an absent destination, preserving metadata and links."""
-        await self._fleet._call(lambda m: m.workspaces.copy(self.id, source, destination), settle_cancel=True)
-
-    async def copy_contents(self, source: str, destination: str) -> None:
-        await self._fleet._call(lambda m: m.workspaces.copy_contents(self.id, source, destination), settle_cancel=True)
-
-    async def describe(self) -> dict[str, Any]:
-        """Read native Harbor metadata without building images or creating workloads."""
-        return await self._fleet._call(lambda m: m.workspaces.prepare(self.id, {}, describe=True), settle_cancel=True)
-
-    async def prepare(self, runtime_params: dict[str, str] | None = None) -> dict[str, Any]:
-        return await self._fleet._call(
-            lambda m: m.workspaces.prepare(self.id, dict(runtime_params or {})), settle_cancel=True
-        )
 
     async def close(self) -> None:
         if not self._closed:
             await self._fleet._call(lambda m: m.release_workspace(self.id), settle_cancel=True)
             self._closed = True
-
-    async def __aenter__(self) -> Workspace:
-        return self
-
-    async def __aexit__(self, typ: object, exc: BaseException | None, tb: object) -> None:
-        try:
-            await self.close()
-        except BaseException as cleanup:
-            if exc is None:
-                raise
-            exc.add_note(f"workspace cleanup also failed: {cleanup!r}")

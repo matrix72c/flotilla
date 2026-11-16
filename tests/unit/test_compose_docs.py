@@ -8,8 +8,6 @@ from pathlib import Path
 from flotilla.compose.normalize import _EQUIVALENT, _REJECT
 
 DOC = Path(__file__).resolve().parents[2] / "docs" / "Compose_Support.md"
-# Inlined into `environment` by the task loader before normalization; documented as supported.
-_PREPROCESSED = {"env_file"}
 
 
 def _service_rows() -> dict[str, str]:
@@ -29,7 +27,7 @@ def test_documented_rejections_match_normalizer() -> None:
     rows = _service_rows()
     documented = {key for key, status in rows.items() if status.startswith("Rejected")}
     assert documented <= set(_REJECT), documented - set(_REJECT)
-    assert set(_REJECT) - _PREPROCESSED <= documented, set(_REJECT) - _PREPROCESSED - documented
+    assert set(_REJECT) <= documented, set(_REJECT) - documented
 
 
 def test_documented_equivalents_are_not_rejected() -> None:

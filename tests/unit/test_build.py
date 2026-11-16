@@ -1,4 +1,4 @@
-"""Image metadata, build keys, content hashes, derived Dockerfiles, image naming."""
+"""Image metadata, build keys, content hashes, image naming."""
 
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ from flotilla.build.builder import (
     BuildRequest,
     base_images,
     build_contexts,
-    derive_dockerfile,
     image_tag,
 )
 from flotilla.build.images import BuildSettings, ImageError, plan_image
@@ -95,23 +94,6 @@ def test_parse_config_empty_entrypoint_differs_from_missing() -> None:
 
 def _project(**services: Any) -> Project:
     return Project(services={n: Service(name=n, **kw) for n, kw in services.items()}, networks={}, volumes=frozenset())
-
-
-# ───────────────────────────── Derived Dockerfile ─────────────────────────────
-
-
-def test_derive_dockerfile_only_prepares_mount_points() -> None:
-    df = derive_dockerfile("r.io/base@sha256:ab", directories=["/var/cache"])
-    lines = df.splitlines()
-    assert lines[0] == "FROM r.io/base@sha256:ab"
-    assert lines[1] == lines[-1] == "USER 0:0"
-    assert "mkdir -p /var/cache" in df
-    assert "COPY " not in df and "rm -rf" not in df
-
-
-def test_derive_dockerfile_quotes_odd_paths() -> None:
-    df = derive_dockerfile("b", directories=["/x y"])
-    assert "'/x y'" in df
 
 
 # ───────────────────────────── Image naming ─────────────────────────────

@@ -1,6 +1,6 @@
 # Platform requirements and enablement
 
-The supported release target is Linux x86_64, Python 3.12, Harbor 0.24.0, and the two OpenSandbox execd protocols. Supporting the Python API does not establish that a particular sandbox deployment satisfies the security contract. This page is for whoever operates the sandbox platform: what must always be enabled, which features are switched on per deployment, and how each is verified. Setup steps are in the [deployment guide](Deployment.md); field reference in [Configuration](Configuration.md).
+The supported release target is Linux x86_64, Python 3.12, the two OpenSandbox execd protocols, and — for the optional native Harbor adapter — a patched Harbor build, since stock Harbor 0.24.0 lacks those interfaces. Supporting the Python API does not establish that a particular sandbox deployment satisfies the security contract. This page is for whoever operates the sandbox platform: what must always be enabled, which features are switched on per deployment, and how each is verified. Setup steps are in the [deployment guide](Deployment.md); field reference in [Configuration](Configuration.md).
 
 ## Baseline: required on every deployment
 
@@ -8,7 +8,7 @@ The supported release target is Linux x86_64, Python 3.12, Harbor 0.24.0, and th
 - **Exec daemon.** One exec daemon per sandbox, reachable through the platform's sandbox proxy route on the daemon's port (declare an explicit port in `opensandbox.create_fields` when the platform requires it). The daemon runs as root so it can initialize the sandbox and apply each command's numeric identity. Exactly one protocol is selected in `[opensandbox.execd]` — `current` (argv plus numeric identity fields) or `legacy` (quoted command string) — with no fallback between them. The command stream is SSE with per-command IDs; HTTP 409 `CONFLICT` on the command stream is the deployment's explicit busy rejection. Acceptance: identity (uid/gid/cwd/env), nonzero and signal exits, bounded output, background processes, cancellation at every request/delivery stage, a client deadline plus confirmed remote stop of the process group, and unknown status invalidating the environment.
 - **Shared storage.** A dedicated shared root that every sandbox worker and the anchor can mount: a host path backed by the same storage on every worker, or an existing RWX PVC with a subpath root. Instances receive only their declared mounts; missing subpaths are created on demand; undeclared volumes must not be auto-mounted. Acceptance: same data on every worker, read-only mounts, subpath isolation, no unintended mounts, binary transfers with original uid/gid/mode including special permission bits.
 - **Image registry.** An image registry reachable from both the preparation machine (Docker with BuildKit/buildx) and the sandbox workers, with digest-pinned pulls and linux/amd64 selection. Acceptance: build and runtime pull access tested independently; missing supported architectures are rejected.
-- **Share release and anchor.** Flotilla publishes an immutable BusyBox share under the shared root and mounts it at `/.flotilla/bin/busybox`. The digest-pinned anchor image runs BusyBox with `stat`, shell, file-management, and networking applets for directory management, numeric metadata, renewal, and cleanup audits. See the [deployment guide](Deployment.md).
+- **Share release and anchor.** Flotilla publishes an immutable BusyBox share under the shared root and mounts it read-only at `/.flotilla`, so the binary is at `/.flotilla/bin/busybox`. The digest-pinned anchor image runs BusyBox with `stat`, shell, file-management, and networking applets for directory management, numeric metadata, renewal, and cleanup audits. See the [deployment guide](Deployment.md).
 - **Quotas and labels.** Sandbox labels (bounded length) for ownership and reconciliation; instance/TTL quotas at least matching the client's `[limits]` and `[reaper]` budgets, including the anchor instance and startup replacement capacity. Acceptance: actual cgroup limits and quota behavior for requested resources.
 
 ## Feature enablement matrix
@@ -42,7 +42,7 @@ Privileged evidence covers the configured create mapping, separately measured st
 
 Missing required execution/storage/lifecycle/network acceptance blocks startup. The three explicit security waivers remain `inbound_isolation`, `exec_auth`, and `no_auto_mount`; they do not implement protection or rewrite failed checks. They also do not waive missing critical network controls. Keep private reports out of version control and review candidate cleanup results before promotion.
 
-Older upstream/internal acceptance runs describe their own code, images, configuration and time. They do not establish current schema-2 capabilities. This implementation's offline regressions are not real sandbox acceptance.
+Offline regressions in this repository are not sandbox acceptance; only a probe against the target deployment is.
 
 ## Formal release gates
 

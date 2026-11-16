@@ -8,8 +8,7 @@ import shlex
 from collections.abc import Mapping
 from typing import Any, cast
 
-from flotilla.compose import resources as resource_values
-from flotilla.compose.interpolate import InterpolationError, interpolate
+from flotilla import resources as resource_values
 from flotilla.compose.model import (
     MAIN,
     Build,
@@ -21,14 +20,13 @@ from flotilla.compose.model import (
     NetworkDef,
     Project,
     RestartPolicy,
-    RuntimeExpression,
     Service,
     VolumeMount,
 )
 from flotilla.compose.paths import valid_name
-from flotilla.compose.units import parse_duration
 from flotilla.platform.base import TASK_DEVICE_PATHS, TaskDevice, TmpfsMount
 from flotilla.platform.filesystem import memory_bytes, validate_mounts
+from flotilla.units import parse_duration
 
 DEFAULT_NETWORK = "default"
 KEEPALIVE = ("sh", "-c", "sleep infinity")
@@ -57,7 +55,6 @@ _REJECT = {
     "runtime": "choosing a container runtime is not supported",
     "volumes_from": "not implemented yet",
     "extends": "not implemented yet (not seen in task data)",
-    "env_file": "not implemented yet (not seen in task data)",
     "profiles": "not implemented yet (not seen in task data)",
     "secrets": "not implemented yet (not seen in task data)",
     "configs": "not implemented yet (not seen in task data)",
@@ -97,44 +94,11 @@ class _Collector:
         self.findings.append(Finding(path, "reject", reason))
 
 
-def harbor_overlay(compose: Mapping[str, Any], *, main_image: str | None, main_build: bool) -> dict[str, Any]:
-    """Layer Harbor's keepalive override beneath the task Compose: `main` gets `command` `sleep infinity` and the
-    image from task.toml `docker_image` or the environment Dockerfile. The task file merges on top and may override
-    the keepalive command; an explicit docker_image always wins over the main service's image/build.
+def normalize(compose: Mapping[str, Any]) -> Project:
+    """Translate resolved Compose config output to the runtime model.
 
-    Legacy lightweight helper for offline callers only. This recursive merge is not general Compose merging;
-    production Harbor loading delegates the ordered documents to the official Compose config adapter.
-    """
-    base_main: dict[str, Any] = {"command": list(KEEPALIVE)}
-    if main_image is not None:
-        base_main["image"] = main_image
-    elif main_build:
-        base_main["build"] = {"context": "."}
-    base = {"services": {MAIN: base_main}}
-    merged = cast(dict[str, Any], _merge(base, dict(compose)))
-    if (
-        main_image is not None
-        and isinstance(merged.get("services"), dict)
-        and isinstance(merged["services"].get(MAIN), dict)
-    ):
-        merged["services"][MAIN]["image"] = main_image
-        merged["services"][MAIN].pop("build", None)
-    return merged
-
-
-def _merge(base: Any, over: Any) -> Any:
-    if isinstance(base, dict) and isinstance(over, dict):
-        out = dict(base)
-        for k, v in over.items():
-            out[k] = _merge(base[k], v) if k in base else v
-        return out
-    return over
-
-
-def normalize(compose: Mapping[str, Any], variables: Mapping[str, str], *, resolved: bool = False) -> Project:
-    """Translate to the runtime model. Official config output uses resolved=True: never interpolate twice.
-
-    The default lightweight parser is retained for pure model tests and legacy offline callers only.
+    The input is already merged and interpolated by the official Compose config
+    adapter, so nothing here substitutes variables or opens further files.
     """
     c = _Collector()
     for key in compose:
@@ -148,7 +112,6 @@ def normalize(compose: Mapping[str, Any], variables: Mapping[str, str], *, resol
     volumes = _top_volumes({} if compose.get("volumes") is None else compose["volumes"], c)
 
     services: dict[str, Service] = {}
-    runtime_params: dict[str, dict[str, RuntimeExpression]] = {}
     for name, raw in raw_services.items():
         raw = {} if raw is None else raw
         path = f"services.{name}"
@@ -157,28 +120,7 @@ def normalize(compose: Mapping[str, Any], variables: Mapping[str, str], *, resol
             continue
         env_raw = _environment(raw.get("environment"), f"{path}.environment", c)
         rest = {k: v for k, v in raw.items() if k != "environment"}
-        if resolved:
-            services[name] = _service(name, rest, env_raw, volumes, c)
-            continue
-        try:
-            rest_i = interpolate(rest, variables)
-            env_i = interpolate(env_raw, variables)
-        except InterpolationError as exc:
-            c.reject(path, str(exc))
-            continue
-        if rest_i.unresolved:
-            # Only proxy variables in build.args (HTTP_PROXY etc.) may be unset: they default to "" at build time.
-            hard = {k: d for k, d in rest_i.unresolved.items() if d is None}
-            if hard:
-                c.reject(
-                    path, f"references variables the task does not provide and that have no default: {sorted(hard)}"
-                )
-        params = _runtime_params(env_raw, variables)
-        if params:
-            runtime_params[name] = params
-        services[name] = _service(
-            name, cast(dict[str, Any], rest_i.value), cast(dict[str, str], env_i.value), volumes, c
-        )
+        services[name] = _service(name, rest, env_raw, volumes, c)
 
     if MAIN not in services and not any(f.path.startswith(f"services.{MAIN}") for f in c.findings):
         c.reject("services", f"missing agent service {MAIN}")
@@ -190,7 +132,6 @@ def normalize(compose: Mapping[str, Any], variables: Mapping[str, str], *, resol
         services=services,
         networks={k: v for k, v in network_defs.items() if k in used},
         volumes=frozenset(volumes),
-        runtime_params=runtime_params,
         findings=tuple(c.findings),
     )
 
@@ -834,18 +775,6 @@ def _check_references(services: Mapping[str, Service], networks: Mapping[str, Ne
         for dep, d in s.depends_on.items():
             if dep not in services and d.required:
                 c.reject(f"services.{s.name}.depends_on.{dep}", "depends on a nonexistent service")
-
-
-def _runtime_params(env_raw: Mapping[str, str], variables: Mapping[str, str]) -> dict[str, RuntimeExpression]:
-    """Keep fixed values separate from syntax so literal dollars and braces are never reinterpreted."""
-    out: dict[str, RuntimeExpression] = {}
-    for key, expr in env_raw.items():
-        result = interpolate(expr, variables)
-        if result.unresolved:
-            out[key] = RuntimeExpression(
-                expr, {name: variables[name] for name in sorted(result.references) if name in variables}
-            )
-    return out
 
 
 def _resources(raw: Mapping[str, Any], path: str, c: _Collector) -> dict[str, str]:

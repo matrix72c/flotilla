@@ -13,7 +13,6 @@ from flotilla import Flotilla
 from flotilla.build.driver import build_task
 from flotilla.capabilities import Item, ProbeSettings
 from flotilla.compose.normalize import normalize
-from flotilla.compose.task import load_task
 from flotilla.config import FlotillaConfig
 from flotilla.core.anchor import Anchor, AnchorSettings
 from flotilla.manifest import Manifest
@@ -34,6 +33,7 @@ from flotilla.runtime.planning import to_plan
 from flotilla.runtime.types import RunRequest, Task
 from flotilla.scan import scan
 from flotilla.testing.build import FakeBuilder, _ctx, _task
+from flotilla.testing.compose import offline_task as load_task
 from flotilla.testing.config import config_data
 from flotilla.testing.platform import FakePlatform, ManualClock, SharedTree
 from flotilla.testing.reports import ok, report
@@ -52,7 +52,7 @@ def _service(**fields: Any) -> dict[str, Any]:
 
 
 def _rejected(raw: dict[str, Any]) -> list[str]:
-    return [f.path for f in normalize(raw, {}).findings if f.kind == "reject"]
+    return [f.path for f in normalize(raw).findings if f.kind == "reject"]
 
 
 @pytest.mark.parametrize(
@@ -67,7 +67,7 @@ def _rejected(raw: dict[str, Any]) -> list[str]:
     ],
 )
 def test_kvm_and_tun_are_normalized(devices: list[object]) -> None:
-    project = normalize(_service(devices=devices, cap_add=["NET_ADMIN"]), {})
+    project = normalize(_service(devices=devices, cap_add=["NET_ADMIN"]))
     assert not project.rejected, project.findings
     assert project.services["main"].devices == {"kvm", "tun"}
     assert [(f.path, f.kind) for f in project.findings] == [("services.main.cap_add", "equivalent")]
@@ -113,13 +113,13 @@ def _device_caps(caps: Capabilities) -> Capabilities:
 
 
 def test_scan_requires_device_evidence(caps: Capabilities) -> None:
-    project = normalize({"services": {"main": OSWORLD}}, {})
+    project = normalize({"services": {"main": OSWORLD}})
     result = scan("osworld", project, caps)
     assert result.status == "rejected"
     assert [f.path for f in result.findings if f.kind == "reject"] == ["services.main.devices"]
     assert scan("osworld", project, replace(_device_caps(caps), devices=frozenset({"kvm"}))).status == "rejected"
     assert scan("osworld", project, _device_caps(caps)).status == "accepted"
-    readonly = normalize({"services": {"main": {**OSWORLD, "read_only": True}}}, {})
+    readonly = normalize({"services": {"main": {**OSWORLD, "read_only": True}}})
     assert scan("osworld", readonly, replace(_device_caps(caps), readonly_rootfs=True)).status == "rejected"
 
 
@@ -137,7 +137,7 @@ def test_devices_roundtrip_to_runtime_plan(tmp_path: Path) -> None:
     assert outcome.manifest_path, outcome.reason
     manifest = Manifest.load_json(outcome.manifest_path.read_bytes())
     assert manifest.units["main"].devices == ["kvm", "tun"] and not manifest.units["main"].privileged
-    unit = to_plan(manifest, runtime_params={}).units["main"]
+    unit = to_plan(manifest).units["main"]
     assert unit.devices == {"kvm", "tun"} and unit.privileged_runtime and not unit.privileged
     assert not builder.requests
 

@@ -14,7 +14,6 @@ from flotilla.manifest import (
     Mount,
     Network,
     Resources,
-    RuntimeParam,
     TrialVolume,
     Unit,
 )
@@ -55,11 +54,6 @@ def build_manifest(
         },
         trial_volumes=_trial_volumes(layout, seeds or {}),
         task_files=None,  # written by publish
-        runtime_params=[
-            RuntimeParam(service=svc, var=var, expr=expression.expr, variables=dict(expression.variables))
-            for svc, params in sorted(project.runtime_params.items())
-            for var, expression in sorted(params.items())
-        ],
         external_units=sorted(
             n for n, s in project.services.items() if any(not project.networks[net].internal for net in s.networks)
         ),

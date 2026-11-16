@@ -80,7 +80,7 @@ def test_archive_metadata_is_independent_of_local_owner(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("port", [{"protocol": "udp"}, "bad/udp", {"target": False}, [80]])
 def test_invalid_port_has_field_path(port: object) -> None:
-    project = normalize({"services": {"main": {"image": "alpine", "ports": [port]}}}, {})
+    project = normalize({"services": {"main": {"image": "alpine", "ports": [port]}}})
     assert any(f.kind == "reject" and f.path.startswith("services.main.ports[0]") for f in project.findings)
 
 
@@ -259,17 +259,17 @@ async def test_undelivered_success_has_cancellation_owner(monkeypatch: pytest.Mo
 
 @pytest.mark.parametrize("field,value", [("networks", []), ("volumes", False)])
 def test_wrong_empty_table_types_are_not_missing(field: str, value: object) -> None:
-    project = normalize({"services": {"main": {"image": "alpine"}}, field: value}, {})
+    project = normalize({"services": {"main": {"image": "alpine"}}, field: value})
     assert any(f.kind == "reject" and f.path == field for f in project.findings)
 
 
 @pytest.mark.parametrize("value", ["on-failure-arbitrary", "on-failure:", "on-failure:0", "on-failure:x"])
 def test_restart_malformed_policies_are_rejected(value: str) -> None:
-    project = normalize({"services": {"main": {"image": "alpine", "restart": value}}}, {})
+    project = normalize({"services": {"main": {"image": "alpine", "restart": value}}})
     assert any(f.kind == "reject" and f.path == "services.main.restart" for f in project.findings)
 
 
 def test_restart_count_is_on_failure() -> None:
-    project = normalize({"services": {"main": {"image": "alpine", "restart": "on-failure:3"}}}, {})
+    project = normalize({"services": {"main": {"image": "alpine", "restart": "on-failure:3"}}})
     assert project.services["main"].restart == "on-failure"
     assert [f.kind for f in project.findings if f.path == "services.main.restart"] == ["equivalent"]

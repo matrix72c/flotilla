@@ -1,11 +1,10 @@
-"""Trusted management-image entrypoint for native Harbor tasks.
+"""Trusted management-image entrypoint for native Harbor task metadata.
 
-Invoke with ``python -I -m flotilla.integrations.workspace /absolute/request.json``;
-add ``--describe-tasks`` for canonical-source instruction/config metadata, or
+Invoke with ``python -I -m flotilla.integrations.workspace --describe-tasks
+/absolute/request.json`` for canonical-source instruction/config metadata, or
 ``--describe-task-resources`` for capacity-only inspection without image work.
 The package and its tools must be installed in the management image. Nothing is
-imported or executed from the dataset by this reader. BuildKit executes Dockerfile
-instructions only through the explicitly configured builder.
+imported or executed from the dataset by this reader.
 """
 
 from __future__ import annotations
@@ -16,27 +15,20 @@ import logging
 import os
 import shutil
 import stat
-import subprocess
 import sys
 import time
-import uuid
 from collections.abc import Callable, Iterator
-from copy import deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
-from flotilla.build.driver import build_task
-from flotilla.build.keys import entries
 from flotilla.compose.adapter import ComposeConfigAdapter
 from flotilla.compose.paths import confined
 from flotilla.compose.task import COMPOSE_FILE
-from flotilla.config import FlotillaConfig
 from flotilla.integrations.harbor_source import task_environments
-from flotilla.manifest import Manifest, Resources
-from flotilla.prepare.docker import docker_context, sweep_journal
+from flotilla.manifest import Resources
 from flotilla.runtime.workspace import (
     METADATA_MAX_TASKS,
     METADATA_REQUEST_BYTES,
@@ -117,32 +109,6 @@ def validate_tree(root: Path, *, relocatable: bool = False) -> None:
             raise ValueError(f"unsupported task file type: {path.relative_to(root)}")
 
 
-def _directory(path: Path) -> Path:
-    if path.is_symlink():
-        raise ValueError(f"workspace output directory must not be a symlink: {path}")
-    path.mkdir(exist_ok=True)
-    if not path.is_dir():
-        raise ValueError(f"workspace output must be a directory: {path}")
-    return path
-
-
-def _validate_tests(source: Path) -> None:
-    # Relative symlinks confined to the tests subtree survive relocation. Links
-    # into sibling task directories or absolute paths do not; reject, don't
-    # silently dereference them or publish a dangling/escaping private copy.
-    validate_tree(source.resolve(strict=True), relocatable=True)
-
-
-def _copy_tests(source: Path, target: Path) -> None:
-    source = source.resolve(strict=True)
-    _validate_tests(source)
-    if target.is_symlink():
-        raise ValueError("private tests directory must not be a symlink")
-    if not target.exists():
-        subprocess.run(["cp", "-a", "--", str(source), str(target)], check=True)
-    validate_tree(target)
-
-
 def _describe_source(source: Path) -> dict[str, Any]:
     """Read metadata and role coordinates; payload validation belongs to use sites."""
     from harbor.models.task.config import TaskConfig, TaskOS
@@ -188,29 +154,6 @@ def _describe_source(source: Path) -> dict[str, Any]:
     }
 
 
-def describe(source: Path, workspace: Path) -> dict[str, Any]:
-    from harbor.models.task.paths import TaskPaths
-
-    # This is the private copy about to be compiled/transferred, not host metadata hydration.
-    budget = _ReadBudget()
-    budget.run(lambda: validate_tree(source), stage="private task copy")
-    result = budget.run(lambda: _describe_source(source), stage="task description")
-    public = _directory(workspace / "public")
-    instruction = public / "instruction.md"
-    if instruction.is_symlink():
-        raise ValueError("public instruction must not be a symlink")
-    instruction.write_text(result["instruction"])
-    instruction.chmod(0o644)
-    if not result["definitions"].get("verifier", {}).get("bundled_tests", False):
-        private_tests = workspace / "private-tests"
-        _copy_tests(TaskPaths(source).tests_dir, private_tests)
-        executable = private_tests / result["tests"]["script"]
-        # Native Harbor makes the test script executable before invocation. Keep
-        # its owner and read/write permissions; do not recursively chmod the tree.
-        executable.chmod(stat.S_IMODE(executable.stat().st_mode) | 0o111)
-    return result
-
-
 def _describe_resources(
     source: Path, metadata: dict[str, Any], request: dict[str, Any], budget: _ReadBudget
 ) -> dict[str, Any]:
@@ -231,8 +174,8 @@ def _describe_resources(
             ]
             if rejected:
                 raise ValueError(f"{source.name}/{role}: {'; '.join(rejected[:3])}")
-            # Same declared resources as build_task, before any image planning,
-            # registry access, build, export or workload creation.
+            # Declared resources before any image planning, registry access,
+            # build, export or workload creation.
             result[role] = {
                 name: Resources.model_validate(service.resources).model_dump(exclude_none=True)
                 for name, service in environment.project.services.items()
@@ -311,127 +254,37 @@ def describe_tasks_request(request: dict[str, Any], *, resources: bool = False) 
     return b"{" + b",".join(parts) + b"}"
 
 
-def restore_identities(root: Path) -> None:
-    """The ephemeral exporter may use staging ownership; restore its numeric metadata."""
-    if root.is_symlink() or not root.is_dir():
-        raise ValueError("exported files must be a real directory")
-    for entry in entries(root):
-        path = root / str(entry["path"])
-        os.chown(path, int(entry["uid"]), int(entry["gid"]), follow_symlinks=False)
-        if entry["type"] != "link":
-            path.chmod(int(str(entry["mode"]), 8))
-
-
-def compile_request(request: dict[str, Any]) -> dict[str, Any]:
-    root = Path(request["workspace"])
-    if not root.is_absolute() or root.is_symlink():
-        raise ValueError("workspace must be a real absolute directory")
-    root = root.resolve(strict=True)
-    source = Path(request["source"])
-    if source.is_symlink() or not source.resolve(strict=True).is_relative_to(root / "source"):
-        raise ValueError("compiler source must be the attempt's private task copy")
-    source = source.resolve(strict=True)
-    if source.name != request["task_id"]:
-        raise ValueError("task ID must be the original task directory basename")
-    result = describe(source, root)
-    if request.get("describe", False):
-        return result
-
-    report_path = root / "capabilities.json"
-    report_path.write_text(json.dumps(request["capabilities"]))
-    report_path.chmod(0o600)
-    deployment = deepcopy(request["deployment"])
-    backend = deployment.get("backend", "opensandbox")
-    if backend == "opensandbox":
-        deployment["opensandbox"]["capabilities"] = str(report_path)
-    else:
-        deployment["backends"][backend]["capabilities"] = str(report_path)
-    cfg = FlotillaConfig.model_validate(deployment)
-    cfg.check_against(cfg.load_report())
-    adapter = ComposeConfigAdapter(command=cfg.prepare.compose_command, expected_version=cfg.prepare.compose_version)
-    environments = task_environments(
-        source,
-        compose_adapter=adapter,
-        compose_environment={**cfg.runtime_params, **request.get("runtime_params", {})},
-    )
-    if len(environments) != len(result["definitions"]):
-        raise ValueError("Harbor role discovery disagrees with compiled environments")
-    generated = _directory(root / "generated")
-    journal = generated / "containers"
-    if journal.is_symlink():
-        raise ValueError("container journal must not be a symlink")
-    compiled = {}
-    identity_prefix = f"{root.name}--{uuid.uuid4().hex}"
-    primary: BaseException | None = None
-    try:
-        ctx = docker_context(cfg, journal)
-        for role, environment in zip(result["definitions"], environments, strict=True):
-            output = _directory(generated / role)
-            # Build identities isolate simultaneous same-basename tasks, without
-            # changing their task ID or treating it as a cache key.
-            identity = f"{identity_prefix}--{role}"
-            outcome = build_task(replace(environment, name=source.name), output, ctx, identity=identity)
-            if outcome.manifest_path is None:
-                raise ValueError(f"{source.name}/{role}: {outcome.status}: {outcome.reason}")
-            manifest = Manifest.load_json(outcome.manifest_path.read_bytes())
-            files = outcome.manifest_path.parent / "files"
-            if outcome.needs_publish:
-                restore_identities(files)
-                files_key = request["workspace_key"] + "/" + files.relative_to(root).as_posix()
-                manifest = manifest.model_copy(update={"task_files": files_key, "task_files_published": None})
-            compiled[role] = manifest.model_dump(mode="json", by_alias=True)
-    except BaseException as exc:
-        primary = exc
-        raise
-    finally:
-        try:
-            leftover = sweep_journal(cfg.prepare.docker_command, journal)
-            if leftover:
-                raise RuntimeError(f"workspace export containers not removed: {leftover}")
-        except BaseException as cleanup_error:
-            if primary is None:
-                raise
-            primary.add_note(f"workspace compiler cleanup failed: {cleanup_error}")
-    result["environments"] = compiled
-    return result
-
-
 def main() -> None:
-    batch = len(sys.argv) == 3 and sys.argv[1] in {"--describe-tasks", "--describe-task-resources"}
-    if not batch and len(sys.argv) != 2:
+    if len(sys.argv) != 3 or sys.argv[1] not in {"--describe-tasks", "--describe-task-resources"}:
         raise SystemExit(
             "usage: python -I -m flotilla.integrations.workspace "
-            "[--describe-tasks|--describe-task-resources] /absolute/request.json"
+            "--describe-tasks|--describe-task-resources /absolute/request.json"
         )
     path = Path(sys.argv[-1])
     if not path.is_absolute():
         raise ValueError("request path must be absolute")
-    if batch:
-        with path.open("rb") as stream:
-            data = stream.read(METADATA_REQUEST_BYTES + 1)
-        if len(data) > METADATA_REQUEST_BYTES:
-            raise ValueError("metadata request exceeds request byte limit")
-        request = json.loads(data)
-        root = Path(request["storage_root"])
-        workspace = Path(request["workspace"])
-        relative = workspace.relative_to(root)
-        if (
-            len(relative.parts) != 4
-            or relative.parts[0] != "launches"
-            or relative.parts[2] != "metadata"
-            or any(part in {".", ".."} for part in relative.parts)
-            or path != workspace / "request.json"
-        ):
-            raise ValueError("metadata output must belong to a launch metadata directory")
-        directory = root
-        for part in relative.parts:
-            directory /= part
-            if directory.is_symlink() or not directory.is_dir():
-                raise ValueError("metadata output ancestors must be real directories")
-        encoded = describe_tasks_request(request, resources=sys.argv[1] == "--describe-task-resources")
-    else:
-        request = json.loads(path.read_bytes())
-        encoded = json.dumps(compile_request(request)).encode()
+    with path.open("rb") as stream:
+        data = stream.read(METADATA_REQUEST_BYTES + 1)
+    if len(data) > METADATA_REQUEST_BYTES:
+        raise ValueError("metadata request exceeds request byte limit")
+    request = json.loads(data)
+    root = Path(request["storage_root"])
+    workspace = Path(request["workspace"])
+    relative = workspace.relative_to(root)
+    if (
+        len(relative.parts) != 4
+        or relative.parts[0] != "launches"
+        or relative.parts[2] != "metadata"
+        or any(part in {".", ".."} for part in relative.parts)
+        or path != workspace / "request.json"
+    ):
+        raise ValueError("metadata output must belong to a launch metadata directory")
+    directory = root
+    for part in relative.parts:
+        directory /= part
+        if directory.is_symlink() or not directory.is_dir():
+            raise ValueError("metadata output ancestors must be real directories")
+    encoded = describe_tasks_request(request, resources=sys.argv[1] == "--describe-task-resources")
     output = Path(request["workspace"]) / "result.json"
     temporary = output.with_suffix(".tmp")
     with temporary.open("wb") as stream:

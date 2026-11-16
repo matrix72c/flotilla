@@ -20,7 +20,6 @@ from flotilla.manifest import Manifest
 from flotilla.manifest import Unit as ManifestUnit
 from flotilla.platform.base import Resources, SharedVolume, StorageRoot, TmpfsMount
 from flotilla.platform.filesystem import unsized_tmpfs_bytes
-from flotilla.runtime.values import evaluate
 
 _REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
@@ -46,7 +45,6 @@ class PlanError(ValueError):
 def to_plan(
     manifest: Manifest,
     *,
-    runtime_params: Mapping[str, str],
     overlay: AgentOverlay = NO_OVERLAY,
     resources: Mapping[str, Resources] | None = None,
     external_mounts: Mapping[str, tuple[SharedVolume, ...]] | None = None,
@@ -56,7 +54,6 @@ def to_plan(
 ) -> TrialPlan:
     """Turn a manifest into core trial input (see module docs). The result is already `validate()`d."""
     env_by_unit = {name: dict(u.context.env) for name, u in manifest.units.items()}
-    _apply_runtime_params(manifest, runtime_params, env_by_unit)
     targets = overlay.services if overlay.services is not None else frozenset({manifest.agent_service})
     unknown = targets - set(manifest.units)
     if unknown:
@@ -97,21 +94,6 @@ def to_plan(
     except ValueError as exc:
         raise PlanError(f"manifest {manifest.task} is inconsistent: {exc}") from exc
     return plan
-
-
-def _apply_runtime_params(
-    manifest: Manifest, values: Mapping[str, str], env_by_unit: dict[str, dict[str, str]]
-) -> None:
-    """Substitute configured values into the original expressions; fall back to defaults, error if there is none."""
-    for p in manifest.runtime_params:
-        if p.service not in env_by_unit:
-            raise PlanError(f"runtime environment entry {p.var} targets unknown service {p.service}")
-        result, missing = evaluate(p.expr, {**values, **p.variables})
-        if missing:
-            raise PlanError(
-                f"task {manifest.task} requires runtime parameters {', '.join(missing)} ({p.service}.{p.var})"
-            )
-        env_by_unit[p.service][p.var] = result
 
 
 def _resolve_tmpfs(mounts: tuple[TmpfsMount, ...], resources: Resources) -> tuple[TmpfsMount, ...]:

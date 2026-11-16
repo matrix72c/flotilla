@@ -17,7 +17,7 @@ RES = Resources(cpu="1", memory="2Gi")
 
 
 def _project(services: dict[str, Any], **top: Any) -> Any:
-    p = normalize({"services": {"main": {"image": "m", "command": list(KEEPALIVE)}, **services}, **top}, {})
+    p = normalize({"services": {"main": {"image": "m", "command": list(KEEPALIVE)}, **services}, **top})
     assert not p.rejected, p.findings
     return p
 
@@ -116,14 +116,6 @@ def test_mount_order_places_parent_before_child(reverse: bool) -> None:
 # ───────────────────────────── Command composition ─────────────────────────────
 
 
-def test_defaulted_reference_does_not_hide_required_runtime_parameter() -> None:
-    p = _project({"main": {"image": "m", "environment": {"VALUE": "${TOKEN}/${TOKEN:-fallback}"}}})
-    manifest = _manifest(p)
-    with pytest.raises(PlanError, match="TOKEN"):
-        to_plan(manifest, runtime_params={})
-    assert to_plan(manifest, runtime_params={"TOKEN": "value"}).units["main"].context.env["VALUE"] == "value/value"
-
-
 @pytest.mark.parametrize(
     ("entrypoint", "command", "meta", "expected"),
     [
@@ -194,26 +186,18 @@ def test_manifest_networks_names_and_external_units() -> None:
     assert m.networks["inner"].names == {"agent": ["main"], "main": ["main"], "target": ["target"]}
     assert m.networks["api"].names["model-api-proxy"] == ["proxy"]
     assert m.external_units == ["proxy"]  # only proxy is on a non-internal network
-    assert [(p.service, p.var, p.expr) for p in m.runtime_params] == [
-        ("proxy", "UPSTREAM", "${EXAMPLE_API_UPSTREAM:-http://127.0.0.1:9}")
-    ]
 
 
-def test_schema_six_runtime_parameters_upgrade_without_repreparation() -> None:
-    expression = "${HOST}:${PORT:-80}"
+def test_schema_seven_drops_resolved_runtime_parameters() -> None:
     data = _manifest(_project({"main": {"image": "m"}})).model_dump(by_alias=True)
-    data["schema"] = 6
-    data["runtime_params"] = [
-        {"service": "main", "var": "URL", "expr": expression, "param": "HOST", "default": None},
-        {"service": "main", "var": "URL", "expr": expression, "param": "PORT", "default": "80"},
-    ]
+    data["schema"] = 7
+    data["runtime_params"] = []
     manifest = Manifest.load(data)
     assert manifest.schema_ == SCHEMA_VERSION
-    assert [p.model_dump() for p in manifest.runtime_params] == [
-        {"service": "main", "var": "URL", "expr": expression, "variables": {}}
-    ]
-    assert to_plan(manifest, runtime_params={"HOST": "db"}).units["main"].context.env["URL"] == "db:80"
     assert Manifest.load_json(manifest.dump_json()) == manifest
+    deferred = {**data, "runtime_params": [{"service": "main", "var": "URL", "expr": "${HOST}", "variables": {}}]}
+    with pytest.raises(ValueError, match="prepare its release again"):
+        Manifest.load(deferred)
 
 
 def test_manifest_json_roundtrip_and_strictness() -> None:
@@ -228,7 +212,7 @@ def test_manifest_json_roundtrip_and_strictness() -> None:
 
 
 def test_rejected_project_cannot_be_written() -> None:
-    p = normalize({"services": {"main": {"image": "m", "read_only": "invalid"}}}, {})
+    p = normalize({"services": {"main": {"image": "m", "read_only": "invalid"}}})
     with pytest.raises(ValueError):
         _manifest(p)
 
@@ -236,41 +220,25 @@ def test_rejected_project_cannot_be_written() -> None:
 # ───────────────────────────── Manifest -> TrialPlan ─────────────────────────────
 
 
-def test_to_plan_substitutes_runtime_params() -> None:
-    m = _manifest(_cve_like(), {n: ImageMeta(cmd=("run",)) for n in ("target", "proxy")})
-    plan = to_plan(m, runtime_params={"EXAMPLE_API_UPSTREAM": "https://gw/v1"})
-    assert plan.units["proxy"].context.env["UPSTREAM"] == "https://gw/v1"
-    # Defaults apply when not configured.
-    assert to_plan(m, runtime_params={}).units["proxy"].context.env["UPSTREAM"] == "http://127.0.0.1:9"
-
-
-def test_to_plan_missing_required_param() -> None:
-    p = _project({"proxy": {"image": "p", "environment": {"UPSTREAM": "${NEEDED}"}}})
-    m = _manifest(p, {"proxy": ImageMeta(cmd=("run",))})
-    with pytest.raises(PlanError, match="NEEDED"):
-        to_plan(m, runtime_params={})
-    assert to_plan(m, runtime_params={"NEEDED": "x"}).units["proxy"].context.env["UPSTREAM"] == "x"
-
-
 def test_to_plan_agent_overlay() -> None:
     m = _manifest(_project({"db": {"image": "d"}}), {"main": ImageMeta(env={"PATH": "/usr/bin"}), "db": ImageMeta()})
     overlay = AgentOverlay(
         env={"PATH": "/.flotilla/runtime/node/bin:${PATH}", "RT": "/.flotilla/runtime", "X": "${NOPE}"}
     )
-    plan = to_plan(m, runtime_params={}, overlay=overlay)
+    plan = to_plan(m, overlay=overlay)
     env = plan.units["main"].context.env
     assert env["PATH"] == "/.flotilla/runtime/node/bin:/usr/bin"  # ${PATH} refers to the service's original value
     assert env["RT"] == "/.flotilla/runtime" and env["X"] == ""
     assert "RT" not in plan.units["db"].context.env  # overlaid only onto the agent service by default
     with pytest.raises(PlanError):
-        to_plan(m, runtime_params={}, overlay=AgentOverlay(env={"A": "1"}, services=frozenset({"ghost"})))
+        to_plan(m, overlay=AgentOverlay(env={"A": "1"}, services=frozenset({"ghost"})))
 
 
 def test_to_plan_requires_published_task_files_for_mounts() -> None:
     p = _project({"a": {"image": "a", "volumes": [_vol("./conf", "/etc/conf", True, "bind")]}})
     m = _manifest(p, {"a": ImageMeta(cmd=("run",))})
     with pytest.raises(PlanError):
-        to_plan(m, runtime_params={})  # task files not yet published
-    plan = to_plan(m.model_copy(update={"task_files": "tasks/bk1"}), runtime_params={})
+        to_plan(m)  # task files not yet published
+    plan = to_plan(m.model_copy(update={"task_files": "tasks/bk1"}))
     [mount] = plan.units["a"].mounts
     assert (mount.scope, mount.key, mount.read_only) == ("trial", "binds/0", True)

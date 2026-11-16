@@ -29,12 +29,12 @@ from flotilla.share.release import (
     RELEASES,
     STAGING,
     ReleaseError,
+    _release_json,
     check_release,
     ensure_builtin_release,
     gc_releases,
     publish_release,
     release_entries,
-    release_json,
     verify_release,
 )
 from flotilla.testing.platform import FakePlatform, ManualClock, SharedTree
@@ -63,7 +63,7 @@ def _tree(root: Path, *, mode: int = 0o755) -> Path:
 
 def test_release_json_shape_and_entries(tmp_path: Path) -> None:
     root = _tree(tmp_path / "src")
-    blob, digest = release_json("r1", root, {"busybox": "1.36.1"})
+    blob, digest = _release_json("r1", root, {"busybox": "1.36.1"}, release_entries(root))
     document = json.loads(blob)
     assert document["release"] == "r1"
     assert document["components"] == {"busybox": "1.36.1"}
@@ -74,7 +74,7 @@ def test_release_json_shape_and_entries(tmp_path: Path) -> None:
     assert entry["sha256"] == hashlib.sha256(b"\x00busybox-bytes").hexdigest()
     assert digest == hashlib.sha256(blob).hexdigest()
     # Byte-for-byte reproducible: the same content hashed twice gives the same digest.
-    assert release_json("r1", root, {"busybox": "1.36.1"}) == (blob, digest)
+    assert _release_json("r1", root, {"busybox": "1.36.1"}, release_entries(root)) == (blob, digest)
 
 
 def test_matches_real_release(tmp_path: Path) -> None:
@@ -101,7 +101,8 @@ def test_matches_real_release(tmp_path: Path) -> None:
     (root / "bin").mkdir(parents=True)
     (root / "bin" / "busybox").write_bytes(b"x")
     (root / "bin" / "busybox").chmod(0o755)
-    blob, _ = release_json("2026-10-07.1", root, {"busybox": "1.36.1 (alpine busybox-static 1.36.1-r31)"})
+    components = {"busybox": "1.36.1 (alpine busybox-static 1.36.1-r31)"}
+    blob, _ = _release_json("2026-10-07.1", root, components, release_entries(root))
     assert blob.decode().splitlines()[:4] == real.decode().splitlines()[:4]
     assert blob.endswith(b"\n")
 
@@ -402,7 +403,7 @@ def _pin_fake_busybox(monkeypatch: pytest.MonkeyPatch, anchor: Anchor, tmp_path:
     (root / "bin").mkdir(parents=True)
     (root / "bin" / "busybox").write_bytes(data)
     (root / "bin" / "busybox").chmod(0o755)
-    _, digest = release_json(BUILTIN_RELEASE, root, {"busybox": BUILTIN_COMPONENT})
+    _, digest = _release_json(BUILTIN_RELEASE, root, {"busybox": BUILTIN_COMPONENT}, release_entries(root))
     monkeypatch.setattr(share_release, "BUILTIN_RELEASE_SHA256", digest)
     reads: list[str] = []
 

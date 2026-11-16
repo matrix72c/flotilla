@@ -8,14 +8,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from flotilla.compose.interpolate import interpolate
 from flotilla.compose.layout import classify
 from flotilla.compose.model import Finding, Project
 from flotilla.compose.paths import confined
 from flotilla.compose.task import HarborTask
 from flotilla.platform.base import RESERVED_MOUNTS, Capabilities, overlaps
-
-SHARE_MOUNT = "/.flotilla"
 
 Status = Literal["accepted", "rejected"]
 
@@ -26,7 +23,6 @@ class ScanResult:
     status: Status
     findings: tuple[Finding, ...]
     restart_services: tuple[str, ...]  # services with a restart policy (for statistics)
-    runtime_params: tuple[str, ...]  # runtime parameter names requiring configuration
     external_units: tuple[str, ...]  # services receiving the caller's egress policy
     services: tuple[str, ...] = ()
 
@@ -38,7 +34,6 @@ class ScanResult:
             "services": list(self.services),
             "findings": [{"path": f.path, "kind": f.kind, "reason": f.reason} for f in self.findings],
             "restart_services": list(self.restart_services),
-            "runtime_params": list(self.runtime_params),
             "external_units": list(self.external_units),
         }
 
@@ -70,16 +65,6 @@ def scan(
         status="rejected" if rejected else "accepted",
         findings=tuple(findings),
         restart_services=tuple(sorted(n for n, s in project.services.items() if s.restart != "no")),
-        runtime_params=tuple(
-            sorted(
-                {
-                    name
-                    for params in project.runtime_params.values()
-                    for expression in params.values()
-                    for name in interpolate(expression.expr, expression.variables).unresolved
-                }
-            )
-        ),
         external_units=tuple(
             sorted(n for n, s in project.services.items() if external_networks.intersection(s.networks))
         ),

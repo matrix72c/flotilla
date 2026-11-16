@@ -242,7 +242,7 @@ sudo rm -rf "$LOCAL"   # sandboxes create root-owned files under shared/
 - **Verified exec authentication.** Flotilla gives each sandbox's exec daemon an access token, but its ports are published on the host and this setup has not verified that requests without the token are rejected.
 - **Offline tasks.** Only measured network acceptance with controlled TCP/UDP and DNS behavior can authorize them. An empty exception list is not evidence; there is no declaration-based shortcut. See [Network validation](Network_Validation.md).
 - **UDP between services.** Enabled only after directed content-bearing UDP and disconnect/reconnect checks pass.
-- **Platform-side building.** The historical local images and host Docker access do not establish that the management sandbox can compile tasks, reach a build service, or use explicitly mounted credentials.
+- **Platform-side building.** Local images and host Docker access do not establish that the management sandbox can compile tasks, reach a build service, or use explicitly mounted credentials.
 
 For a deployment that does provide these, follow the [deployment guide](Deployment.md).
 

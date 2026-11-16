@@ -12,7 +12,7 @@
 | Launch | One running Flotilla client process; every resource it creates carries its launch ID |
 | Anchor | A small, renewable sandbox per launch that mounts the shared-storage root and performs file operations on it |
 | Share release | An immutable directory of helper binaries (BusyBox) mounted into every sandbox at `/.flotilla` |
-| Dataset row | Release ID, task reference and digest, plus annotations and parameters |
+| Dataset row | Release name and relative task reference, plus annotations and parameters |
 | Task release | A directory of `tasks/<key>/` definitions and static files plus a `dataset.jsonl`, bound by name to local/platform roots |
 | Attempt workspace | Launch-owned private role state, verification staging and artifact handoff directories |
 | Capability report | `capabilities.json`, written by `flotilla probe`: what the deployment supports, each item `passed`, `failed`, `skipped`, or `error` |
@@ -50,7 +50,7 @@ A ready environment has a finite lifetime. Operations verify ownership and servi
 
 Shared storage separates immutable shared-tools releases, native task releases and launch-owned workspaces at `launches/<launch>/attempts/<attempt>`. Hidden tests remain private to the trusted Anchor; agent roles receive only selected mounts, public instruction and writable state. Verification stages tests after the agent stops. A separately declared verifier role receives declared handoff artifacts read-only; otherwise verification uses the main role. Role instances must be deleted before their workspace. Local and platform release files are verified, not just their manifest IDs.
 
-The native Anchor contains installed Flotilla and filesystem helpers, not Harbor/Compose/build tooling or push credentials. Host preparation owns those optional dependencies. The old `HarborAttempt` and management workspace helper remain explicitly legacy APIs, not native fallbacks. No automatic DinD, protocol fallback or credential baking is performed. Offline tests do not establish real platform acceptance or a compatible published image.
+The native Anchor contains installed Flotilla and filesystem helpers, not Harbor/Compose/build tooling or push credentials. Host preparation owns those optional dependencies. No automatic DinD, protocol fallback or credential baking is performed. Offline tests do not establish real platform acceptance or a compatible published image.
 
 The anchor stops admitting new work after its renewal grace period. GC uses two observations and list-visibility bounds to avoid collecting a live owner. Explicit GC handles abandoned resources after crashes; it is not a scheduler inside the runtime.
 

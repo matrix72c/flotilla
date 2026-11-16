@@ -8,8 +8,6 @@ plus a `[backends.<name>]` table, validated by its `settings_model`.
 from __future__ import annotations
 
 import functools
-import hashlib
-import json
 import re
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
@@ -30,7 +28,6 @@ BUILTIN = "opensandbox"
 _BUILTINS = {BUILTIN: "flotilla.config:OpenSandboxBackend"}
 _NAME = re.compile(r"[a-z][a-z0-9_-]*")
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-_COMMON = frozenset({"endpoint", "credential_env", "capabilities"})
 
 
 class BackendSettings(BaseModel):
@@ -75,15 +72,6 @@ class Backend[S: BackendSettings](ABC):
     def capabilities(self, settings: S, cfg: FlotillaConfig, caps: Capabilities) -> Capabilities:
         """Adjust capabilities from the report for what this configuration enforces or cannot provide."""
         return caps
-
-    def profile(self, settings: S, cfg: FlotillaConfig) -> str:
-        """Fingerprint of the settings that optional filesystem evidence depends on.
-
-        `flotilla probe` records it, and read-only rootfs / native tmpfs evidence is ignored when it changes. The
-        default covers every backend-specific key, so any change to them requires a new probe.
-        """
-        data = settings.model_dump(mode="json", exclude=set(_COMMON))
-        return hashlib.sha256(json.dumps(data, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
     @abstractmethod
     def build(

@@ -8,8 +8,8 @@ from pathlib import Path
 from flotilla.build.cache import build_key
 from flotilla.build.driver import build_task
 from flotilla.build.images import BuildSettings
-from flotilla.compose.task import load_task
 from flotilla.testing.build import DIGEST, DIGEST2, FakeBuilder, FakeRegistry, _ctx, _task
+from flotilla.testing.compose import offline_task as load_task
 
 BASES = {"r.io/base:1": f"r.io/base@{DIGEST}"}
 

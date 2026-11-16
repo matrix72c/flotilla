@@ -19,6 +19,8 @@ from flotilla.compose.normalize import KEEPALIVE, normalize
 from flotilla.compose.paths import confined
 
 COMPOSE_VERSION = "2.39.4"
+# Compose reports an undefined reference on stderr and substitutes a blank string, exiting 0.
+_UNSET_VARIABLE = re.compile(r'The "?([A-Za-z_][A-Za-z0-9_]*)"? variable is not set')
 
 
 def _input_path(root: Path, value: str) -> Path:
@@ -146,7 +148,7 @@ class ComposeConfigAdapter:
         if self.resources_only and not selected:
             # load_environment still applies native task resource overrides. Do
             # not use this shortcut for even an empty, but present, Compose file.
-            return normalize({"services": {MAIN: base}}, {}, resolved=True)
+            return normalize({"services": {MAIN: base}})
         if (self.command, self.expected_version) not in _VERSION_CHECKED:
             try:
                 version = self._run([*self.command, "version", "--short"], root, env).strip().removeprefix("v")
@@ -198,7 +200,7 @@ class ComposeConfigAdapter:
             for name, spec in (document.get(category) or {}).items():
                 if isinstance(spec, dict) and spec.get("name") == f"{project_name}_{name}":
                     spec.pop("name")
-        return normalize(document, {}, resolved=True)
+        return normalize(document)
 
     @staticmethod
     def _relative_paths(document: dict[str, Any], root: Path) -> None:
@@ -222,4 +224,9 @@ class ComposeConfigAdapter:
             raise ComposeToolError(f"official Compose config unavailable: {exc}") from exc
         if result.returncode:
             raise ValueError(f"official Compose config failed: {result.stderr.strip()}")
+        unset = sorted({match.group(1) for match in _UNSET_VARIABLE.finditer(result.stderr)})
+        if unset:
+            # A reference with a default (`${VAR:-x}`) does not warn, so this is
+            # exactly the case the task provides no value for at all.
+            raise ValueError(f"references variables the task does not provide and that have no default: {unset}")
         return result.stdout

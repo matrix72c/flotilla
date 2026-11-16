@@ -1,10 +1,10 @@
 """Harbor 0.24 execution/file view. Install the harbor extra to import it.
 
-Platform task-key executions enter through HarborAttempt, which owns the workspace
-and both roles. This class adapts its live handles to native Harbor I/O. Persisted
-prepared JSONL and native Harbor Trial's local-task upload flow are not supported
-remote-task entrypoints. Transient prepared_environment is an internal I/O adapter
-hook, not a dataset format.
+Task executions enter through `NativeAttempt`, which owns the workspace and both
+roles. This class adapts its live handles to native Harbor I/O. Native Harbor
+Trial's local-task upload flow is not a supported remote-task entrypoint.
+Transient prepared_environment is an internal I/O adapter hook, not a dataset
+format.
 """
 
 from __future__ import annotations
@@ -65,7 +65,9 @@ class FlotillaEnvironment(BaseEnvironment):  # type: ignore[misc]
         runtime_params: dict[str, str] | None = None,
     ) -> None:
         if prepared is not None:
-            raise ValueError("legacy prepared JSONL is unsupported; use HarborAttempt with a platform task_key")
+            raise ValueError("prepared JSONL is unsupported; use NativeAttempt with a native release binding")
+        if runtime_params:
+            raise ValueError("runtime parameters are resolved at preparation; set them on the dataset row")
         self._transient_prepared = prepared_environment
         self._cfg = fleet.config if fleet is not None else FlotillaConfig.load(deployment)
         self._cfg.check_against(self._cfg.load_report())
@@ -77,7 +79,6 @@ class FlotillaEnvironment(BaseEnvironment):  # type: ignore[misc]
         self._stopped: set[str] = set()
         self._stopping: dict[str, asyncio.Task[None]] = {}
         self._run_timeout = run_timeout
-        self._runtime_params = dict(runtime_params or {})
         self._resource_overrides = {}
         if override_cpus is not None:
             self._resource_overrides["cpu"] = str(override_cpus)
@@ -127,9 +128,9 @@ class FlotillaEnvironment(BaseEnvironment):  # type: ignore[misc]
         self._task_root = self._directory.parent
 
     def _prepared_environment(self) -> PreparedEnvironment:
-        """Internal transient role only; production task inputs enter HarborAttempt."""
+        """Internal transient role only; production task inputs enter NativeAttempt."""
         if self._transient_prepared is None:
-            raise ValueError("use HarborAttempt with a platform task_key, then FlotillaEnvironment.view(handle)")
+            raise ValueError("use NativeAttempt with a native release binding, then FlotillaEnvironment.view(handle)")
         return self._transient_prepared
 
     @classmethod
@@ -175,7 +176,6 @@ class FlotillaEnvironment(BaseEnvironment):  # type: ignore[misc]
                     request_id=self.session_id,
                     lifetime=self._run_timeout,
                     resources={"main": self._resource_overrides} if self._resource_overrides else {},
-                    runtime_params=self._runtime_params,
                     disable_internet=mode == "no-network",
                 ),
             )

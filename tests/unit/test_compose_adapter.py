@@ -18,6 +18,50 @@ from flotilla.compose.normalize import normalize
 from flotilla.compose.task import TaskError, load_task
 
 
+def test_undefined_variable_is_refused_instead_of_blanked(tmp_path: Path) -> None:
+    """Compose exits 0 and substitutes a blank string; preparation must not bake that in."""
+    (tmp_path / "docker-compose.yaml").write_text("services:\n  main:\n    image: r.io/app:${TAG}\n")
+
+    def run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if args[-2:] == ["version", "--short"]:
+            return subprocess.CompletedProcess(args, 0, f"v{COMPOSE_VERSION}\n", "")
+        warning = 'WARN[0000] The "TAG" variable is not set. Defaulting to a blank string. \n'
+        output = {"services": {"main": {"image": "r.io/app:"}}}
+        return subprocess.CompletedProcess(args, 0, json.dumps(output), warning)
+
+    with (
+        patch("flotilla.compose.adapter.subprocess.run", side_effect=run),
+        pytest.raises(ValueError, match=r"no default: \['TAG'\]"),
+    ):
+        ComposeConfigAdapter().load(
+            tmp_path,
+            files=(tmp_path / "docker-compose.yaml",),
+            environment={},
+            main_image=None,
+            main_build=False,
+        )
+
+
+def test_defaulted_reference_does_not_warn_and_is_accepted(tmp_path: Path) -> None:
+    (tmp_path / "docker-compose.yaml").write_text("services:\n  main:\n    image: r.io/app:${TAG:-1}\n")
+
+    def run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if args[-2:] == ["version", "--short"]:
+            return subprocess.CompletedProcess(args, 0, f"v{COMPOSE_VERSION}\n", "")
+        output = {"services": {"main": {"image": "r.io/app:1", "command": []}}}
+        return subprocess.CompletedProcess(args, 0, json.dumps(output), "")
+
+    with patch("flotilla.compose.adapter.subprocess.run", side_effect=run):
+        project = ComposeConfigAdapter().load(
+            tmp_path,
+            files=(tmp_path / "docker-compose.yaml",),
+            environment={},
+            main_image=None,
+            main_build=False,
+        )
+    assert project.services["main"].image == "r.io/app:1"
+
+
 def test_adapter_delegates_ordered_merge_and_interpolation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SECRET_FROM_HOST", "must-not-leak")
     first = tmp_path / "compose.yaml"
@@ -71,7 +115,6 @@ def test_adapter_delegates_ordered_merge_and_interpolation(tmp_path: Path, monke
     assert service.command == service.entrypoint == ()
     assert service.environment == {"LITERAL": "${UNCHANGED}", "DOLLARS": "$HOME", "KEY$$": "one$two$$three$$$"}
     assert service.volumes[0].source == "./data"
-    assert project.runtime_params == {}
     assert len(calls) == 2
     assert calls[-1][0][-4:] == ["config", "--format", "json", "--no-path-resolution"]
 
@@ -201,7 +244,7 @@ def test_loader_uses_official_adapter_without_parsing_yaml_itself(tmp_path: Path
 @pytest.mark.parametrize("entrypoint", [None, [], "", ["override"]])
 @pytest.mark.parametrize("command", [None, [], "", ["argument"]])
 def test_null_and_empty_command_entrypoint(entrypoint: str | list[str] | None, command: str | list[str] | None) -> None:
-    project = normalize({"services": {"main": {"image": "image", "entrypoint": entrypoint, "command": command}}}, {})
+    project = normalize({"services": {"main": {"image": "image", "entrypoint": entrypoint, "command": command}}})
     meta = ImageMeta(entrypoint=("image-entry",), cmd=("image-cmd",))
     expected_entry = ("image-entry",) if entrypoint is None else tuple(entrypoint)
     expected_cmd = (("image-cmd",) if entrypoint is None else ()) if command is None else tuple(command)
@@ -231,7 +274,7 @@ def test_docker_only_semantics_are_recorded_not_rejected(field: str, value: obje
     from flotilla.compose.task import HarborTask
     from flotilla.testing.build import FakeBuilder, FakeRegistry, _ctx
 
-    project = normalize({"services": {"main": {"image": "r.io/image", field: value}}}, {})
+    project = normalize({"services": {"main": {"image": "r.io/image", field: value}}})
     kinds = {f.kind for f in project.findings if f.path == f"services.main.{field}"}
     assert kinds and kinds <= {"equivalent", "warn"}, project.findings
     builder, registry = FakeBuilder(), FakeRegistry()

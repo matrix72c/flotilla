@@ -31,7 +31,7 @@ class GcReport:
 
 # Staging names end in `.<unix seconds>.<12 hex>`; anything else is listed, never deleted.
 _STAGED = re.compile(r"\.(\d{9,11})\.[0-9a-f]{12}$")
-STAGING_DIRS = ("tasks/.staging", "tasks/.trash", "share/staging")
+STAGING_DIRS = ("share/staging",)
 
 
 @dataclass(frozen=True)
@@ -125,7 +125,7 @@ class Gc:
         return {st.labels[labels.LAUNCH] for st in units if labels.LAUNCH in st.labels}
 
     async def collect_staging(self, max_age_s: float) -> StagingReport:
-        """Remove staging and trash entries older than `max_age_s` (by the timestamp in their names). Anchor mode."""
+        """Remove staging entries older than `max_age_s` (by the timestamp in their names). Anchor mode."""
         if self._anchor is None:
             raise ValueError("staging collection needs an anchor")
         now = self._clock.now().timestamp()

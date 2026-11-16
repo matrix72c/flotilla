@@ -42,10 +42,10 @@ tags without implementing Compose merging or interpolation. Project-generated
 resource names are removed; arbitrary Docker resource names and external
 resources are not supported.
 
-`normalize(..., resolved=True)` is the pure resolved-model translation entry.
-The legacy lightweight `normalize`/loader mode remains available for offline
-model tests and existing lower-layer callers; it is **not** an official Compose
-merge/interpolation implementation or a production fallback.
+`normalize` is the pure resolved-model translation entry: it maps the adapter's
+output to the runtime model and classifies fields, and never substitutes a
+variable or opens a file. Offline tests drive it through a double that merges
+the selected files without interpolating, not through a second parser.
 
 ## Storage and command behavior
 
@@ -106,36 +106,16 @@ translation is not proof of Docker equivalence or deployment support.
 ## Verification scope
 
 Unit contracts mock the official Compose subprocess, cover version/error
-handling and explicit arguments, and verify that resolved dollar expressions
-are not expanded again. Model/build tests cover null/empty argv, shared mixed
-RO/RW binds, nested mounts, nocopy seeds, real single-reference mounts, hardlinks,
-and rejected formerly ignored semantics. Opt-in tests in
-`tests/contract/test_compose_official.py` also ran successfully against a
-checksum-verified temporary official Compose 2.39.4 executable. They cover
-ordered files, reset/override tags, null/empty argv, env files, and one through
-five literal dollars originating in YAML, explicit environment, `.env`, and raw
-or quoted service env files. This normalization-only check uses no Docker daemon
-or workloads and does not verify the management image's build/runtime toolchain.
-The temporary executable was not installed into the resident environment.
+handling and explicit arguments, and verify that resolved dollar expressions are
+not expanded again and that an undefined reference without a default is refused
+rather than blanked. Model/build tests cover null/empty argv, shared mixed RO/RW
+binds, nested mounts, nocopy seeds, real single-reference mounts and hardlinks.
 
-`tests/contract/compose_runtime.py` additionally compares actual service-startup
-observations under official Docker Compose and `HarborAttempt`. The 2026-11-08
-OpenSandbox run passed explicit expectations on both sides for spaced/empty argv,
-literal dollars, `.env` and quoted/raw environment files, shared RO/RW binds,
-descendant sharing, and nested read-only overlays. Owned Docker/platform resources
-and fixture data were confirmed removed. This is a deterministic runtime contract,
-not Agent/verifier or general Docker-equivalence evidence.
+`tests/contract/test_compose_official.py` is an opt-in check against an explicit
+official Compose 2.39.4 executable, selected with `FLOTILLA_TEST_COMPOSE`. It
+covers ordered files, reset/override tags, null/empty argv, env files, and one
+through five literal dollars originating in YAML, explicit environment, `.env`,
+and raw or quoted service env files. This normalization-only check uses no
+Docker daemon or workloads and does not verify the management image's
+build/runtime toolchain. Translation is not proof of Docker equivalence.
 
-To repeat on an admitted deployment, supply an immutable Python 3 image and a
-scratch directory mounted at the same absolute path on the driver and Docker host:
-
-```sh
-python tests/contract/compose_runtime.py \
-  --deployment /path/to/deployment.toml --out /path/to/result.json \
-  --compose /absolute/path/to/docker-compose \
-  --image 'python@sha256:<digest>' --local-root /same/path/scratch
-```
-
-The driver needs explicitly configured Docker access and platform credentials;
-these must never be mounted into the task fixture. Each runtime must match the
-expected values, not merely produce identical output.

@@ -1,6 +1,6 @@
 # Network validation
 
-Use a dedicated deployment and isolated probe labels. The only handwritten inputs are in `deployment.toml`; invoke `flotilla probe --deployment deployment.toml --out capabilities.candidate.json`. The report records effective inputs and the relevant configuration fingerprint without tokens or complete private responses.
+Use a dedicated deployment and isolated probe labels. The only handwritten inputs are in `deployment.toml`; invoke `flotilla probe --deployment deployment.toml`, which writes the capabilities path that deployment declares. The report records effective inputs and the relevant configuration fingerprint without tokens or complete private responses.
 
 ## Positive controls are mandatory
 

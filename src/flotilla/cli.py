@@ -67,7 +67,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--staging-age",
         type=float,
         default=24 * 3600,
-        help="remove tasks/.staging, tasks/.trash and share/staging entries older than this many seconds",
+        help="remove share/staging entries older than this many seconds",
     )
     p = sub.add_parser("probe", help="run contract tests against a deployment and write a capability report")
     p.add_argument("--deployment", required=True, type=Path, help="deployment configuration (TOML)")
@@ -76,7 +76,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--out",
         type=Path,
-        help="output path for the capability report; defaults to the backend table's capabilities path",
+        help="capabilities path declared by the backend table; any other path is refused",
     )
     p.add_argument(
         "--hosts-recheck",
