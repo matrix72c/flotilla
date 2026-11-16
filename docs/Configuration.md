@@ -1,6 +1,6 @@
 # Configuration reference
 
-The only handwritten deployment file is `deployment.toml`. `flotilla probe` generates `capabilities.json`; it is evidence, not another configuration input. `declared.json` and manual capability assertions are no longer accepted. Templates are in [`deployments/examples/`](../deployments/examples/). Validation errors show field paths without echoing input values.
+The only handwritten deployment file is `deployment.toml`. `flotilla probe` generates `capabilities.json`; it is evidence, not another configuration input. Templates are in [`deployments/examples/`](../deployments/examples/). Validation errors show field paths without echoing input values.
 
 ## deployment.toml
 
@@ -64,7 +64,7 @@ Filesystem checks run when the explicitly selected backend protocol can express 
 
 ### `[inputs.<name>]` (optional)
 
-Same keys as `[storage]`. Each section declares a named read-only root for published task releases or external read-only payloads such as an Agent runtime, for example an owner's storage shared read-only with this deployment. Names match `[a-z][a-z0-9_-]*`; `work` is reserved for `[storage]`. A release selects its root with `input`; other consumers name the root on their mounts. Task instances mount files from an input root read-only; the Anchor mounts every input root read-only at `/flotilla-inputs/<name>` and only reads from it (release verification, seed/copy sources, hidden tests). Nothing is written, cleaned or garbage-collected there, and Flotilla checks at startup that each input root exists.
+Same keys as `[storage]`. Each section declares a named read-only root for published task releases or external read-only payloads such as an Agent runtime, for example an owner's storage shared read-only with this deployment. Names match `[a-z][a-z0-9_-]{0,62}`, at most 63 characters; `work` is reserved for `[storage]`. A release selects its root with `input`; other consumers name the root on their mounts. Task instances mount files from an input root read-only; the Anchor mounts every input root read-only at `/flotilla-inputs/<name>` and only reads from it (release verification, seed/copy sources, hidden tests). Nothing is written, cleaned or garbage-collected there, and Flotilla checks at startup that each input root exists.
 
 Publishing tools (`share publish`) always write the work root of the deployment they are given; release and runtime upload is outside Flotilla. Changing these sections invalidates capability evidence.
 
@@ -82,7 +82,7 @@ The binding name is a configuration label, not a guessed task identity. Dataset 
 
 ### `[agent_runtime]` (optional)
 
-Typed, layer-agnostic bindings for a consumer's agent runtime. Flotilla validates the shape, layer names and roots, and mounts each layer read-only; **which layers must exist is the consumer's contract** — Flotilla does not count layers, interpret their names, or learn anything about the agent. Layer names match `[a-z][a-z0-9_-]*`.
+Typed, layer-agnostic bindings for a consumer's agent runtime. Flotilla validates the shape, layer names and roots, and mounts each layer read-only; **which layers must exist is the consumer's contract** — Flotilla does not count layers, interpret their names, or learn anything about the agent. Layer names match `[a-z][a-z0-9_-]{0,62}`, at most 63 characters.
 
 | Key | Meaning |
 |---|---|
@@ -122,7 +122,7 @@ Omitted means the built-in release `busybox-1.36.1-r31`, published from the Anch
 | `renew_interval` | `30` | Anchor renewal interval |
 | `grace` | `90` | After this long without a successful renewal, the launch stops admitting work. Must be at least `2 * renew_interval` and less than `anchor_ttl` |
 | `gc_window` | `180` | Minimum age before GC may collect another launch. Must exceed `grace + list_visibility_s` |
-| `trial_ttl` | `1800` | Platform TTL of each service sandbox; renewed while the environment is alive. Sandboxes are not renewed during startup, so each is created with at least the open's startup budget plus `renew_before_s` |
+| `trial_ttl` | `1800` | Platform TTL of each service sandbox; renewed while the environment is alive. Sandboxes are not renewed during startup, so set it to at least the open's startup budget plus `renew_before_s`; Flotilla does not derive or check that relation |
 | `renew_before_s` | `600` | Renew a service sandbox when this much TTL remains (capped at `trial_ttl / 2`) |
 | `renew_margin_s` | `120` | Safety margin for renewal (capped at half of `renew_before_s`) |
 
@@ -266,8 +266,8 @@ The probe image needs the configured execd interface, shell/file utilities and P
 
 Schema 2 stores one `status` per check: `passed`, `failed`, `skipped`, or `error`, plus concise evidence, measurements and runtime scope. Only `passed` enables a capability. `ok` is a derived internal property, not an accepted report field. Reports do not accept `source`, `declared`, `implicit_egress_declared`, `diagnostics`, or `multi_container`.
 
-`evidence_profile` binds backend, endpoint/project/extensions, ordinary and privileged runtime choices, execd/filesystem protocols, storage mapping, shared-tool release, network policy and relevant TTL/list budgets. Build settings and preparation concurrency are excluded. It records what the probe measured; a later configuration change only logs a warning, so rerun the probe when the platform behavior itself changed. Ordinary evidence does not enable privileged execution: its storage, auth, network and no-auto-mount checks are separate.
+`evidence_profile` binds the backend name and its whole settings table except `capabilities`, `credential_env` and `max_connections` (and, for the built-in backend, `management_extensions`), together with storage and input roots, the shared-tool release, network policy, the Anchor image, and the anchor/trial TTL and list-visibility budgets. It records what the probe measured; a later configuration change only logs a warning, so rerun the probe when the platform behavior itself changed. Ordinary evidence does not enable privileged execution: its storage, auth, network and no-auto-mount checks are separate.
 
 The report records requested TTLs, observed expiries and measured group size, not maximum platform limits. The configured list budget remains subject to `reaper.grace + probe.list_visibility_s < reaper.gc_window`; a fast observation never shrinks the safety budget.
 
-Legacy reports are rejected, never upgraded or merged into new success results. Write a candidate report atomically with `--out`, inspect its complete summary and cleanup result, then promote it. Missing required checks block startup. Only the three existing security gaps can be explicitly waived; waivers never rewrite evidence to `passed` or waive incomplete network acceptance.
+Legacy reports are rejected, never upgraded or merged into new success results. The report is written atomically to the path the backend table declares; `--out` only restates that path and is refused when it names another, so inspect a candidate by pointing a separate deployment file at its own capabilities path. Inspect the complete summary and cleanup result before promoting it. Missing required checks block startup. Only the three existing security gaps can be explicitly waived; waivers never rewrite evidence to `passed` or waive incomplete network acceptance.

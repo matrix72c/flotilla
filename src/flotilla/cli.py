@@ -76,7 +76,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--out",
         type=Path,
-        help="output path for the capability report; defaults to the backend table's capabilities path",
+        help="capabilities path declared by the backend table; any other path is refused",
     )
     p.add_argument(
         "--hosts-recheck",

@@ -38,7 +38,7 @@ local_root = "./release"
 platform_root = "/shared/releases/demo-v1"
 ```
 
-The platform root must be under your configured host storage root. PVC deployments instead use an explicit PVC location or relative storage key; see [Native tasks](Native_Tasks.md#bind-local-and-platform-roots). Local relative paths resolve against the deployment file. Consumers never repair missing files by rebuilding or reimporting source tasks.
+On host storage the platform root is either a key relative to the shared root or an absolute path under it; a `pvc:` value is refused. PVC deployments require the explicit `pvc:<claim>/<subpath>/...` form and refuse a relative key. See [Native tasks](Native_Tasks.md#bind-local-and-platform-roots). Local relative paths resolve against the deployment file. Consumers never repair missing files by rebuilding or reimporting source tasks.
 
 ## 4. Execute
 
@@ -70,7 +70,7 @@ async def main():
 asyncio.run(main())
 ```
 
-A dataset row identifies its release, relative task reference and digest. Preserve the complete row, including annotations and parameters, in snapshots. Duplicate rows remain duplicate attempts. Filtering/reordering rows does not alter release identity.
+A dataset row identifies its release and relative task reference. Preserve the complete row, including annotations and parameters, in snapshots. Duplicate rows remain duplicate attempts. Filtering/reordering rows does not alter release identity.
 
 The attempt starts services according to prepared dependency and healthcheck rules, using resolved application UID/GID/env/cwd. Writable state is attempt-private. Hidden tests are staged only for verification; separate verifier roles and declared handoffs use the same lifecycle. Closing waits for confirmed cleanup. Infrastructure and cleanup failures are not task scores.
 

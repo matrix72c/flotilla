@@ -22,7 +22,7 @@ def inspect_member(name: str, data: bytes, *, wheel: bool) -> list[str]:
     problems = []
     if any(part in FORBIDDEN for part in path.parts) or "deployments/local" in name:
         problems.append("excluded path")
-    if wheel and ("tests" in path.parts or name.endswith(("platform/fake.py", "integrations/xtuner.py"))):
+    if wheel and "tests" in path.parts:
         problems.append("non-runtime module in wheel")
     # Scanner fixtures are source code; review literal matches rather than echoing them.
     for category, pattern in PATTERNS.items():

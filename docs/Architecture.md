@@ -12,7 +12,7 @@
 | Launch | One running Flotilla client process; every resource it creates carries its launch ID |
 | Anchor | A small, renewable sandbox per launch that mounts the shared-storage root and performs file operations on it |
 | Share release | An immutable directory of helper binaries (BusyBox) mounted into every sandbox at `/.flotilla` |
-| Dataset row | Release ID, task reference and digest, plus annotations and parameters |
+| Dataset row | Release name and relative task reference, plus annotations and parameters |
 | Task release | A directory of `tasks/<key>/` definitions and static files plus a `dataset.jsonl`, bound by name to local/platform roots |
 | Attempt workspace | Launch-owned private role state, verification staging and artifact handoff directories |
 | Capability report | `capabilities.json`, written by `flotilla probe`: what the deployment supports, each item `passed`, `failed`, `skipped`, or `error` |
