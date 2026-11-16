@@ -40,7 +40,8 @@ task/
 | `name`, `version` | Equivalent (ignored) |
 | `networks` | Supported with restrictions, see below |
 | `volumes` | Named volumes without options only (`data: {}` or `data:`) |
-| `secrets`, `configs`, `include`, `x-*`, others | Rejected |
+| `x-*` | Equivalent (recorded only). The config adapter resolves anchors first, so what reaches normalization is leftover metadata; Compose strips the service-, network- and volume-level extension fields itself |
+| `secrets`, `configs`, `include`, others | Rejected |
 
 Top-level networks support `internal: true`. `driver` must be `bridge`, `ipam` must be empty or `{driver: default}` (the platform assigns addresses), and only the bridge name, MTU, and `gateway_mode_ipv4/ipv6` driver options are accepted. `external` networks and volumes are rejected because trials never share resources. Unused networks are dropped; a `default` network is created implicitly.
 

@@ -102,7 +102,12 @@ def normalize(compose: Mapping[str, Any]) -> Project:
     """
     c = _Collector()
     for key in compose:
-        if key not in ("services", "networks", "volumes", "name", "version"):
+        if key.startswith("x-"):
+            # The config adapter resolves anchors before this point, so a surviving
+            # extension field is leftover metadata. Compose strips the service-,
+            # network- and volume-level ones, which is why only the top level needs this.
+            c.equivalent(key, "extension field; recorded only, nothing here reads it")
+        elif key not in ("services", "networks", "volumes", "name", "version"):
             c.reject(key, "unsupported top-level field")
     raw_services = compose.get("services")
     if not isinstance(raw_services, dict) or not raw_services:
