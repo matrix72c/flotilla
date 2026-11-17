@@ -607,6 +607,25 @@ def test_nonroot_image_keeps_task_context_with_root_daemon(
     assert list(request.context.iterdir()) == []
 
 
+@pytest.mark.parametrize("user", ["root", "root:root"])
+def test_root_string_user_skips_user0_adaptation(tmp_path: Path, user: str) -> None:
+    """`USER root` already runs as root; the service links its source image with no derivation."""
+    from flotilla.build.meta import ImageAccounts
+
+    task = load_task(
+        _task(tmp_path, "rootuser", compose="services:\n  main:\n    image: r.io/app:1\n    command: null\n")
+    )
+    ctx = _ctx(
+        registry=FakeRegistry(user=user),
+        settings=BuildSettings(pullable_registries=("r.io",)),
+        image_accounts=lambda _: ImageAccounts("root:x:0:0::/root:/bin/sh\n", "root:x:0:\n"),
+    )
+    outcome = build_task(task, tmp_path / "out", ctx)
+    assert outcome.dispositions == {"main": "link"}
+    assert outcome.built == () and outcome.adapted == ()
+    assert _manifest(outcome).units["main"].context.uid == 0
+
+
 @pytest.mark.parametrize("missing", ["builder", "target"])
 def test_nonroot_runtime_image_reports_missing_build_requirements(tmp_path: Path, missing: str) -> None:
     task = load_task(_task(tmp_path, "nonroot", toml='[environment]\ndocker_image="r.io/app:1"\n'))
