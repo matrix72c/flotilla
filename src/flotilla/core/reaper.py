@@ -248,6 +248,8 @@ class Reaper:
 
     async def _create(self, trial: _Trial, unit: str, spec: InstanceSpec) -> InstanceHandle:
         try:
+            # A paused launch holds new creates until renewal succeeds (or the launch is lost).
+            await within(self._clock, None, self._anchor.admit("create"), abort=(trial.released,))
             await within(self._clock, None, self._admit(), abort=(trial.released, self._anchor.deactivated))
         except Aborted:
             raise self._not_sent(trial, "create") from None

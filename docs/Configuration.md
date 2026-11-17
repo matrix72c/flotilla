@@ -120,7 +120,7 @@ Omitted means the built-in release `busybox-1.36.1-r31`, published from the Anch
 | `anchor_image` | required for use | Anchor image by remote digest (`repo@sha256:...`), built with installed `flotilla anchor build` |
 | `anchor_ttl` | `600` | Actual anchor TTL request tested by probe; no platform maximum is inferred |
 | `renew_interval` | `30` | Anchor renewal interval |
-| `grace` | `90` | After this long without a successful renewal, the launch stops admitting work. Must be at least `2 * renew_interval` and less than `anchor_ttl` |
+| `grace` | `90` | After this long without a successful renewal, the launch pauses new creates and directory operations until a renewal succeeds; running trials continue. The launch is lost only 60s before `anchor_ttl` without renewal. Must be at least `2 * renew_interval` and less than `anchor_ttl - 60` |
 | `gc_window` | `180` | Minimum age before GC may collect another launch. Must exceed `grace + list_visibility_s` |
 | `trial_ttl` | `1800` | Platform TTL of each service sandbox; renewed while the environment is alive. Sandboxes are not renewed during startup, so each is created with at least the open's startup budget plus `renew_before_s` |
 | `renew_before_s` | `600` | Renew a service sandbox when this much TTL remains (capped at `trial_ttl / 2`) |

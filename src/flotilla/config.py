@@ -18,7 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from flotilla.backends import BUILTIN, Backend, BackendSettings, load_backend
 from flotilla.capabilities import SECURITY_FIELDS, CapabilityReport, ExternalTarget, ProbeSettings
-from flotilla.core.anchor import AnchorSettings
+from flotilla.core.anchor import EXPIRY_MARGIN_S, AnchorSettings
 from flotilla.core.reaper import ReaperSettings
 from flotilla.core.runtime import MonitorSettings
 from flotilla.core.trial import TrialSettings
@@ -281,10 +281,14 @@ class Reaper(_Model):
     @model_validator(mode="after")
     def _timing(self) -> Reaper:
         # Renew interval well below G (two renewals). G + list_visibility_s < W needs the report: check_against.
-        ok = self.renew_interval >= ANCHOR_RETRY_S and self.renew_interval * 2 <= self.grace < self.anchor_ttl
+        ok = (
+            self.renew_interval >= ANCHOR_RETRY_S
+            and self.renew_interval * 2 <= self.grace < self.anchor_ttl - EXPIRY_MARGIN_S
+        )
         if not ok:
             raise ValueError(
-                f"requires renew_interval >= {ANCHOR_RETRY_S} and renew_interval * 2 <= grace < anchor_ttl"
+                f"requires renew_interval >= {ANCHOR_RETRY_S} and "
+                f"renew_interval * 2 <= grace < anchor_ttl - {EXPIRY_MARGIN_S:g}"
             )
         if self.gc_window <= self.grace:
             raise ValueError("gc_window (W) must be greater than grace (G)")
