@@ -42,10 +42,11 @@ MANIFEST_NAME = "flotilla.manifest.json"
 FILES_DIR = "files"
 
 _ROOT_USERS = frozenset({"", "0", "0:0", "root", "root:root"})
-"""Image `USER` values that already run as root, so no USER0 adaptation is needed.
+"""Image `USER` / Compose `user` values that run as root (0:0).
 
 Docker resolves `USER` by name inside the image, making the string and numeric
-spellings equivalent; published base images use both forms.
+spellings equivalent; published base images use both forms. They need neither a
+USER0 adaptation nor the image account databases.
 """
 
 
@@ -94,7 +95,6 @@ class BuildContext:
     image_export: ImageExport | None = None
     user_lookup: UserLookup | None = None
     image_accounts: Callable[[str], ImageAccounts] | None = None
-    validate_mount_paths: Callable[[str, tuple[str, ...]], None] | None = None
     # Operation-scoped only: shared across roles/rows, never a global build cache.
     adaptations: dict[str, str] = field(default_factory=dict)
 
@@ -167,15 +167,6 @@ def _build(
             images[plan.service], dispositions[plan.service] = source.image, source.disposition
             if source.config is not None:
                 configs[plan.service] = source.config
-
-    for service, svc in project.services.items():
-        paths = tuple(m.mount_path for m in svc.tmpfs)
-        if svc.readonly_rootfs:
-            paths += ("/.flotilla-runtime",)
-        if paths:
-            if ctx.validate_mount_paths is None:
-                raise ImageError("tmpfs/readonly preparation requires image mount-path inspection")
-            ctx.validate_mount_paths(images[service], paths)
 
     files_dir = target_dir / FILES_DIR
     exported = export_task_files(project, task.env_dir, files_dir, images=images, image_export=ctx.image_export)
@@ -349,6 +340,8 @@ def _metadata(
         config = dict(folded if folded is not None else ctx.registry.image_config(images[name]))
         # An explicit Compose identity makes the image USER irrelevant.
         identity = svc.user if svc.user is not None else str(config.get("User") or "0:0")
+        if identity in _ROOT_USERS:
+            identity = "0:0"
         config["User"] = identity
         lookup, group_lookup = ctx.user_lookup, None
         user, _, group = identity.partition(":")

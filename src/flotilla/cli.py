@@ -48,6 +48,11 @@ def _build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--name", required=True, help="release name; rows carry it and [task_releases.<name>] binds it")
     pr.add_argument("--report", required=True, type=Path)
     pr.add_argument("--require-prebuilt-images", action="store_true")
+    pr.add_argument(
+        "--cache",
+        type=Path,
+        help="directory kept across runs for image configs, account databases and volume seeds, keyed by image digest",
+    )
     anc = sub.add_parser("anchor", help="installed-package Anchor tools")
     anchor_sub = anc.add_subparsers(dest="anchor_command", required=True)
     ab = anchor_sub.add_parser("build", help="build and verify an Anchor; publication requires --push")
@@ -143,7 +148,7 @@ async def _tasks(args: argparse.Namespace) -> int:
 def _prepare(args: argparse.Namespace) -> int:
     from flotilla.prepare import prepare
 
-    prepare(
+    result = prepare(
         args.selected,
         deployment=args.deployment,
         out=args.out,
@@ -151,8 +156,11 @@ def _prepare(args: argparse.Namespace) -> int:
         report=args.report,
         image_repo=args.image_repo,
         require_prebuilt_images=args.require_prebuilt_images,
+        cache=args.cache,
     )
-    print(f"native release prepared: {args.out}; publish it using your storage tools before consuming")
+    print(f"native release prepared: {args.out} ({result.prepared} rows); publish it using your storage tools")
+    if result.failed:
+        print(f"{result.failed} selected rows failed and are not in the release; see {args.report}", file=sys.stderr)
     return 0
 
 

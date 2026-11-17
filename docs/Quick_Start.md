@@ -26,7 +26,7 @@ flotilla prepare selected.jsonl --deployment deployment.toml \
 
 This command may build and publish required images. Provide registry credentials explicitly via your tool configuration or `--env prepare.env`. The repository argument has no tag or digest. Dockerfiles that only set configuration reuse their base digest; other builds are reused from the registry when an identical build exists (see [Native tasks](Native_Tasks.md)). Non-root source images get a minimal USER0 adaptation after the original application identity is resolved. Runtime images are fixed by remote digest. Static bind files, hidden tests and volume seeds are captured in the release. tmpfs/readonly rootfs do not by themselves require derived images.
 
-Preparation is atomic: failed selected rows do not silently disappear. Output must be a new directory. Keep reports and resumable work outside it. No platform task instances or static uploads are created by this command.
+A selected row that fails is left out of the release and reported with its reason; nothing is published only when no row prepared. Output must be a new directory. Pass `--cache <dir>` to keep image configs, account databases and volume seeds between runs, so a later run does not pull the same images again. Keep reports and the cache outside the release. No platform task instances or static uploads are created by this command.
 
 ## 3. Publish and bind
 
