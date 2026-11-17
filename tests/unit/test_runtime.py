@@ -166,7 +166,7 @@ async def test_launch_deactivation_marks_lost(platform: FakePlatform, clock: Man
     monitor, _, _ = await _ready(platform, clock, anchor, _plan())
     for _ in range(1000):
         platform.inject_fault("renew", _transient())
-    await clock.advance(ANCHOR.grace_s)
+    await clock.advance(ANCHOR.lost_after_s)
     assert monitor.lost is not None and "was deactivated" in str(monitor.lost)
     await monitor.stop()
 
