@@ -225,7 +225,7 @@ async def test_release_drops_queued_creates_immediately(platform: FakePlatform, 
 async def test_queued_create_after_deactivation_reports_lost(platform: FakePlatform, clock: ManualClock) -> None:
     a = Anchor(platform, clock, "L1", ANCHOR)
     await clock.run(a.start())
-    settings = ReaperSettings(create_concurrency=1, create_request_timeout_s=10_000.0)  # still in flight at G
+    settings = ReaperSettings(create_concurrency=1, create_request_timeout_s=10_000.0)  # still in flight at the loss
     reaper = Reaper(platform, clock, a, Deleter(platform, clock), settings)
     reaper.track("t1")
     platform.set_latency("create", 10_000.0)
@@ -233,7 +233,7 @@ async def test_queued_create_after_deactivation_reports_lost(platform: FakePlatf
     queued = asyncio.create_task(reaper.create("t1", "y", _spec("t1", "y")))
     for _ in range(1000):
         platform.inject_fault("renew", _err(ErrorCategory.TRANSIENT))
-    await clock.advance(ANCHOR.grace_s)
+    await clock.advance(ANCHOR.lost_after_s)
     assert a.deactivated.is_set()
     for task in (hog, queued):
         with pytest.raises(FlotillaError) as exc:
@@ -243,22 +243,22 @@ async def test_queued_create_after_deactivation_reports_lost(platform: FakePlatf
 
 
 @pytest.mark.asyncio
-async def test_no_create_request_after_grace(platform: FakePlatform, clock: ManualClock) -> None:
-    # no create request reaches the platform after t0 + G. If the backend queues / backs off inside the call,
+async def test_no_create_request_after_loss(platform: FakePlatform, clock: ManualClock) -> None:
+    # no create request reaches the platform once the launch is lost. If the backend queues / backs off inside the call,
     # deactivation cancels it.
-    for _ in range(1000):  # renewal never succeeds: t0 is when the anchor create was sent (0), deactivation at G
+    for _ in range(1000):  # renewal never succeeds: t0 is when the anchor create was sent (0), loss at ttl - margin
         platform.inject_fault("renew", _err(ErrorCategory.TRANSIENT))
     a = Anchor(platform, clock, "L1", ANCHOR)
     await clock.run(a.start())
     reaper = Reaper(platform, clock, a, Deleter(platform, clock), SETTINGS)
     reaper.track("t1")
-    await clock.advance(ANCHOR.grace_s - 5.0 - clock.monotonic())  # 5s of grace left
+    await clock.advance(ANCHOR.lost_after_s - 5.0 - clock.monotonic())  # 5s before the launch is lost
     platform.set_latency("create", 20.0)  # the request reaches the platform only after 20s
     with pytest.raises(FlotillaError) as exc:
         await clock.run(reaper.create("t1", "web", _spec("t1", "web")))
     assert exc.value.category is ErrorCategory.LOST
     await clock.advance(60.0)
-    assert _units(platform) == []  # the request did not arrive after G
+    assert _units(platform) == []  # the request did not arrive after the loss
     await clock.run(reaper.close())
 
 
@@ -269,12 +269,34 @@ async def test_create_refused_after_launch_deactivated(
     reaper.track("t1")
     for _ in range(1000):
         platform.inject_fault("renew", _err(ErrorCategory.TRANSIENT))
-    await clock.advance(ANCHOR.grace_s)
+    await clock.advance(ANCHOR.lost_after_s)
     creates = platform.calls["create"]
     with pytest.raises(FlotillaError) as exc:
         await reaper.create("t1", "web", _spec("t1", "web"))
     assert exc.value.category is ErrorCategory.LOST
     assert platform.calls["create"] == creates
+
+
+@pytest.mark.asyncio
+async def test_create_waits_while_paused_then_proceeds(
+    platform: FakePlatform, clock: ManualClock, anchor: Anchor, reaper: Reaper
+) -> None:
+    SharedTree(platform)  # close removes the launch directory through the anchor
+    reaper.track("t1")
+    for _ in range(1000):
+        platform.inject_fault("renew", _err(ErrorCategory.TRANSIENT))
+    await clock.advance(ANCHOR.grace_s)
+    assert anchor.paused
+    creates = platform.calls["create"]
+    task = asyncio.create_task(reaper.create("t1", "web", _spec("t1", "web")))
+    await clock.advance(60.0)
+    assert not task.done()
+    assert platform.calls["create"] == creates  # held while paused
+    platform.clear_faults()
+    await clock.advance(ANCHOR.retry_interval_s)
+    await clock.run(task)
+    assert platform.calls["create"] == creates + 1
+    await clock.run(reaper.close())
 
 
 @pytest.mark.asyncio
@@ -559,7 +581,7 @@ async def test_close_after_deactivation_is_not_clean(
     tree = SharedTree(platform)
     for _ in range(1000):
         platform.inject_fault("renew", _err(ErrorCategory.TRANSIENT))
-    await clock.advance(ANCHOR.grace_s)
+    await clock.advance(ANCHOR.lost_after_s)
     assert not await clock.run(reaper.close())
     assert tree.events == []
 
