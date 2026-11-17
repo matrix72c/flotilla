@@ -41,6 +41,13 @@ from flotilla.scan import ScanResult, scan_task
 MANIFEST_NAME = "flotilla.manifest.json"
 FILES_DIR = "files"
 
+_ROOT_USERS = frozenset({"", "0", "0:0", "root", "root:root"})
+"""Image `USER` values that already run as root, so no USER0 adaptation is needed.
+
+Docker resolves `USER` by name inside the image, making the string and numeric
+spellings equivalent; published base images use both forms.
+"""
+
 
 @dataclass(frozen=True)
 class BuildOutcome:
@@ -103,7 +110,7 @@ def preflight_images(plans: Sequence[ServiceImage], ctx: BuildContext) -> None:
     for plan in plans:
         if plan.ref is not None:
             source = plan.ref.pinned(plan.ref.digest or "")
-            nonroot = str(ctx.registry.image_config(source).get("User") or "") not in ("", "0", "0:0")
+            nonroot = str(ctx.registry.image_config(source).get("User") or "") not in _ROOT_USERS
         else:
             nonroot = False
         if nonroot and (not ctx.settings.target or ctx.builder is None):
@@ -214,7 +221,7 @@ def _runtime_images(
     derived = ctx.adaptations
     for service, image in images.items():
         user = str(ctx.registry.image_config(image).get("User") or "")
-        if user in ("", "0", "0:0"):
+        if user in _ROOT_USERS:
             continue
         if ctx.builder is None or not ctx.settings.target:
             raise ImageError(
