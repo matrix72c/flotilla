@@ -20,6 +20,7 @@ from flotilla.build.docker import extract_archive
 from flotilla.build.driver import BuildOutcome, build_task
 from flotilla.build.files import ExportError, export_task_files
 from flotilla.build.images import BuildSettings
+from flotilla.build.meta import ImageAccounts
 from flotilla.manifest import Manifest
 from flotilla.testing.build import DIGEST, DIGEST2, FakeBuilder, FakeExport, FakeRegistry, _ctx, _task
 from flotilla.testing.compose import offline_task as load_task
@@ -565,8 +566,6 @@ def test_all_image_sources_adapt_user0_and_keep_real_mounts(tmp_path: Path, sour
 def test_nonroot_image_keeps_task_context_with_root_daemon(
     tmp_path: Path, mirror: bool, compose_user: str | None
 ) -> None:
-    from flotilla.build.meta import ImageAccounts
-
     class Registry(FakeRegistry):
         def image_config(self, pinned: str) -> dict[str, object]:
             return {
@@ -607,10 +606,12 @@ def test_nonroot_image_keeps_task_context_with_root_daemon(
     assert list(request.context.iterdir()) == []
 
 
-@pytest.mark.parametrize("user", ["root", "root:root"])
+@pytest.mark.parametrize("user", ["root", "root:root", "0"])
 def test_root_string_user_skips_user0_adaptation(tmp_path: Path, user: str) -> None:
-    """`USER root` already runs as root; the service links its source image with no derivation."""
-    from flotilla.build.meta import ImageAccounts
+    """`USER root` already runs as root: no derivation, and no image account lookup (no image pull)."""
+
+    def no_accounts(image: str) -> ImageAccounts:
+        raise AssertionError(f"root identity must not read the account databases of {image}")
 
     task = load_task(
         _task(tmp_path, "rootuser", compose="services:\n  main:\n    image: r.io/app:1\n    command: null\n")
@@ -618,12 +619,27 @@ def test_root_string_user_skips_user0_adaptation(tmp_path: Path, user: str) -> N
     ctx = _ctx(
         registry=FakeRegistry(user=user),
         settings=BuildSettings(pullable_registries=("r.io",)),
-        image_accounts=lambda _: ImageAccounts("root:x:0:0::/root:/bin/sh\n", "root:x:0:\n"),
+        image_accounts=no_accounts,
     )
     outcome = build_task(task, tmp_path / "out", ctx)
     assert outcome.dispositions == {"main": "link"}
     assert outcome.built == () and outcome.adapted == ()
-    assert _manifest(outcome).units["main"].context.uid == 0
+    context = _manifest(outcome).units["main"].context
+    assert (context.uid, context.gid) == (0, 0)
+
+
+def test_compose_root_user_skips_account_lookup(tmp_path: Path) -> None:
+    def no_accounts(image: str) -> ImageAccounts:
+        raise AssertionError("Compose user root must not read the image account databases")
+
+    task = load_task(
+        _task(tmp_path, "composeroot", compose="services:\n  main:\n    image: r.io/app:1\n    user: root\n")
+    )
+    ctx = _ctx(settings=BuildSettings(pullable_registries=("r.io",)), image_accounts=no_accounts)
+    outcome = build_task(task, tmp_path / "out", ctx)
+    assert outcome.status == "built", outcome.reason
+    context = _manifest(outcome).units["main"].context
+    assert (context.uid, context.gid) == (0, 0)
 
 
 @pytest.mark.parametrize("missing", ["builder", "target"])

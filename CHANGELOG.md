@@ -11,6 +11,7 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Changed
 
+- An image `USER` or Compose `user` of `root`, `root:root`, `0` or `0:0` resolves to 0:0 without reading the image's `/etc/passwd` and `/etc/group`. Reading them created a container from the image, so preparation pulled every image declaring `USER root` only to learn that root is uid 0 with primary group 0.
 - Compose rejection reasons for fields the sandbox API has no counterpart for now say so, instead of "not supported yet" or "not seen in task data": `cap_drop`, `security_opt`, `ulimits`, `sysctls`, `extra_hosts`, `group_add`, `pid`, `ipc` and `network_mode: service:`/`container:`. `pids_limit`, `dns`, `dns_search`, `dns_opt`, `platform`, `memswap_limit` and `cgroup` were previously unclassified and fell through to a generic "unsupported field"; they are now listed with their reason and appear in the support table.
 
 ### Removed
