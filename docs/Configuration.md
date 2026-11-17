@@ -197,7 +197,7 @@ Host `flotilla prepare` uses these settings to create immutable native releases.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `prepare.concurrency` | `4` | Tasks prepared concurrently |
+| `prepare.concurrency` | `4` | Tasks prepared concurrently, by host `flotilla prepare` and by launch anchors |
 | `prepare.docker_command` | `["docker"]` | Docker argv prefix, e.g. `["sudo", "-n", "docker"]` |
 | `prepare.workspace_command` | `["python3", "-I", "-m", "flotilla.integrations.workspace"]` | Helper in the trusted management image; installed Flotilla/Harbor/build tools required, never automatically installed |
 | `prepare.workspace_timeout` | `1800` | Total remote preparation budget |
