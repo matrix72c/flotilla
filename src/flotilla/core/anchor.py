@@ -75,6 +75,9 @@ class AnchorSettings:
     retry_interval_s: float = 5.0  # retry interval after a failed renewal
     start_timeout_s: float = 600.0  # total for create, wait until exec-ready, wait until listed
     exec_timeout_s: float = 300.0  # per directory operation
+    # Requests in flight to the anchor's command service. Its commands (Python verifiers, tar, cp) share a small
+    # sandbox; an unbounded burst exhausts it and the command service stops answering. Excess requests queue here.
+    concurrency: int = 16
     # Only workspace-enabled runtime anchors get operator-configured builder access.
     external: ExternalPolicy = field(default_factory=lambda: ExternalPolicy(mode="none"))
     management_mounts: tuple[SharedVolume, ...] = ()
@@ -82,6 +85,8 @@ class AnchorSettings:
     profile: InstanceProfile = "default"
 
     def __post_init__(self) -> None:
+        if self.concurrency < 1:
+            raise ValueError("concurrency must be positive")
         if not 0 < self.retry_interval_s <= self.renew_interval_s < self.grace_s < self.lost_after_s:
             raise ValueError(
                 f"must satisfy 0 < retry_interval_s <= renew_interval_s < grace_s < ttl_s - {EXPIRY_MARGIN_S:g}"
@@ -126,6 +131,7 @@ class Anchor:
         self.creation_uncertain = False
         self._last_renewed = 0.0  # t0: send time of the last successful renewal (monotonic)
         self._resumed = asyncio.Event()  # replaced after each successful renewal; wakes `admit` waiters
+        self._slots = asyncio.Semaphore(settings.concurrency)  # bounds requests to the command service
         self._pause_reported = False
         self._renewer: asyncio.Task[None] | None = None
         self._started = False
@@ -280,7 +286,8 @@ class Anchor:
         await self.admit(stage)
         assert self._handle is not None
         try:
-            await self._platform.write_file(self._handle, self._path(key), data, mode=mode, uid=0, gid=0)
+            async with self._slots:
+                await self._platform.write_file(self._handle, self._path(key), data, mode=mode, uid=0, gid=0)
         except FlotillaError as exc:
             raise at_stage(exc, stage) from exc
         if (uid, gid) != (0, 0):
@@ -292,7 +299,8 @@ class Anchor:
         self.ensure_alive(stage)
         assert self._handle is not None
         try:
-            return await self._platform.read_file(self._handle, self._path(key))
+            async with self._slots:
+                return await self._platform.read_file(self._handle, self._path(key))
         except FlotillaError as exc:
             raise at_stage(exc, stage) from exc
 
@@ -310,7 +318,8 @@ class Anchor:
         self.ensure_alive(stage)
         assert self._handle is not None
         try:
-            return await self._platform.read_file(self._handle, path)
+            async with self._slots:
+                return await self._platform.read_file(self._handle, path)
         except FlotillaError as exc:
             raise at_stage(exc, stage) from exc
 
@@ -352,7 +361,8 @@ class Anchor:
             timeout_s=self._settings.exec_timeout_s,
         )
         try:
-            result = await self._platform.exec(self._handle, proc)
+            async with self._slots:
+                result = await self._platform.exec(self._handle, proc)
         except FlotillaError as exc:
             raise at_stage(exc, stage) from exc
         if result.exit_code == 0:
@@ -447,9 +457,7 @@ class Anchor:
         for attempt in range(5):
             self.ensure_alive(stage)
             try:
-                result = await within(
-                    self._clock, None, self._platform.exec(self._handle, proc), abort=(self.deactivated,)
-                )
+                result = await within(self._clock, None, self._exec(proc), abort=(self.deactivated,))
             except Aborted:
                 raise self.lost(stage) from None
             except FlotillaError as exc:
@@ -483,6 +491,11 @@ class Anchor:
                 retryable=True,
             )
         return result
+
+    async def _exec(self, proc: ProcessSpec) -> ExecResult:
+        assert self._handle is not None
+        async with self._slots:
+            return await self._platform.exec(self._handle, proc)
 
     async def _start(self) -> None:
         s = self._settings

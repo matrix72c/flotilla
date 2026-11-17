@@ -149,7 +149,8 @@ Set these from measured platform quotas.
 | `create_concurrency` | `64` | Concurrent create requests |
 | `reap_concurrency` | `16` | Concurrent deletions |
 | `exec_rate` | `500.0` | Command requests per second |
-| `exec_concurrency` | `64` | Concurrent commands |
+| `exec_concurrency` | `64` | Concurrent commands in task environments |
+| `anchor_concurrency` | `16` | Concurrent requests to an anchor's command service (directory operations, verification staging, uploads and downloads). The anchor shares a small sandbox among them; excess requests queue in the client. Size it with `prepare.management_resources` |
 | `exec_timeout` | `21600` | Maximum timeout accepted for a single command |
 | `admission_timeout` | `3600` | Default `OpenOptions.admission_timeout`: how long an open waits for a `trial_concurrency` / `instance_budget` slot. On expiry it raises `AdmissionTimeout` (a `TimeoutError`) with the current counts; nothing has been created |
 

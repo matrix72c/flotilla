@@ -218,6 +218,7 @@ class Limits(_Model):
     exec_rate: PositiveFloat = 500.0
     exec_timeout: PositiveFloat = 21600.0
     exec_concurrency: PositiveInt = 64
+    anchor_concurrency: PositiveInt = 16
     admission_timeout: PositiveFloat = 3600.0  # default wait for a trial_concurrency/instance_budget slot
 
 
@@ -773,6 +774,7 @@ class FlotillaConfig(_Model):
             management_env=dict(self.prepare.management_env) if workspace else {},
             profile=self.prepare.management_profile if workspace else "default",
             inputs=tuple(sorted(self.inputs)),
+            concurrency=self.limits.anchor_concurrency,
         )
         if workspace and self.prepare.management_resources is not None:
             settings = replace(settings, resources=Resources(**self.prepare.management_resources.model_dump()))
