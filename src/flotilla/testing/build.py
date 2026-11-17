@@ -92,32 +92,10 @@ class FakeBuilder:
 
 
 class FakeExport:
-    """Image content exporter: `contents` maps mount point -> {file name: content}.
+    """Image content exporter: `contents` maps mount point -> {file name: content}."""
 
-    `links` names container paths that exist as symlinks; `validate_mount_paths`
-    rejects mount targets under them exactly like the Docker exporter would.
-    """
-
-    def __init__(
-        self,
-        contents: Mapping[str, Mapping[str, str]] | None = None,
-        *,
-        links: Sequence[str] = (),
-    ) -> None:
+    def __init__(self, contents: Mapping[str, Mapping[str, str]] | None = None) -> None:
         self.contents = contents or {}
-        self.links = frozenset(links)
-        self.inspected: list[tuple[str, tuple[str, ...]]] = []
-
-    def validate_mount_paths(self, image: str, paths: tuple[str, ...]) -> None:
-        from flotilla.build.images import ImageError
-
-        self.inspected.append((image, tuple(paths)))
-        for value in paths:
-            parts = value.split("/")[1:] if value.startswith("/") else ()
-            for index in range(1, len(parts) + 1):
-                component = "/" + "/".join(parts[:index])
-                if component in self.links:
-                    raise ImageError(f"image mount path is a symlink or non-directory: {component}")
 
     def extract(
         self, image: str, path: str, dest: Path, *, identities: dict[str, tuple[int, int, int]] | None = None
@@ -180,9 +158,6 @@ def _ctx(**kw: Any) -> BuildContext:
         "builder": builder,
         "image_export": export,
     }
-    inspector = getattr(export, "validate_mount_paths", None)
-    if inspector is not None:
-        defaults["validate_mount_paths"] = inspector
     return BuildContext(**{**defaults, **kw})
 
 

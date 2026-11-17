@@ -18,7 +18,7 @@ from flotilla.platform.filesystem import memory_bytes
 from flotilla.platform.opensandbox.filesystem import INTERNAL_LIMITS, parse_effective
 from flotilla.runtime.planning import _resolve_tmpfs, to_plan
 from flotilla.scan import scan
-from flotilla.testing.build import DIGEST, FakeBuilder, FakeExport, _ctx, _task
+from flotilla.testing.build import FakeBuilder, FakeExport, _ctx, _task
 from flotilla.testing.compose import offline_task as load_task
 from flotilla.testing.config import config_data
 from flotilla.testing.reports import ok, report
@@ -61,10 +61,8 @@ def test_compose_filesystem_fields_roundtrip_to_runtime(tmp_path: Path) -> None:
         TmpfsMount("/tmp", 16 * 1024**2, 0o750, 1000, 1001),
         TmpfsMount("/cache", 8 * 1024**2, 0o700),
     )
-    # Mount points and the readonly runtime dir are runtime responsibilities:
-    # no derived image build, but every path is inspected in the source image.
+    # Mount points and the readonly runtime dir are runtime responsibilities: no derived image build.
     assert builder.requests == []
-    assert export.inspected == [(f"r.io/app@{DIGEST}", ("/tmp", "/cache", "/.flotilla-runtime"))]
     assert not any(f.kind == "equivalent" and "tmpfs" in f.path for f in manifest.findings)
     with pytest.raises(ValueError, match="schema"):
         Manifest.load_json(manifest.dump_json().replace(f'"schema": {SCHEMA_VERSION}', '"schema": 5'))

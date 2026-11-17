@@ -14,7 +14,6 @@ from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from threading import Timer
 from typing import Any
 
 from flotilla.build.builder import BuildRequest
@@ -218,53 +217,6 @@ class DockerImageExport:
                     removed = False
             if record is not None and removed:
                 record.unlink(missing_ok=True)
-
-    def validate_mount_paths(self, image: str, paths: tuple[str, ...]) -> None:
-        """Inspect only archive headers in a stopped container, never run image code.
-
-        Docker cp without -L preserves a source symlink. Inspect every existing
-        component separately, stopping the stream after its first header rather
-        than exporting a root filesystem or executing a shell inside the image.
-        """
-        with self._container(image) as container:
-            checked: set[str] = set()
-            for value in paths:
-                path = PurePosixPath(value)
-                if not path.is_absolute() or ".." in path.parts or path == PurePosixPath("/"):
-                    raise ImageError(f"unsafe mount target: {value!r}")
-                for part in (*reversed(path.parents), path):
-                    text = str(part)
-                    if text == "/" or text in checked:
-                        continue
-                    with tempfile.TemporaryFile() as errors:
-                        process = subprocess.Popen(
-                            [*self.docker_cmd, "cp", f"{container}:{text}", "-"],
-                            stdout=subprocess.PIPE,
-                            stderr=errors,
-                        )
-                        timer = Timer(self.timeout_s, process.kill)
-                        timer.start()
-                        try:
-                            assert process.stdout is not None
-                            with tarfile.open(fileobj=process.stdout, mode="r|*") as archive:
-                                entry = archive.next()
-                                if entry is None or not entry.isdir():
-                                    raise ImageError(f"image mount path is a symlink or non-directory: {text}")
-                        except tarfile.TarError as exc:
-                            process.wait(timeout=self.timeout_s)
-                            errors.seek(0)
-                            diagnostic = errors.read().decode(errors="replace")
-                            if "Could not find the file" in diagnostic or "No such file or directory" in diagnostic:
-                                break
-                            raise ImageError(f"cannot inspect image mount path {text}: {diagnostic}") from exc
-                        finally:
-                            timer.cancel()
-                            if process.poll() is None:
-                                process.kill()
-                            process.wait()
-                            if process.stdout is not None:
-                                process.stdout.close()
-                    checked.add(text)
 
     def accounts(self, image: str) -> ImageAccounts:
         with self._container(image) as container, tempfile.TemporaryDirectory(prefix="flotilla-identity-") as temporary:

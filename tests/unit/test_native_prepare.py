@@ -405,10 +405,10 @@ def test_prepare_mirrors_only_when_explicitly_configured(tmp_path: Path) -> None
     assert result.images == (f"r.io/ns/out@{DIGEST}",)
 
 
-# ───────────────────────────── mount-path inspection ─────────────────────────────
+# ───────────────────────────── tmpfs mount targets ─────────────────────────────
 
 
-def test_prepare_inspects_tmpfs_paths_without_building(tmp_path: Path) -> None:
+def test_prepare_keeps_tmpfs_paths_without_building(tmp_path: Path) -> None:
     root = tmp_path / "harbor"
     harbor_task(
         root,
@@ -432,7 +432,6 @@ def test_prepare_inspects_tmpfs_paths_without_building(tmp_path: Path) -> None:
         compose_adapter=ADAPTER(),
     )
     assert builder.requests == []  # mount directories are runtime responsibilities
-    assert export.inspected == [(f"r.io/ns/app@{DIGEST}", ("/cache", "/scratch", "/.flotilla-runtime"))]
     reader = ReleaseReader(result.output)
     task = reader.read_task(read_dataset(result.output / "dataset.jsonl")[0].task)
     unit = task.roles["main"].units["main"]

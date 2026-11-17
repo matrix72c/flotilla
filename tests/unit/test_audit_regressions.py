@@ -21,7 +21,7 @@ from flotilla.compose.normalize import normalize
 from flotilla.config import ResourceDefaults
 from flotilla.manifest import Manifest, Resources
 from flotilla.scan import scan
-from flotilla.testing.build import DIGEST, FakeBuilder, FakeExport, _caps, _ctx, _task
+from flotilla.testing.build import FakeBuilder, FakeExport, _caps, _ctx, _task
 from flotilla.testing.compose import offline_task as load_task
 
 
@@ -107,7 +107,7 @@ def test_invalid_nested_fields_are_visible_rejections(field: dict[str, object]) 
     assert normalize({"services": {"main": {"image": "r.io/a", **field}}, "volumes": {"data": {}}}).rejected
 
 
-def test_tmpfs_is_inspected_not_derived_without_approximating_container_identity(tmp_path: Path) -> None:
+def test_tmpfs_is_not_derived_without_approximating_container_identity(tmp_path: Path) -> None:
     task = load_task(
         _task(
             tmp_path,
@@ -128,10 +128,8 @@ def test_tmpfs_is_inspected_not_derived_without_approximating_container_identity
         task, tmp_path / "out", replace(ctx, builder=builder, caps=replace(ctx.caps, native_tmpfs=True))
     )
     assert outcome.status == "built", outcome.reason
-    # Mount-point directories are runtime responsibilities: no derivation build,
-    # but every tmpfs target path is inspected in the source image for links.
+    # Mount-point directories are runtime responsibilities: no derivation build.
     assert builder.requests == []
-    assert export.inspected == [(f"r.io/a@{DIGEST}", ("/cache", "/scratch"))]
     assert outcome.manifest_path
     manifest = Manifest.load_json(outcome.manifest_path.read_bytes())
     assert [m.mount_path for m in manifest.units["main"].tmpfs_mounts] == ["/cache", "/scratch"]
@@ -145,21 +143,6 @@ def test_tmpfs_is_inspected_not_derived_without_approximating_container_identity
     assert aliased.manifest_path
     names = Manifest.load_json(aliased.manifest_path.read_bytes()).networks["default"].names
     assert names == {"agent-alias": ["main"], "main": ["main"]}
-
-
-def test_mount_path_inspection_rejects_image_symlink(tmp_path: Path) -> None:
-    task = load_task(
-        _task(
-            tmp_path,
-            "linked",
-            compose="services:\n  main:\n    image: r.io/a\n    tmpfs: /cache/scratch\n",
-        )
-    )
-    export = FakeExport(links=("/cache",))
-    ctx = _ctx(image_export=export)
-    outcome = build_task(task, tmp_path / "out", replace(ctx, caps=replace(ctx.caps, native_tmpfs=True)))
-    assert outcome.status == "failed" and "symlink" in outcome.reason
-    assert export.inspected  # the rejection came from real path inspection, not a silent skip
 
 
 class _ImageContents:

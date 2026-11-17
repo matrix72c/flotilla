@@ -27,7 +27,6 @@ def docker_context(cfg: FlotillaConfig, journal: Path) -> BuildContext:
         ),
         image_export=exporter,
         image_accounts=exporter.accounts,
-        validate_mount_paths=exporter.validate_mount_paths,
     )
 
 

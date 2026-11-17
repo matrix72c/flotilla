@@ -60,7 +60,6 @@ class _Metrics:
                 "registry_lookup",
                 "image_config",
                 "image_accounts",
-                "mount_path_inspection",
                 "registry_copy",
                 "user0_build_push",
                 "application_build_push",
@@ -400,9 +399,6 @@ def _prepare(
         builder=_MeasuredBuilder(context.builder, metrics) if context.builder is not None else None,
         image_accounts=partial(metrics.call, "image_accounts", context.image_accounts)
         if context.image_accounts is not None
-        else None,
-        validate_mount_paths=partial(metrics.call, "mount_path_inspection", context.validate_mount_paths)
-        if context.validate_mount_paths is not None
         else None,
     )
     if context.image_export is not None:

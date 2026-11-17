@@ -94,7 +94,6 @@ class BuildContext:
     image_export: ImageExport | None = None
     user_lookup: UserLookup | None = None
     image_accounts: Callable[[str], ImageAccounts] | None = None
-    validate_mount_paths: Callable[[str, tuple[str, ...]], None] | None = None
     # Operation-scoped only: shared across roles/rows, never a global build cache.
     adaptations: dict[str, str] = field(default_factory=dict)
 
@@ -167,15 +166,6 @@ def _build(
             images[plan.service], dispositions[plan.service] = source.image, source.disposition
             if source.config is not None:
                 configs[plan.service] = source.config
-
-    for service, svc in project.services.items():
-        paths = tuple(m.mount_path for m in svc.tmpfs)
-        if svc.readonly_rootfs:
-            paths += ("/.flotilla-runtime",)
-        if paths:
-            if ctx.validate_mount_paths is None:
-                raise ImageError("tmpfs/readonly preparation requires image mount-path inspection")
-            ctx.validate_mount_paths(images[service], paths)
 
     files_dir = target_dir / FILES_DIR
     exported = export_task_files(project, task.env_dir, files_dir, images=images, image_export=ctx.image_export)
