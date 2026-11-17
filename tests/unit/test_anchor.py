@@ -279,6 +279,11 @@ async def test_close_deletes_and_rejects(platform: FakePlatform, clock: ManualCl
     assert platform.calls["renew"] == renews
 
 
+def test_settings_reject_nonpositive_concurrency() -> None:
+    with pytest.raises(ValueError, match="concurrency"):
+        AnchorSettings(image="anchor@sha256:abc", concurrency=0)
+
+
 def test_settings_reject_unsafe_timing() -> None:
     with pytest.raises(ValueError):
         AnchorSettings(image="x", renew_interval_s=90.0, grace_s=90.0)
@@ -738,6 +743,30 @@ async def test_directory_op_in_flight_is_cancelled_on_deactivation(platform: Fak
     with pytest.raises(FlotillaError) as exc:
         await op
     assert exc.value.category is ErrorCategory.LOST and exc.value.stage == "prepare"
+
+
+@pytest.mark.asyncio
+async def test_command_requests_are_bounded_by_concurrency(
+    platform: FakePlatform, clock: ManualClock, tree: SharedTree, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    anchor = await _started(platform, clock, AnchorSettings(image="anchor@sha256:abc", concurrency=2))
+    in_flight = peak = 0
+    original = platform.exec
+
+    async def counted(handle: InstanceHandle, proc: ProcessSpec, **kwargs: object) -> ExecResult:
+        nonlocal in_flight, peak
+        in_flight += 1
+        peak = max(peak, in_flight)
+        try:
+            await clock.sleep(10.0)
+            return await original(handle, proc, **kwargs)  # type: ignore[arg-type]
+        finally:
+            in_flight -= 1
+
+    monkeypatch.setattr(platform, "exec", counted)
+    ops = [asyncio.create_task(anchor.mkdir(f"launches/L1/t{i}", stage="prepare")) for i in range(5)]
+    await clock.run(asyncio.gather(*ops))
+    assert peak == 2
 
 
 # ───────────────────────────── Read-only input root ─────────────────────────────
