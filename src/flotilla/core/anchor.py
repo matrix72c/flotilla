@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import posixpath
 from dataclasses import dataclass, field
@@ -203,10 +204,8 @@ class Anchor:
                 return
             resumed = self._resumed
             left = self._last_renewed + self._settings.lost_after_s - self._clock.monotonic()
-            try:
+            with contextlib.suppress(Expired, Aborted):
                 await within(self._clock, max(0.0, left), resumed.wait(), abort=(self.deactivated,))
-            except (Expired, Aborted):
-                pass
 
     def lost(self, stage: Stage) -> FlotillaError:
         """Error reported on `stage` once this launch is deactivated."""

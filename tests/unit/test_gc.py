@@ -227,7 +227,7 @@ async def test_gc_refuses_when_own_launch_deactivated(
     await _orphan(platform, tree, "L0")
     for _ in range(1000):
         platform.inject_fault("renew", _err())
-    await clock.advance(ANCHOR.grace_s)
+    await clock.advance(ANCHOR.lost_after_s)
     platform.clear_faults()
     with pytest.raises(FlotillaError) as exc:
         await clock.run(gc.run_once())

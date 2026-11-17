@@ -1,4 +1,4 @@
-"""Unit tests for `Anchor`: startup order, renewal, grace-period deactivation, directory ops."""
+"""Unit tests for `Anchor`: startup order, renewal, grace-period pause, TTL-bound loss, directory ops."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from datetime import datetime
 import pytest
 
 from flotilla.core import labels
-from flotilla.core.anchor import Anchor, AnchorSettings
+from flotilla.core.anchor import EXPIRY_MARGIN_S, Anchor, AnchorSettings
 from flotilla.platform.base import (
     ErrorCategory,
     ExecOutcomeUnknown,
@@ -187,23 +187,42 @@ async def test_transient_renew_failures_within_grace_are_tolerated(platform: Fak
 
 
 @pytest.mark.asyncio
-async def test_deactivates_exactly_at_grace(platform: FakePlatform, clock: ManualClock) -> None:
-    # Make every renewal fail before start: t0 is the create request time 0, deactivation is exactly at t0 + G.
+async def test_pauses_at_grace_and_is_lost_before_ttl(platform: FakePlatform, clock: ManualClock) -> None:
+    # Make every renewal fail before start: t0 is the create request time 0, the pause starts exactly at t0 + G and
+    # the launch is lost exactly at t0 + ttl - margin.
     for _ in range(1000):
         platform.inject_fault("renew", _transient())
     anchor = await _started(platform, clock)
     await clock.advance(SETTINGS.grace_s - clock.monotonic() - 0.001)
-    assert not anchor.deactivated.is_set()
-    anchor.ensure_alive("create")
+    assert not anchor.paused
     await clock.advance(0.001)
-    assert anchor.deactivated.is_set()
+    assert anchor.paused and not anchor.deactivated.is_set()
+    anchor.ensure_alive("create")  # paused is still alive
+    renews = platform.calls["renew"]
+    await clock.advance(SETTINGS.lost_after_s - clock.monotonic() - 0.001)
+    assert platform.calls["renew"] > renews  # renewal keeps retrying while paused
+    assert not anchor.deactivated.is_set()
+    await clock.advance(0.001)
+    assert anchor.deactivated.is_set() and not anchor.paused
     with pytest.raises(FlotillaError) as exc:
         anchor.ensure_alive("create")
     assert exc.value.category is ErrorCategory.LOST and exc.value.stage == "create"
-    # No more renewals after deactivation.
+    # No more renewals after the loss.
     renews = platform.calls["renew"]
     await clock.advance(600.0)
     assert platform.calls["renew"] == renews
+
+
+@pytest.mark.asyncio
+async def test_successful_renewal_resumes_a_paused_launch(platform: FakePlatform, clock: ManualClock) -> None:
+    for _ in range(1000):
+        platform.inject_fault("renew", _transient())
+    anchor = await _started(platform, clock)
+    await clock.advance(SETTINGS.grace_s)
+    assert anchor.paused
+    platform.clear_faults()
+    await clock.advance(SETTINGS.retry_interval_s)
+    assert not anchor.paused and not anchor.deactivated.is_set()
 
 
 @pytest.mark.asyncio
@@ -213,20 +232,22 @@ async def test_grace_counts_from_last_successful_renew_send(platform: FakePlatfo
     t0 = clock.monotonic()  # exactly at a successful renewal
     for _ in range(1000):
         platform.inject_fault("renew", _transient())
-    await clock.advance(SETTINGS.grace_s - 0.001)
+    await clock.advance(SETTINGS.grace_s)
+    assert anchor.paused
+    await clock.advance(SETTINGS.lost_after_s - SETTINGS.grace_s - 0.001)
     assert not anchor.deactivated.is_set()
     await clock.advance(0.001)
     assert anchor.deactivated.is_set()
-    assert clock.monotonic() == t0 + SETTINGS.grace_s
+    assert clock.monotonic() == t0 + SETTINGS.lost_after_s
 
 
 @pytest.mark.asyncio
 async def test_hanging_renew_does_not_delay_deactivation(platform: FakePlatform, clock: ManualClock) -> None:
     anchor = await _started(platform, clock)
     platform.set_latency("renew", 10_000.0)  # later renewal requests hang, neither returning nor failing
-    # The last successful renewal is no later than now, so deactivation happens by G at the latest, without waiting for
-    # the hung request.
-    await clock.advance(SETTINGS.grace_s)
+    # The last successful renewal is no later than now, so the loss happens by ttl - margin at the latest, without
+    # waiting for the hung requests.
+    await clock.advance(SETTINGS.lost_after_s)
     assert anchor.deactivated.is_set()
     with pytest.raises(FlotillaError):
         anchor.ensure_alive("create")
@@ -237,7 +258,7 @@ async def test_deactivation_is_permanent(platform: FakePlatform, clock: ManualCl
     anchor = await _started(platform, clock)
     for _ in range(1000):
         platform.inject_fault("renew", _transient())
-    await clock.advance(SETTINGS.grace_s)
+    await clock.advance(SETTINGS.lost_after_s)
     assert anchor.deactivated.is_set()
     platform.clear_faults()  # platform recovers
     await clock.advance(600.0)
@@ -250,8 +271,8 @@ async def test_ensure_alive_checks_time_without_waiting_for_loop(platform: FakeP
     anchor = await _started(platform, clock)
     for _ in range(1000):
         platform.inject_fault("renew", _transient())
-    # The renewal loop is sleeping and G has passed: ensure_alive judges by time itself.
-    clock.jump(SETTINGS.grace_s)  # only move the clock, do not drive the event loop
+    # The renewal loop is sleeping and the loss deadline has passed: ensure_alive judges by time itself.
+    clock.jump(SETTINGS.lost_after_s)  # only move the clock, do not drive the event loop
     with pytest.raises(FlotillaError):
         anchor.ensure_alive("create")
     assert anchor.deactivated.is_set()
@@ -289,6 +310,8 @@ def test_settings_reject_unsafe_timing() -> None:
         AnchorSettings(image="x", renew_interval_s=90.0, grace_s=90.0)
     with pytest.raises(ValueError):
         AnchorSettings(image="x", grace_s=900.0, ttl_s=600)
+    with pytest.raises(ValueError):  # the pause must start before the loss deadline
+        AnchorSettings(image="x", grace_s=600.0 - EXPIRY_MARGIN_S, ttl_s=600)
     with pytest.raises(ValueError):
         AnchorSettings(image="x", mount_path="relative")
 
@@ -688,7 +711,7 @@ async def test_directory_ops_refused_after_deactivation(platform: FakePlatform, 
     anchor = await _started(platform, clock)
     for _ in range(1000):
         platform.inject_fault("renew", _transient())
-    await clock.advance(SETTINGS.grace_s)
+    await clock.advance(SETTINGS.lost_after_s)
     execs = platform.calls["exec"]
     with pytest.raises(FlotillaError) as exc:
         await anchor.mkdir("launches/L1/t1", stage="prepare")
@@ -696,13 +719,55 @@ async def test_directory_ops_refused_after_deactivation(platform: FakePlatform, 
     assert platform.calls["exec"] == execs  # nothing was sent
 
 
+@pytest.mark.asyncio
+async def test_directory_op_waits_while_paused_and_runs_after_resume(
+    platform: FakePlatform, clock: ManualClock, tree: SharedTree
+) -> None:
+    for _ in range(1000):  # t0 is the anchor create request at 0
+        platform.inject_fault("renew", _transient())
+    anchor = await _started(platform, clock)
+    await clock.advance(SETTINGS.grace_s - clock.monotonic())
+    assert anchor.paused
+    execs = platform.calls["exec"]
+    op = asyncio.create_task(anchor.mkdir("launches/L1/t1", stage="prepare"))
+    await clock.advance(60.0)
+    assert not op.done()
+    assert platform.calls["exec"] == execs  # held, not sent
+    platform.clear_faults()
+    await clock.advance(SETTINGS.retry_interval_s)
+    await clock.run(op)
+    assert platform.calls["exec"] == execs + 1
+    assert "launches/L1/t1" in tree.dirs
+
+
+@pytest.mark.asyncio
+async def test_directory_op_waiting_in_pause_is_lost_at_the_deadline(
+    platform: FakePlatform, clock: ManualClock
+) -> None:
+    for _ in range(1000):  # t0 is the anchor create request at 0
+        platform.inject_fault("renew", _transient())
+    anchor = await _started(platform, clock)
+    await clock.advance(SETTINGS.grace_s - clock.monotonic())
+    assert anchor.paused
+    execs = platform.calls["exec"]
+    op = asyncio.create_task(anchor.mkdir("launches/L1/t1", stage="prepare"))
+    await clock.advance(SETTINGS.lost_after_s - clock.monotonic() - 0.001)
+    assert not op.done()
+    await clock.advance(0.002)
+    assert op.done()
+    with pytest.raises(FlotillaError) as exc:
+        await op
+    assert exc.value.category is ErrorCategory.LOST and exc.value.stage == "prepare"
+    assert platform.calls["exec"] == execs
+
+
 # ───────────────────────────── Review regressions ─────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_start_fails_if_grace_elapsed_during_start(platform: FakePlatform, clock: ManualClock) -> None:
-    # Creation itself takes longer than G (slow platform, backend queueing): start must not return a deactivated anchor.
-    platform.set_latency("create", SETTINGS.grace_s + 5.0)
+async def test_start_fails_if_loss_deadline_elapsed_during_start(platform: FakePlatform, clock: ManualClock) -> None:
+    # Creation itself outlasts the loss deadline (slow platform, backend queueing): start must not return a lost anchor.
+    platform.set_latency("create", SETTINGS.lost_after_s + 5.0)
     anchor = Anchor(platform, clock, "L1", SETTINGS)
     with pytest.raises(FlotillaError):
         await clock.run(anchor.start())
@@ -739,6 +804,8 @@ async def test_directory_op_in_flight_is_cancelled_on_deactivation(platform: Fak
     platform.set_latency("exec", 1000.0)
     op = asyncio.create_task(anchor.mkdir("launches/L1/t1", stage="prepare"))
     await clock.advance(SETTINGS.grace_s)
+    assert not op.done()  # an admitted op keeps running through the pause
+    await clock.advance(SETTINGS.lost_after_s - clock.monotonic() + 0.001)
     assert op.done()
     with pytest.raises(FlotillaError) as exc:
         await op

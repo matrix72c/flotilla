@@ -562,7 +562,7 @@ async def test_launch_deactivated_reports_lost(
         platform.inject_fault(
             "renew", FlotillaError("503", stage="run", category=ErrorCategory.TRANSIENT, retryable=True)
         )
-    await clock.advance(AnchorSettings(image="x").grace_s)
+    await clock.advance(AnchorSettings(image="x").lost_after_s)
     platform.clear_faults()
     with pytest.raises(FlotillaError) as exc:
         await clock.run(_new_trial(platform, clock, anchor, reaper, _three()).start())
