@@ -37,6 +37,10 @@ log = logging.getLogger(__name__)
 # Environment for anchor commands: just enough to find the image's tools (process env is exactly ProcessSpec.env).
 _ENV = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"}
 
+# The launch is lost this long before the anchor's TTL, measured from the send time of the last successful renewal:
+# covers clock skew between the client's absolute expiry and the platform clock.
+EXPIRY_MARGIN_S = 60.0
+
 
 @dataclass(frozen=True)
 class FileStat:
@@ -64,7 +68,9 @@ class AnchorSettings:
     resources: Resources = field(default_factory=lambda: Resources(cpu="0.5", memory="512Mi"))
     ttl_s: int = 600
     renew_interval_s: float = 30.0
-    grace_s: float = 90.0  # G
+    # G: renewal overdue this long pauses new creates and directory operations until a renewal succeeds. Running
+    # trials continue; the launch is lost only `EXPIRY_MARGIN_S` before the TTL could expire the anchor.
+    grace_s: float = 90.0
     retry_interval_s: float = 5.0  # retry interval after a failed renewal
     start_timeout_s: float = 600.0  # total for create, wait until exec-ready, wait until listed
     exec_timeout_s: float = 300.0  # per directory operation
@@ -75,8 +81,10 @@ class AnchorSettings:
     profile: InstanceProfile = "default"
 
     def __post_init__(self) -> None:
-        if not 0 < self.retry_interval_s <= self.renew_interval_s < self.grace_s < self.ttl_s:
-            raise ValueError("must satisfy 0 < retry_interval_s <= renew_interval_s < grace_s < ttl_s")
+        if not 0 < self.retry_interval_s <= self.renew_interval_s < self.grace_s < self.lost_after_s:
+            raise ValueError(
+                f"must satisfy 0 < retry_interval_s <= renew_interval_s < grace_s < ttl_s - {EXPIRY_MARGIN_S:g}"
+            )
         if not posixpath.isabs(self.mount_path):
             raise ValueError(f"mount_path must be absolute: {self.mount_path!r}")
         occupied = [self.mount_path, "/.flotilla"]
@@ -98,6 +106,11 @@ class AnchorSettings:
                 raise ValueError("management mounts must not overlap the storage root, tools, or each other")
             occupied.append(path)
 
+    @property
+    def lost_after_s(self) -> float:
+        """Time since the last successful renewal send after which the launch is lost."""
+        return self.ttl_s - EXPIRY_MARGIN_S
+
 
 class Anchor:
     """A launch's anchor. Usable only after `start` returns: it can then run commands and appears in label listings."""
@@ -111,6 +124,8 @@ class Anchor:
         self._handle: InstanceHandle | None = None
         self.creation_uncertain = False
         self._last_renewed = 0.0  # t0: send time of the last successful renewal (monotonic)
+        self._resumed = asyncio.Event()  # replaced after each successful renewal; wakes `admit` waiters
+        self._pause_reported = False
         self._renewer: asyncio.Task[None] | None = None
         self._started = False
         self._ready = False
@@ -158,17 +173,39 @@ class Anchor:
                 log.warning("Deleting anchor %s failed, leaving it to the platform TTL: %s", self._handle.iid, exc)
 
     def ensure_alive(self, stage: Stage) -> None:
-        """Call before each create request and directory operation: raises `lost` if the launch is deactivated or the
-        anchor is closed."""
+        """Raises `lost` if the launch is deactivated or the anchor is closed. A paused launch is still alive."""
         if not self._ready:
             raise RuntimeError("anchor has not finished starting")
         if not self._alive():
             raise self.lost(stage)
 
+    @property
+    def paused(self) -> bool:
+        """Renewal is overdue by at least G but the anchor cannot have expired yet."""
+        return self._alive() and self._clock.monotonic() - self._last_renewed >= self._settings.grace_s
+
+    async def admit(self, stage: Stage) -> None:
+        """Call before each create request and directory operation: waits while the launch is paused and raises
+        `lost` once it is deactivated or the anchor is closed.
+
+        A renewal that succeeds before the TTL proves the anchor never left the label listing, so GC never saw
+        this launch as an orphan and resuming is safe.
+        """
+        while True:
+            self.ensure_alive(stage)
+            if not self.paused:
+                return
+            resumed = self._resumed
+            left = self._last_renewed + self._settings.lost_after_s - self._clock.monotonic()
+            try:
+                await within(self._clock, max(0.0, left), resumed.wait(), abort=(self.deactivated,))
+            except (Expired, Aborted):
+                pass
+
     def lost(self, stage: Stage) -> FlotillaError:
         """Error reported on `stage` once this launch is deactivated."""
         return FlotillaError(
-            f"launch {self.launch_id} is deactivated (anchor renewal exceeded the grace period, or anchor closed)",
+            f"launch {self.launch_id} is deactivated (no anchor renewal before its TTL, or anchor closed)",
             stage=stage,
             category=ErrorCategory.LOST,
             retryable=True,
@@ -177,8 +214,8 @@ class Anchor:
     def _alive(self) -> bool:
         if self._closed or self.deactivated.is_set():
             return False
-        if self._clock.monotonic() - self._last_renewed >= self._settings.grace_s:
-            self._deactivate(f"no successful renewal for {self._settings.grace_s}s")
+        if self._clock.monotonic() - self._last_renewed >= self._settings.lost_after_s:
+            self._deactivate(f"no successful renewal for {self._settings.lost_after_s:g}s")
             return False
         return True
 
@@ -241,7 +278,7 @@ class Anchor:
         The platform uid/gid is the actual writer identity; the local owner cannot write into root-created staging.
         chown may clear setuid/setgid, so chmod comes last.
         """
-        self.ensure_alive(stage)
+        await self.admit(stage)
         assert self._handle is not None
         try:
             await self._platform.write_file(self._handle, self._path(key), data, mode=mode, uid=0, gid=0)
@@ -390,7 +427,10 @@ class Anchor:
         env: dict[str, str] | None = None,
         read_only: bool = False,
     ) -> ExecResult:
-        self.ensure_alive(stage)
+        if read_only:
+            self.ensure_alive(stage)
+        else:
+            await self.admit(stage)
         assert self._handle is not None
         proc = ProcessSpec(
             argv=argv,
@@ -487,9 +527,9 @@ class Anchor:
         await wait_running(self._platform, self._clock, self._handle.iid, stage="prepare")
         await self._wait_listed(returned)
         await self._wait_executable()
-        if not self._alive():  # create or waits took too long, grace expired during startup: launch is unusable
+        if not self._alive():  # create or waits outlasted the renewal deadline: launch is unusable
             raise FlotillaError(
-                f"anchor {self.launch_id} exceeded the {self._settings.grace_s}s grace period during startup",
+                f"anchor {self.launch_id} went {self._settings.lost_after_s:g}s without renewal during startup",
                 stage="prepare",
                 category=ErrorCategory.TRANSIENT,
                 retryable=True,
@@ -564,18 +604,30 @@ class Anchor:
         next_at = self._last_renewed + s.renew_interval_s
         try:
             while True:
-                expire_at = self._last_renewed + s.grace_s
-                await self._clock.sleep(max(0.0, min(next_at, expire_at) - self._clock.monotonic()))
+                lost_at = self._last_renewed + s.lost_after_s
+                await self._clock.sleep(max(0.0, min(next_at, lost_at) - self._clock.monotonic()))
                 if not self._alive():
                     return
+                if self.paused and not self._pause_reported:
+                    self._pause_reported = True
+                    log.warning(
+                        "launch %s paused: no successful anchor renewal for %.0fs; lost in %.0fs",
+                        self.launch_id,
+                        self._clock.monotonic() - self._last_renewed,
+                        lost_at - self._clock.monotonic(),
+                    )
                 sent = self._clock.monotonic()
                 expires = self._clock.now() + timedelta(seconds=s.ttl_s)
                 try:
-                    # Wait for renewal at most until grace expires: a stuck request must not delay deactivation.
-                    await within(self._clock, expire_at - sent, self._platform.renew(self._handle.iid, expires))
+                    # One stuck request may hold at most G and never past the loss deadline.
+                    await within(
+                        self._clock, min(lost_at - sent, s.grace_s), self._platform.renew(self._handle.iid, expires)
+                    )
                 except Expired:
-                    self._deactivate("renewal request did not return within the grace period")
-                    return
+                    if not self._alive():
+                        return
+                    log.warning("Anchor renewal request did not return, retrying in %ss", s.retry_interval_s)
+                    next_at = self._clock.monotonic() + s.retry_interval_s
                 except Exception as exc:
                     if isinstance(exc, FlotillaError) and exc.category is ErrorCategory.NOT_FOUND:
                         self._deactivate("anchor no longer exists")
@@ -584,8 +636,13 @@ class Anchor:
                     log.warning("Anchor renewal failed, retrying in %ss: %r", s.retry_interval_s, exc)
                     next_at = self._clock.monotonic() + s.retry_interval_s
                 else:
+                    if self._pause_reported:
+                        self._pause_reported = False
+                        log.warning("launch %s resumed after anchor renewal succeeded", self.launch_id)
                     self._last_renewed = sent
                     next_at = sent + s.renew_interval_s
+                    resumed, self._resumed = self._resumed, asyncio.Event()
+                    resumed.set()
         except Exception:  # only bugs in this loop itself; renewal must not stop silently
             log.exception("Anchor renewal loop exited unexpectedly")
             self._deactivate("renewal loop exited unexpectedly")
