@@ -6,7 +6,7 @@ import posixpath
 import re
 import shlex
 from collections.abc import Mapping
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from flotilla import resources as resource_values
 from flotilla.compose.model import (
@@ -41,39 +41,70 @@ _EQUIVALENT = {
     "stop_grace_period": "recorded only; sandboxes are deleted, not stopped",
     "pull_policy": "recorded only; images are pinned by digest at preparation",
 }
-# Rejected service fields. A reason naming the sandbox API describes its request surface:
-# each sandbox is created from one image with cpu/memory, volumes, ports, tmpfs, a network
-# policy and a fixed set of extension keys. Those fields have no counterpart there, so the
-# task cannot be honored rather than merely being unimplemented here.
-_REJECT = {
-    "group_add": "the sandbox API exposes no supplementary groups",
-    "cap_drop": "the sandbox API exposes no capability control, and dropping is what the task relies on: "
-    "ignoring it would let an exploit that should fail succeed and grade as solved",
-    "security_opt": "the sandbox API exposes no seccomp, apparmor or no-new-privileges selection",
-    "ulimits": "the sandbox API exposes no per-process rlimits",
-    "pids_limit": "the sandbox API exposes no process-count limit",
-    "sysctls": "the sandbox API exposes no sysctl settings",
-    "extra_hosts": "the sandbox network policy can stop a name from resolving but cannot map one to an address",
-    "dns": "the sandbox API exposes no resolver configuration; cluster DNS is fixed and always reachable",
-    "dns_search": "the sandbox API exposes no resolver configuration",
-    "dns_opt": "the sandbox API exposes no resolver configuration",
-    "platform": "preparation pins every image by digest, which fixes its platform",
-    "memswap_limit": "the sandbox API takes cpu and memory only; swap is not separately accountable",
-    "cgroup": "the sandbox owns its own cgroup placement",
-    "tty": "requires a pty; not supported yet",
-    "stdin_open": "requires a pty; not supported yet",
-    "pid": "pid sharing needs two containers in one sandbox; a sandbox runs exactly one",
-    "ipc": "ipc sharing needs two containers in one sandbox; a sandbox runs exactly one",
-    "userns_mode": "not meaningful in an isolated sandbox",
-    "runtime": "choosing a container runtime is not supported",
-    "volumes_from": "not implemented yet",
-    "extends": "not implemented yet (not seen in task data)",
-    "profiles": "not implemented yet (not seen in task data)",
-    "secrets": "not implemented yet (not seen in task data)",
-    "configs": "not implemented yet (not seen in task data)",
-    "links": "not implemented yet (not seen in task data)",
-    "domainname": "not implemented yet (not seen in task data)",
-    "scale": "replicas not implemented yet (not seen in task data)",
+# Why a rejected field is rejected, which is also what to do about it. The documented table
+# carries the same category for every key, and a test keeps the two from drifting.
+#
+#   unimplemented     flotilla's own work; nothing outside it is missing
+#   platform-gap      the task semantics are real, but the sandbox API has no request surface for them
+#   no-model          a sandbox is one container in one isolation domain, so the field has no subject
+#   unsafe            honoring it would remove the isolation the sandbox exists to provide
+#   not-reproducible  it shares state across trials, which training requires to stay independent
+#   docker-internal   a Docker mechanism with no meaning here; emulating it would invent a semantics
+#
+# A field whose values span categories is marked `mixed` in the documentation and carries the
+# strictest category here: the whole field is rejected, which is coarse but never wrong.
+Category = Literal["unimplemented", "platform-gap", "no-model", "unsafe", "not-reproducible", "docker-internal"]
+
+# Rejected service fields, as (category, reason). A `platform-gap` reason names the sandbox API's
+# request surface: each sandbox is created from one image with cpu/memory, volumes, ports, tmpfs,
+# a network policy and a fixed set of extension keys. Those fields have no counterpart there, so
+# the task cannot be honored rather than merely being unimplemented here.
+_REJECT: dict[str, tuple[Category, str]] = {
+    "group_add": ("platform-gap", "the sandbox API exposes no supplementary groups"),
+    "cap_drop": (
+        "platform-gap",
+        "the sandbox API exposes no capability control, and dropping is what the task relies on: "
+        "ignoring it would let an exploit that should fail succeed and grade as solved",
+    ),
+    "security_opt": (
+        "unsafe",
+        "mixed: `no-new-privileges` tightens and belongs with cap_drop, while `seccomp=unconfined` "
+        "and `apparmor=unconfined` remove the sandbox's own defenses; the whole field is rejected",
+    ),
+    "ulimits": ("platform-gap", "the sandbox API exposes no per-process rlimits"),
+    "pids_limit": ("platform-gap", "the sandbox API exposes no process-count limit"),
+    "sysctls": (
+        "unsafe",
+        "mixed: namespaced keys (`net.*`, `kernel.shm*`, `fs.mqueue.*`) affect only this sandbox, "
+        "but the rest reach the host and its neighbours; the whole field is rejected",
+    ),
+    "extra_hosts": (
+        "unimplemented",
+        "mixed: flotilla already writes each sandbox's /etc/hosts to publish service names, so an "
+        "entry naming a literal address would join that block and is only unimplemented. The "
+        "`host-gateway` form has no counterpart: a sandbox has no host to reach, so that spelling "
+        "would stay rejected. A mapped address is still subject to the egress policy",
+    ),
+    "dns": ("docker-internal", "cluster DNS is fixed and always reachable; a task resolver would fight the policy"),
+    "dns_search": ("docker-internal", "the sandbox API exposes no resolver configuration"),
+    "dns_opt": ("docker-internal", "the sandbox API exposes no resolver configuration"),
+    "platform": ("docker-internal", "preparation pins every image by digest, which fixes its platform"),
+    "memswap_limit": ("docker-internal", "the sandbox takes cpu and memory only; swap is not separately accountable"),
+    "cgroup": ("no-model", "the sandbox owns its own cgroup placement"),
+    "tty": ("unimplemented", "requires a pty; not supported yet"),
+    "stdin_open": ("unimplemented", "requires a pty; not supported yet"),
+    "pid": ("no-model", "pid sharing needs two containers in one sandbox; a sandbox runs exactly one"),
+    "ipc": ("no-model", "ipc sharing needs two containers in one sandbox; a sandbox runs exactly one"),
+    "userns_mode": ("no-model", "the sandbox is already the isolation domain; there is no mapping to choose"),
+    "runtime": ("no-model", "the runtime is a deployment property, not something a task selects"),
+    "volumes_from": ("unimplemented", "would expand to the other service's mounts; not implemented yet"),
+    "extends": ("unimplemented", "the input gate stops it before the Compose CLI, which would expand it"),
+    "profiles": ("unimplemented", "not implemented yet (not seen in task data)"),
+    "secrets": ("unimplemented", "would expand to mounts; not implemented yet (not seen in task data)"),
+    "configs": ("unimplemented", "would expand to mounts; not implemented yet (not seen in task data)"),
+    "links": ("unimplemented", "would expand to hosts entries; not implemented yet (not seen in task data)"),
+    "domainname": ("docker-internal", "an NIS domain has no counterpart in a sandbox"),
+    "scale": ("unimplemented", "replicas would be several sandboxes; not implemented yet"),
 }
 # Bridge driver options with no effect on platform networks.
 _BRIDGE_OPTIONS = frozenset(
@@ -168,7 +199,7 @@ def _service(
         if key in _EQUIVALENT:
             c.equivalent(f"{path}.{key}", _EQUIVALENT[key])
         elif key in _REJECT:
-            c.reject(f"{path}.{key}", _REJECT[key])
+            c.reject(f"{path}.{key}", _REJECT[key][1])
         else:
             c.reject(f"{path}.{key}", "unsupported field")
 
