@@ -6,7 +6,7 @@ import subprocess
 from collections.abc import Sequence
 from pathlib import Path
 
-from flotilla.build.docker import DockerBuilder, DockerImageExport, DockerRegistry
+from flotilla.build.docker import DockerImageExport, DockerRegistry
 from flotilla.build.driver import BuildContext
 from flotilla.config import FlotillaConfig
 
@@ -15,16 +15,10 @@ def docker_context(cfg: FlotillaConfig, journal: Path) -> BuildContext:
     """Export containers are journaled under `journal` before creation, so a killed run can remove them."""
     command = cfg.prepare.docker_command
     exporter = DockerImageExport(docker_cmd=command, timeout_s=cfg.prepare.export_timeout, ownership_dir=journal)
-    settings = cfg.build.settings()
     return BuildContext(
-        settings=settings,
+        settings=cfg.build.settings(),
         caps=cfg.platform_capabilities(),
         registry=DockerRegistry(docker_cmd=command),
-        builder=DockerBuilder(
-            docker_cmd=command,
-            oci_mediatypes=settings.oci_mediatypes,
-            attestations=settings.attestations,
-        ),
         image_export=exporter,
         image_accounts=exporter.accounts,
     )

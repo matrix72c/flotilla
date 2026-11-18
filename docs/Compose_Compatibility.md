@@ -25,14 +25,14 @@ not the invoking shell's environment. `CONTEXT_DIR` is the environment directory
 Other Harbor variables must be supplied explicitly by the caller.
 
 An explicit base document provides Harbor's main-service keepalive and default
-image/build. Official `compose config --format json --no-path-resolution` owns
+image. Official `compose config --format json --no-path-resolution` owns
 file merging, interpolation, `env_file` loading, and short-form expansion.
-Harbor's explicit `docker_image` supersedes the resulting main image/build;
+Harbor's explicit `docker_image` supersedes the resulting main image;
 its explicit working directory also wins. Compose's serialized `$$` escaping is
 decoded exactly once, including mapping keys, without evaluating variable names
 or expressions. Resolved output is translated without a second interpolation
 pass: literal dollars remain literal and there are no implicitly deferred
-environment variables. Compose-resolved bind/build paths
+environment variables. Compose-resolved bind paths
 must remain within the environment directory. Before any official CLI call, a
 narrow YAML-node gate rejects `include`, `extends`, `label_file`, `configs`, and
 `secrets`, and confines `.env` and literal service `env_file` paths to that
@@ -108,7 +108,7 @@ translation is not proof of Docker equivalence or deployment support.
 Unit contracts mock the official Compose subprocess, cover version/error
 handling and explicit arguments, and verify that resolved dollar expressions are
 not expanded again and that an undefined reference without a default is refused
-rather than blanked. Model/build tests cover null/empty argv, shared mixed RO/RW
+rather than blanked. Model and preparation tests cover null/empty argv, shared mixed RO/RW
 binds, nested mounts, nocopy seeds, real single-reference mounts and hardlinks.
 
 `tests/contract/test_compose_official.py` is an opt-in check against an explicit

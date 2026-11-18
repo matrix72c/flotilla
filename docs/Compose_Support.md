@@ -14,8 +14,8 @@ task/
 ```
 
 - The main (agent) service is always named `main`. A task without a `main` service is rejected.
-- Without a Compose file, the task has a single `main` service built from `environment/Dockerfile`.
-- With a Compose file, `main` gets `command: ["sh", "-c", "sleep infinity"]` and, if `environment/Dockerfile` exists, `build: .` unless the Compose file overrides them. The task's Compose file is merged on top, as with `docker compose -f base -f task`.
+- Without a Compose file, the task has a single `main` service running `[environment].docker_image`.
+- With a Compose file, `main` gets `command: ["sh", "-c", "sleep infinity"]` unless the Compose file overrides it. The task's Compose file is merged on top, as with `docker compose -f base -f task`. A task with no `docker_image` and an `environment/Dockerfile` gets `build: .`, which is rejected: see `build` below.
 - Service names must match `[A-Za-z0-9][A-Za-z0-9_.-]*`.
 
 ### `task.toml`
@@ -23,7 +23,7 @@ task/
 | Key | Effect |
 |---|---|
 | `[task].name` | Task name (defaults to the directory name); used for `[resources.tasks.*]` |
-| `[environment].docker_image` | Image for `main`; replaces any `build` |
+| `[environment].docker_image` | Image for `main`; required, since `build` is rejected |
 | `[environment].workdir` | `working_dir` of `main` |
 | `[environment].cpus` | CPU of `main` |
 | `[environment].memory` / `memory_mb` | Memory of `main` (set only one) |
@@ -47,12 +47,13 @@ Top-level networks support `internal: true`. `driver` must be `bridge`, `ipam` m
 
 ## Why a field is rejected
 
-Every rejection carries one of six categories, which say what would have to change for the field to
+Every rejection carries one of seven categories, which say what would have to change for the field to
 become supported. `normalize.py` holds the same category for every key and a test keeps the two in step.
 
 | Category | Meaning | What would change it |
 |---|---|---|
 | `unimplemented` | Flotilla's own work; nothing outside it is missing | Implementing it here |
+| `out-of-scope` | A different job from orchestration; flotilla turns published images into sandboxes | Doing that job elsewhere, before preparation |
 | `platform-gap` | The task semantics are real, but the sandbox API has no request surface for them | The platform growing that surface |
 | `no-model` | A sandbox is one container in one isolation domain, so the field has no subject | Nothing; the field would stay rejected on any platform |
 | `unsafe` | Honoring it would remove the isolation the sandbox exists to provide | Nothing |
@@ -67,7 +68,7 @@ field is rejected and carries the strictest of them, which is coarse but never w
 | Key | Status |
 |---|---|
 | `image` | Supported |
-| `build` | `context`, `dockerfile`, and `args` only; paths must stay inside the task directory. `target`, `ssh`, `cache_from`, `secrets`, `platforms`, and others are rejected |
+| `build` | Rejected (out-of-scope): building an image is a different job from orchestrating one. Preparation consumes images that are already published, so it needs no builder, no push target and no registry write access. Publish the image first and name it in `image` or `[environment].docker_image` |
 | `command`, `entrypoint` | Supported (string form is split like a shell word list, without a shell). Docker semantics: `entrypoint` drops the image `CMD` |
 | `environment` | Supported, including names Docker accepts that are not shell identifiers (`discovery.type`). A key without a value (inherit from host) is rejected: there is no host environment |
 | `env_file` | A path or list of paths inside `environment/`, in short or long (`path`, `required`) form. Paths must be literal and stay inside the task: a dynamic or escaping path is rejected before Compose opens anything. `environment` entries win |

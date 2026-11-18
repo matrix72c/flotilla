@@ -32,7 +32,7 @@ from flotilla.runtime.manager import Manager
 from flotilla.runtime.planning import to_plan
 from flotilla.runtime.types import RunRequest, Task
 from flotilla.scan import scan
-from flotilla.testing.build import FakeBuilder, _ctx, _task
+from flotilla.testing.build import _ctx, _task
 from flotilla.testing.compose import offline_task as load_task
 from flotilla.testing.config import config_data
 from flotilla.testing.platform import FakePlatform, ManualClock, SharedTree
@@ -127,8 +127,7 @@ def test_devices_roundtrip_to_runtime_plan(tmp_path: Path) -> None:
         "services:\n  main:\n    image: r.io/app\n    devices: [/dev/net/tun, /dev/kvm]\n"
         "    mem_limit: 1g\n    cpus: 1\n"
     )
-    builder = FakeBuilder()
-    ctx = _ctx(builder=builder)
+    ctx = _ctx()
     outcome = build_task(load_task(_task(tmp_path, "rejected", compose=compose)), tmp_path / "no", ctx)
     assert outcome.status == "rejected" and "devices" in (outcome.reason or "")
     ctx = replace(ctx, caps=_device_caps(ctx.caps))
@@ -138,7 +137,6 @@ def test_devices_roundtrip_to_runtime_plan(tmp_path: Path) -> None:
     assert manifest.units["main"].devices == ["kvm", "tun"] and not manifest.units["main"].privileged
     unit = to_plan(manifest).units["main"]
     assert unit.devices == {"kvm", "tun"} and unit.privileged_runtime and not unit.privileged
-    assert not builder.requests
 
 
 def test_manifest_devices_are_sorted_and_known() -> None:

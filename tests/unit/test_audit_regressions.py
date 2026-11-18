@@ -21,7 +21,7 @@ from flotilla.compose.normalize import normalize
 from flotilla.config import ResourceDefaults
 from flotilla.manifest import Manifest, Resources
 from flotilla.scan import scan
-from flotilla.testing.build import FakeBuilder, FakeExport, _caps, _ctx, _task
+from flotilla.testing.build import FakeExport, _caps, _ctx, _task
 from flotilla.testing.compose import offline_task as load_task
 
 
@@ -62,19 +62,16 @@ def test_seed_output_symlink_cannot_escape(tmp_path: Path) -> None:
     assert list(outside.iterdir()) == [sentinel]
 
 
-@pytest.mark.parametrize("kind", ["bind", "build"])
-def test_sibling_prefix_symlink_is_rejected_before_build(tmp_path: Path, kind: str) -> None:
+def test_sibling_prefix_symlink_is_rejected_before_build(tmp_path: Path) -> None:
     env = tmp_path / "environment"
     env.mkdir()
     outside = tmp_path / "environment-neighbor"
     outside.mkdir()
-    (outside / "Dockerfile").write_text("FROM r.io/a")
     (env / "escape").symlink_to(outside, target_is_directory=True)
-    service: dict[str, object] = (
-        {"image": "r.io/a", "build": {"context": "escape"}}
-        if kind == "build"
-        else {"image": "r.io/a", "volumes": [{"type": "bind", "source": "./escape", "target": "/data"}]}
-    )
+    service: dict[str, object] = {
+        "image": "r.io/a",
+        "volumes": [{"type": "bind", "source": "./escape", "target": "/data"}],
+    }
     result = scan("t", normalize({"services": {"main": service}}), _caps(), env_dir=str(env))
     assert result.status == "rejected"
     assert any("escapes" in f.reason for f in result.findings)
@@ -121,15 +118,11 @@ def test_tmpfs_is_not_derived_without_approximating_container_identity(tmp_path:
 """,
         )
     )
-    builder = FakeBuilder()
     export = FakeExport()
-    ctx = _ctx(builder=builder, image_export=export)
-    outcome = build_task(
-        task, tmp_path / "out", replace(ctx, builder=builder, caps=replace(ctx.caps, native_tmpfs=True))
-    )
+    ctx = _ctx(image_export=export)
+    outcome = build_task(task, tmp_path / "out", replace(ctx, caps=replace(ctx.caps, native_tmpfs=True)))
     assert outcome.status == "built", outcome.reason
     # Mount-point directories are runtime responsibilities: no derivation build.
-    assert builder.requests == []
     assert outcome.manifest_path
     manifest = Manifest.load_json(outcome.manifest_path.read_bytes())
     assert [m.mount_path for m in manifest.units["main"].tmpfs_mounts] == ["/cache", "/scratch"]

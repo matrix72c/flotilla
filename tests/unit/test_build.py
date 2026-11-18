@@ -1,19 +1,11 @@
-"""Image metadata, build keys, content hashes, image naming."""
+"""Image metadata parsing and Compose identity resolution."""
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 import pytest
 
-from flotilla.build.builder import (
-    MAX_TAG,
-    BuildRequest,
-    base_images,
-    build_contexts,
-    image_tag,
-)
 from flotilla.build.images import BuildSettings, ImageError, plan_image
 from flotilla.build.meta import parse_config, parse_user
 from flotilla.compose.model import Project, Service
@@ -96,29 +88,6 @@ def _project(**services: Any) -> Project:
     return Project(services={n: Service(name=n, **kw) for n, kw in services.items()}, networks={}, volumes=frozenset())
 
 
-# ───────────────────────────── Image naming ─────────────────────────────
-
-
-def test_image_tag_shape() -> None:
-    tag = image_tag("r.io/ns/repo", "cve-bench/apereo-cas", "secrets_init", "abc123def4567890")
-    assert tag == "r.io/ns/repo:cve-bench-apereo-cas--secrets_init--abc123def456"
-
-
-def test_image_tag_truncates_long_task_with_hash() -> None:
-    long_a, long_b = "x" * 300 + "-a", "x" * 300 + "-b"
-    ta = image_tag("r.io/ns/repo", long_a, "svc", "k" * 16)
-    tb = image_tag("r.io/ns/repo", long_b, "svc", "k" * 16)
-    assert len(ta.split(":", 1)[1]) <= MAX_TAG and ta != tb  # still no collision after truncation
-
-
-def test_build_request_requires_exactly_one_dockerfile(tmp_path: Path) -> None:
-    with pytest.raises(ImageError):
-        BuildRequest(service="s", tag="t:1", context=tmp_path)
-    with pytest.raises(ImageError):
-        BuildRequest(service="s", tag="t:1", context=tmp_path, dockerfile="Dockerfile", dockerfile_text="FROM x")
-    assert BuildRequest(service="s", tag="t:1", context=tmp_path, dockerfile="Dockerfile").dockerfile == "Dockerfile"
-
-
 # ───────────────────────────── Public image replacement ─────────────────────────────
 
 REPLACEMENTS = {
@@ -127,34 +96,13 @@ REPLACEMENTS = {
 }
 SETTINGS = BuildSettings(pullable_registries=("registry.example.com",), image_replacements=REPLACEMENTS)
 
-DOCKERFILE = """
-# FROM nope:1 in a comment does not count
-FROM ubuntu:24.04 AS base
-RUN ["/bin/sh", "-c", "true"]
-FROM base AS second
-FROM python:3.13-slim-bookworm
-FROM scratch
-FROM ${BASE_ARG}
-"""
 
-
-def test_base_images_skips_stages_scratch_and_dedups() -> None:
-    assert base_images(DOCKERFILE) == ["ubuntu:24.04", "python:3.13-slim-bookworm", "${BASE_ARG}"]
-
-
-def test_build_contexts_only_maps_replaced() -> None:
-    assert build_contexts(DOCKERFILE, SETTINGS) == {"ubuntu:24.04": "registry.example.com/ns/ubuntu:24.04"}
-
-
-def test_replacement_applies_before_disposition() -> None:
-    # Under a pullable prefix after replacement -> mirror becomes link (the disposition is decided after replacement).
+def test_replacement_applies_before_the_pullable_check() -> None:
     svc = Service(name="cache", image="docker.io/library/redis:7")
-    assert plan_image("cache", svc, SETTINGS).disposition == "link"
-    plain = BuildSettings(pullable_registries=("registry.example.com",), target="t.io/ns/r")
-    with pytest.raises(ImageError, match="mirror_images"):  # mirroring stays explicit
+    assert plan_image("cache", svc, SETTINGS).ref.name == "registry.example.com/ns/redis"
+    plain = BuildSettings(pullable_registries=("registry.example.com",))
+    with pytest.raises(ImageError, match="not pullable"):
         plan_image("cache", svc, plain)
-    explicit = BuildSettings(pullable_registries=("registry.example.com",), target="t.io/ns/r", mirror_images=True)
-    assert plan_image("cache", svc, explicit).disposition == "mirror"
 
 
 def test_named_root_uses_the_image_database() -> None:

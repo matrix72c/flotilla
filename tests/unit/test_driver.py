@@ -1,7 +1,7 @@
-"""Task file export and the offline build driver used by `flotilla prepare`.
+"""Task file export and the offline preparation driver used by `flotilla prepare`.
 
-Driver tests use a fake registry / builder / image exporter with no network or docker: they verify ordering,
-dispositions, skips and error attribution.
+Driver tests use a fake registry and image exporter with no network or docker: they verify ordering, skips
+and error attribution.
 """
 
 from __future__ import annotations
@@ -15,14 +15,11 @@ from pathlib import Path
 
 import pytest
 
-from flotilla.build.builder import BuildRequest
 from flotilla.build.docker import extract_archive
 from flotilla.build.driver import BuildOutcome, build_task
 from flotilla.build.files import ExportError, export_task_files
-from flotilla.build.images import BuildSettings
-from flotilla.build.meta import ImageAccounts
 from flotilla.manifest import Manifest
-from flotilla.testing.build import DIGEST, DIGEST2, FakeBuilder, FakeExport, FakeRegistry, _ctx, _task
+from flotilla.testing.build import DIGEST, DIGEST2, FakeExport, FakeRegistry, _ctx, _task
 from flotilla.testing.compose import offline_task as load_task
 
 # ───────────────────────────── Exporting task files ─────────────────────────────
@@ -251,10 +248,8 @@ def test_writable_root_bind_derives_from_environment_directory(tmp_path: Path) -
             compose="services:\n  main:\n    image: r.io/a:1\n    volumes: ['./:/workspace']\n",
         )
     )
-    builder = FakeBuilder()
-    outcome = build_task(task, tmp_path / "out", _ctx(builder=builder))
+    outcome = build_task(task, tmp_path / "out", _ctx())
     assert outcome.status == "built", outcome.reason
-    assert builder.requests == []
     manifest = _manifest(outcome)
     assert manifest.units["main"].mounts[0].target == "/workspace"
     assert manifest.trial_volumes[0].copy_from == "binds/0"
@@ -282,25 +277,21 @@ def test_export_requires_exporter_for_seeds(tmp_path: Path) -> None:
 # ───────────────────────────── Driver ─────────────────────────────
 
 
-def test_build_links_pullable_image_without_building(tmp_path: Path) -> None:
+def test_published_image_is_pinned_without_building(tmp_path: Path) -> None:
     task = load_task(_task(tmp_path, "linked", toml='[environment]\ndocker_image = "r.io/ns/app:1"\n'))
-    ctx = _ctx()
-    out = build_task(task, tmp_path / "out", ctx)
-    assert out.status == "built" and out.dispositions == {"main": "link"} and out.built == ()
+    out = build_task(task, tmp_path / "out", _ctx())
+    assert out.status == "built"
     manifest = json.loads(out.manifest_path.read_text())  # type: ignore[union-attr]
     assert manifest["units"]["main"]["image"] == f"r.io/ns/app@{DIGEST}"
     assert manifest["units"]["main"]["context"]["cwd"] == "/app"  # from image metadata
-    assert ctx.builder.requests == []  # type: ignore[union-attr]
 
 
-def test_build_runs_builder_for_build_service(tmp_path: Path) -> None:
-    path = _task(tmp_path, "built")
+def test_dockerfile_service_is_rejected_as_out_of_scope(tmp_path: Path) -> None:
+    """Producing images is a different job: a task that needs one is rejected, not built."""
+    path = _task(tmp_path, "needs-build")
     (path / "environment" / "Dockerfile").write_text("FROM r.io/base:1\nRUN echo hi\n")
-    ctx = _ctx()
-    out = build_task(load_task(path), tmp_path / "out", ctx)
-    assert out.status == "built" and out.dispositions == {"main": "built"} and out.built == ("main",)
-    (request,) = ctx.builder.requests  # type: ignore[union-attr]
-    assert request.dockerfile == "Dockerfile" and request.service == "main"
+    out = build_task(load_task(path), tmp_path / "out", _ctx())
+    assert out.status == "rejected" and "already published" in out.reason
 
 
 def test_build_always_compiles_a_new_plan(tmp_path: Path) -> None:
@@ -318,10 +309,8 @@ def test_build_reports_rejected_task_without_building(tmp_path: Path) -> None:
     task = load_task(
         _task(tmp_path, "offline", toml='[environment]\ndocker_image = "r.io/a:1"\nnetwork_mode = "unknown"\n')
     )
-    ctx = _ctx()
-    out = build_task(task, tmp_path / "out", ctx)
+    out = build_task(task, tmp_path / "out", _ctx())
     assert out.status == "rejected" and out.manifest_path is None
-    assert ctx.builder.requests == []  # type: ignore[union-attr]
 
 
 @pytest.mark.parametrize("policy", ['network_mode = "no-network"', "allow_internet = false"])
@@ -345,11 +334,10 @@ def test_build_preserves_no_network_and_peer_topology(tmp_path: Path, policy: st
     assert set(manifest.networks["default"].members) == {"main", "db"}
 
 
-def test_build_failure_is_reported_not_raised(tmp_path: Path) -> None:
-    path = _task(tmp_path, "nobuilder")
-    (path / "environment" / "Dockerfile").write_text("FROM r.io/base:1\n")
-    out = build_task(load_task(path), tmp_path / "out", _ctx(builder=None))
-    assert out.status == "failed" and "no builder was provided" in out.reason
+def test_unpullable_image_is_reported_not_raised(tmp_path: Path) -> None:
+    task = load_task(_task(tmp_path, "unpullable", toml='[environment]\ndocker_image = "docker.io/library/redis:7"\n'))
+    out = build_task(task, tmp_path / "out", _ctx())
+    assert out.status == "failed" and "not pullable" in out.reason
 
 
 def test_needs_publish_set_when_task_files_exported(tmp_path: Path) -> None:
@@ -491,203 +479,34 @@ def test_readonly_bind_change_is_read_on_next_build(tmp_path: Path) -> None:
 def test_tag_movement_is_resolved_on_each_open(tmp_path: Path) -> None:
     task = load_task(_task(tmp_path, "tags", toml='[environment]\ndocker_image="r.io/app:1"'))
     registry = FakeRegistry(digests={"r.io/app:1": DIGEST})
-    ctx = _ctx(registry=registry, settings=BuildSettings(target="r.io/out", mirror_images=True))
+    ctx = _ctx(registry=registry)
     first = build_task(task, tmp_path / "out", ctx)
-    assert first.status == "built" and len(registry.copied) == 1
-    assert build_task(task, tmp_path / "out", ctx).status == "built"
-    assert len(registry.copied) == 2
+    assert _manifest(first).units["main"].image == f"r.io/app@{DIGEST}"
     registry.digests["r.io/app:1"] = DIGEST2
     second = build_task(task, tmp_path / "out", ctx)
     assert second.build_key != first.build_key and second.status == "built"
-    assert _manifest(second).units["main"].image == f"r.io/out@{DIGEST2}"
+    assert _manifest(second).units["main"].image == f"r.io/app@{DIGEST2}"
 
 
-@pytest.mark.parametrize("change", ["target", "replacement"])
-def test_effective_build_configuration_applies_to_next_open(tmp_path: Path, change: str) -> None:
-    task = load_task(_task(tmp_path, "config", Dockerfile="FROM r.io/base:1\n"))
-    ctx = _ctx()
+def test_effective_image_replacement_applies_to_next_open(tmp_path: Path) -> None:
+    task = load_task(_task(tmp_path, "config", toml='[environment]\ndocker_image="r.io/base:1"'))
+    ctx = _ctx(registry=FakeRegistry(digests={"r.io/base:1": DIGEST, "r.io/base:2": DIGEST2}))
     first = build_task(task, tmp_path / "out", ctx)
-    if change == "target":
-        other = replace(ctx, settings=replace(ctx.settings, target="r.io/other"))
-    else:
-        other = replace(ctx, settings=replace(ctx.settings, image_replacements={"r.io/base:1": "r.io/base:2"}))
+    other = replace(ctx, settings=replace(ctx.settings, image_replacements={"r.io/base:1": "r.io/base:2"}))
     second = build_task(task, tmp_path / "out", other)
     assert first.status == second.status == "built", second.reason
-    assert first.build_key != second.build_key
+    assert _manifest(first).units["main"].image != _manifest(second).units["main"].image
 
 
-@pytest.mark.parametrize("source", ["build", "image", "prebuilt"])
-@pytest.mark.parametrize("mount", ["bind", "nocopy"])
-def test_all_image_sources_adapt_user0_and_keep_real_mounts(tmp_path: Path, source: str, mount: str) -> None:
-    """Mounts never derive images; the only builds are the app Dockerfile and USER0 adaptation."""
-    origin = "image: r.io/base:1" if source == "image" else "build: {context: .}"
-    volume = (
-        "{type: bind, source: ./payload, target: /data}"
-        if mount == "bind"
-        else "{type: volume, source: cache, target: /data, volume: {nocopy: true}}"
-    )
-    path = _task(
-        tmp_path,
-        "adapt",
-        compose=f"services:\n  main:\n    {origin}\n    volumes:\n      - {volume}\nvolumes:\n  cache: {{}}\n",
-        Dockerfile="FROM r.io/base:1\nRUN true\n",
-        payload__value="payload",
-    )
-    if source == "image":
-        # Harbor's main_build override replaces main's image when a Dockerfile exists.
-        (path / "environment/Dockerfile").unlink()
-    runtime_digest = "sha256:" + "ef" * 32
-    builder = FakeBuilder(digests=[DIGEST, runtime_digest] if source == "build" else [runtime_digest])
-    ctx = _ctx(builder=builder, registry=FakeRegistry(user="1000:1001", published=builder.published))
-    if source == "prebuilt":
-        (path / "task.toml").write_text('[environment]\ndocker_image="r.io/base:1"\n')
-    outcome = build_task(load_task(path), tmp_path / "out", ctx)
-    manifest = _manifest(outcome)
-    assert len(builder.requests) == (2 if source == "build" else 1)
-    text = builder.requests[-1].dockerfile_text
-    assert text is not None and f"@{DIGEST}" in text.splitlines()[0]
-    assert "COPY " not in text and "rm -rf" not in text
-    assert manifest.units["main"].image == f"r.io/ns/out@{runtime_digest}"
-    assert len(manifest.units["main"].mounts) == 1
-    assert manifest.units["main"].mounts[0].scope == "trial"
-    assert outcome.needs_publish == (mount == "bind")
-    assert manifest.units["main"].context.uid == 1000
-    assert manifest.units["main"].command == ["sh", "-c", "sleep infinity"]
-    assert "CMD " not in text and "ENTRYPOINT " not in text
-    # The app build (source=build) publishes to the target repo; the USER0 layer is
-    # derived from that published digest, not from the unpinned source tag.
-    if source == "build":
-        assert builder.requests[0].dockerfile == "Dockerfile"
-        assert text is not None and text.splitlines()[0] == f"FROM r.io/ns/out@{DIGEST}"
+def test_nonroot_image_is_rejected_instead_of_adapted(tmp_path: Path) -> None:
+    """Flotilla no longer publishes a USER0 derivation, so a non-root image fails preparation."""
+    task = load_task(_task(tmp_path, "nonroot", toml='[environment]\ndocker_image="r.io/app:1"'))
+    outcome = build_task(task, tmp_path / "out", _ctx(registry=FakeRegistry(user="appuser")))
+    assert outcome.status == "failed" and "root image" in outcome.reason
 
 
-@pytest.mark.parametrize("mirror", [False, True])
-@pytest.mark.parametrize("compose_user", [None, "2000:2001"])
-def test_nonroot_image_keeps_task_context_with_root_daemon(
-    tmp_path: Path, mirror: bool, compose_user: str | None
-) -> None:
-    class Registry(FakeRegistry):
-        def image_config(self, pinned: str) -> dict[str, object]:
-            return {
-                "User": "0:0" if pinned.endswith(DIGEST2) else "app:staff",
-                "WorkingDir": "/work",
-                "Env": ["MARKER=original"],
-                "Entrypoint": ["/entrypoint"],
-                "Cmd": ["original-cmd"],
-                "Healthcheck": {"Test": ["CMD", "/health"]},
-            }
-
-    identity = f"    user: '{compose_user}'\n" if compose_user else ""
-    task = load_task(
-        _task(
-            tmp_path,
-            "nonroot",
-            compose=f"services:\n  main:\n    image: r.io/app:1\n    command: null\n{identity}",
-        )
-    )
-    builder = FakeBuilder(digests=[DIGEST2])
-    ctx = _ctx(
-        registry=Registry(),
-        builder=builder,
-        settings=BuildSettings(pullable_registries=("r.io",), target="r.io/ns/out", mirror_images=mirror),
-        image_accounts=lambda _: ImageAccounts("app:x:1000:1001::/home/app:/bin/sh\n", "staff:x:1001:\n"),
-    )
-    outcome = build_task(task, tmp_path / "out", ctx)
-    unit = _manifest(outcome).units["main"]
-    assert (unit.context.uid, unit.context.gid) == ((2000, 2001) if compose_user else (1000, 1001))
-    assert unit.context.cwd == "/work" and unit.context.env == {"MARKER": "original"}
-    assert unit.command == ["/entrypoint", "original-cmd"]
-    assert unit.healthcheck is not None and unit.healthcheck.test == ["/health"]
-    assert unit.image == f"r.io/ns/out@{DIGEST2}"
-    assert outcome.dispositions == {"main": "mirror" if mirror else "link"}
-    assert outcome.built == ("main",) and outcome.adapted == ("main",)
-    (request,) = builder.requests
-    assert request.dockerfile_text is not None and request.dockerfile_text.endswith("\nUSER 0:0\n")
-    assert list(request.context.iterdir()) == []
-
-
-@pytest.mark.parametrize("user", ["root", "root:root", "0"])
-def test_root_string_user_skips_user0_adaptation(tmp_path: Path, user: str) -> None:
-    """`USER root` already runs as root: no derivation, and no image account lookup (no image pull)."""
-
-    def no_accounts(image: str) -> ImageAccounts:
-        raise AssertionError(f"root identity must not read the account databases of {image}")
-
-    task = load_task(
-        _task(tmp_path, "rootuser", compose="services:\n  main:\n    image: r.io/app:1\n    command: null\n")
-    )
-    ctx = _ctx(
-        registry=FakeRegistry(user=user),
-        settings=BuildSettings(pullable_registries=("r.io",)),
-        image_accounts=no_accounts,
-    )
-    outcome = build_task(task, tmp_path / "out", ctx)
-    assert outcome.dispositions == {"main": "link"}
-    assert outcome.built == () and outcome.adapted == ()
-    context = _manifest(outcome).units["main"].context
-    assert (context.uid, context.gid) == (0, 0)
-
-
-def test_compose_root_user_skips_account_lookup(tmp_path: Path) -> None:
-    def no_accounts(image: str) -> ImageAccounts:
-        raise AssertionError("Compose user root must not read the image account databases")
-
-    task = load_task(
-        _task(tmp_path, "composeroot", compose="services:\n  main:\n    image: r.io/app:1\n    user: root\n")
-    )
-    ctx = _ctx(settings=BuildSettings(pullable_registries=("r.io",)), image_accounts=no_accounts)
-    outcome = build_task(task, tmp_path / "out", ctx)
+@pytest.mark.parametrize("user", ["root", "root:root", "0", "0:0", ""])
+def test_root_image_spellings_are_accepted(tmp_path: Path, user: str) -> None:
+    task = load_task(_task(tmp_path, "root", toml='[environment]\ndocker_image="r.io/app:1"'))
+    outcome = build_task(task, tmp_path / "out", _ctx(registry=FakeRegistry(user=user)))
     assert outcome.status == "built", outcome.reason
-    context = _manifest(outcome).units["main"].context
-    assert (context.uid, context.gid) == (0, 0)
-
-
-@pytest.mark.parametrize("missing", ["builder", "target"])
-def test_nonroot_runtime_image_reports_missing_build_requirements(tmp_path: Path, missing: str) -> None:
-    task = load_task(_task(tmp_path, "nonroot", toml='[environment]\ndocker_image="r.io/app:1"\n'))
-    ctx = _ctx(registry=FakeRegistry(user="1000:1001"))
-    ctx = (
-        replace(ctx, builder=None) if missing == "builder" else replace(ctx, settings=replace(ctx.settings, target=""))
-    )
-    outcome = build_task(task, tmp_path / "out", ctx)
-    assert outcome.status == "failed" and "root exec daemon image" in outcome.reason
-    assert outcome.manifest_path is None
-
-
-def test_concurrent_builds_keep_their_metadata_digest_when_output_tag_is_overwritten(tmp_path: Path) -> None:
-    from concurrent.futures import ThreadPoolExecutor
-    from threading import Event
-
-    path = _task(tmp_path, "racing", Dockerfile="FROM r.io/base:1\nCOPY marker /marker\n", marker="first")
-    first_built, second_built = Event(), Event()
-    requests = []
-
-    class RacingBuilder:
-        def __init__(self, first: bool) -> None:
-            self.first = first
-
-        def build(self, request: BuildRequest) -> str:
-            requests.append(request)
-            if self.first:
-                assert (request.context / "marker").read_text() == "first"
-                first_built.set()
-                assert second_built.wait(5)
-                return DIGEST
-            assert (request.context / "marker").read_text() == "second"
-            second_built.set()
-            return DIGEST2
-
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        first = executor.submit(build_task, load_task(path), tmp_path / "out", _ctx(builder=RacingBuilder(True)))
-        assert first_built.wait(5)
-        (path / "environment/marker").write_text("second")
-        second = executor.submit(build_task, load_task(path), tmp_path / "out", _ctx(builder=RacingBuilder(False)))
-        outcomes = [first.result(), second.result()]
-    # Content-keyed cache tags: different context bytes never share a tag.
-    assert requests[0].tag != requests[1].tag and all(":bk-" in r.tag for r in requests)
-    assert outcomes[0].manifest_path != outcomes[1].manifest_path
-    for outcome, digest in zip(outcomes, [DIGEST, DIGEST2], strict=True):
-        assert outcome.status == "built"
-        assert outcome.manifest_path is not None
-        manifest = json.loads(outcome.manifest_path.read_text())
-        assert manifest["units"]["main"]["image"] == f"r.io/ns/out@{digest}"

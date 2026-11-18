@@ -173,13 +173,6 @@ def _share_conflicts(project: Project) -> Iterable[Finding]:
 def _input_paths(project: Project, root: Path) -> Iterable[Finding]:
     for name, service in project.services.items():
         paths = [(f"volumes[{m.target}].source", m.source) for m in service.volumes if m.kind == "bind"]
-        if service.build:
-            paths.extend(
-                [
-                    ("build.context", service.build.context),
-                    ("build.dockerfile", str(Path(service.build.context) / (service.build.dockerfile or "Dockerfile"))),
-                ]
-            )
         for field, relative in paths:
             try:
                 confined(root, relative)

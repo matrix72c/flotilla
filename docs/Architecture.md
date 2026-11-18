@@ -38,7 +38,7 @@ flowchart LR
     Harbor[Harbor adapter] --> API
 ```
 
-`compose` validates source semantics on the preparation host. `build` resolves images, captures original execution identity, exports volume seeds and publishes required USER0 adaptations there. `flotilla prepare` produces a native release and dataset from the selected rows that prepare, reporting the rest. Users publish static files using their existing tools. `NativeAttempt` consumes verified native definitions and assets without Harbor parsing, Compose, build/push/mirror or image-seed export. Native roles reuse existing manifest, plan and scheduler boundaries rather than introducing a second runtime. See [Native tasks](Native_Tasks.md) for the protocol and immutable-publication trust boundary.
+`compose` validates source semantics on the preparation host. `build` pins images by digest, captures original execution identity and exports volume seeds there; it never produces an image. `flotilla prepare` produces a native release and dataset from the selected rows that prepare, reporting the rest. Users publish static files using their existing tools. `NativeAttempt` consumes verified native definitions and assets without Harbor parsing, Compose or image-seed export. Native roles reuse existing manifest, plan and scheduler boundaries rather than introducing a second runtime. See [Native tasks](Native_Tasks.md) for the protocol and immutable-publication trust boundary.
 
 `runtime` owns admission, environment handles, monitoring, and cleanup. Each client has one maintenance loop in a separate thread. Diagnostic callbacks use a bounded dispatcher thread; local file reads use owned thread work that must settle before their directory is removed.
 

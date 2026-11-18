@@ -60,10 +60,10 @@ flotilla probe --deployment deployment.toml --env sandbox.env
 flotilla select --host-root ./tasks --deployment deployment.toml \
   --out selected.jsonl --report selection-report.json
 flotilla prepare selected.jsonl --deployment deployment.toml \
-  --out ./release --name example --report prepare-report.json --image-repo registry.example.org/team/tasks
+  --out ./release --name example --report prepare-report.json
 ```
 
-`prepare` may build and publish required USER0 adaptations. It does not upload the static release. Bind the local release and its published platform location in `[task_releases.example]` before executing. See [Native tasks](docs/Native_Tasks.md) for path binding, installation, credentials and migration.
+`prepare` reads published images; it never builds or pushes one. It does not upload the static release. Bind the local release and its published platform location in `[task_releases.example]` before executing. See [Native tasks](docs/Native_Tasks.md) for path binding, installation, credentials and migration.
 
 ```python
 import asyncio

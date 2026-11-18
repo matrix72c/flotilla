@@ -16,7 +16,6 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from flotilla.build.builder import BuildRequest
 from flotilla.build.images import _DIGEST, ImageError
 from flotilla.build.meta import ImageAccounts
 
@@ -65,15 +64,6 @@ class DockerRegistry:
             raise ImageError(f"cannot parse digest from {ref} (imagetools output: {out[:200]!r})")
         return digest
 
-    def find(self, name: str, reference: str) -> str | None:
-        try:
-            return self.digest(name, reference)
-        except ImageError as exc:
-            # `imagetools inspect` reports a missing tag in an existing repository as `<ref>: not found`.
-            if f"{name}:{reference}: not found" in str(exc):
-                return None
-            raise
-
     def image_config(self, pinned: str) -> Mapping[str, Any]:
         """The `config` section of the image config. Reads only the manifest and config blob, not layers."""
         config = self._image(pinned).get("config")
@@ -99,80 +89,6 @@ class DockerRegistry:
         if image.get("architecture", "amd64") != "amd64" or image.get("os", "linux") != "linux":
             raise ImageError("image has no linux/amd64 configuration")
         return image
-
-    def copy(self, source: str, target: str) -> None:
-        self._run(["buildx", "imagetools", "create", "--tag", target, source])
-
-    def _run(self, args: Sequence[str]) -> str:
-        return _docker(args, docker_cmd=self.docker_cmd, timeout_s=self.timeout_s)
-
-
-@dataclass(frozen=True)
-class DockerBuilder:
-    """`Builder` implemented with `docker buildx build` pushing through the image exporter.
-
-    Publications default to Docker schema2 manifests without attestations (`oci-mediatypes=false`,
-    `--provenance=false --sbom=false`): buildx's own defaults push an OCI image index, which some
-    internal registries reject. Registries that require OCI mediatypes opt in explicitly; the
-    pushed digest is read from `--metadata-file` (`containerimage.digest`), not parsed from logs.
-    """
-
-    docker_cmd: Sequence[str] = field(default_factory=lambda: ("docker",))
-    timeout_s: float = 1800.0
-    platform: str = "linux/amd64"
-    oci_mediatypes: bool = False
-    attestations: bool = False
-
-    def __post_init__(self) -> None:
-        if self.attestations and not self.oci_mediatypes:
-            raise ImageError("build attestations require OCI mediatypes; enable oci_mediatypes or disable attestations")
-
-    def build(self, request: BuildRequest) -> str:
-        with tempfile.TemporaryDirectory(prefix="flotilla-build-") as tmp:
-            metadata = Path(tmp) / "metadata.json"
-            args = [
-                "buildx",
-                "build",
-                # An explicit image exporter replaces `--push` shorthand so the manifest
-                # format is pinned instead of inheriting buildx's OCI defaults.
-                "--output",
-                f"type=image,push=true,oci-mediatypes={str(self.oci_mediatypes).lower()}",
-                "--provenance",
-                str(self.attestations).lower(),
-                "--sbom",
-                str(self.attestations).lower(),
-                "--platform",
-                self.platform,
-                "--metadata-file",
-                str(metadata),
-                "--tag",
-                request.tag,
-            ]
-            if request.dockerfile_text is not None:
-                dockerfile = Path(tmp) / "Dockerfile"
-                dockerfile.write_text(request.dockerfile_text)
-                args += ["--file", str(dockerfile)]
-            else:
-                assert request.dockerfile is not None  # BuildRequest enforces exactly one
-                args += ["--file", str(request.context / request.dockerfile)]
-            for key, value in sorted(request.args.items()):
-                args += ["--build-arg", f"{key}={value}"]
-            for source, replacement in sorted(request.contexts.items()):
-                args += ["--build-context", f"{source}=docker-image://{replacement}"]
-            args.append(str(request.context))
-            self._run(args)
-            return self._digest_from(metadata, request)
-
-    @staticmethod
-    def _digest_from(metadata: Path, request: BuildRequest) -> str:
-        try:
-            data = json.loads(metadata.read_text())
-        except (OSError, ValueError) as exc:
-            raise ImageError(f"service {request.service}: cannot read build metadata: {exc}") from exc
-        digest = data.get("containerimage.digest")
-        if not isinstance(digest, str) or not _DIGEST.fullmatch(digest):
-            raise ImageError(f"service {request.service}: build metadata has no usable digest: {data!r}")
-        return digest
 
     def _run(self, args: Sequence[str]) -> str:
         return _docker(args, docker_cmd=self.docker_cmd, timeout_s=self.timeout_s)
