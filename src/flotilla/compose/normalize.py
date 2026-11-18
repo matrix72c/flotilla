@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import ipaddress
 import posixpath
 import re
 import shlex
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import Any, Literal, cast
 
 from flotilla import resources as resource_values
@@ -85,13 +87,6 @@ _REJECT: dict[str, tuple[Category, str]] = {
         "mixed: namespaced keys (`net.*`, `kernel.shm*`, `fs.mqueue.*`) affect only this sandbox, "
         "but the rest reach the host and its neighbours; the whole field is rejected",
     ),
-    "extra_hosts": (
-        "unimplemented",
-        "mixed: flotilla already writes each sandbox's /etc/hosts to publish service names, so an "
-        "entry naming a literal address would join that block and is only unimplemented. The "
-        "`host-gateway` form has no counterpart: a sandbox has no host to reach, so that spelling "
-        "would stay rejected. A mapped address is still subject to the egress policy",
-    ),
     "dns": ("docker-internal", "cluster DNS is fixed and always reachable; a task resolver would fight the policy"),
     "dns_search": ("docker-internal", "the sandbox API exposes no resolver configuration"),
     "dns_opt": ("docker-internal", "the sandbox API exposes no resolver configuration"),
@@ -104,12 +99,10 @@ _REJECT: dict[str, tuple[Category, str]] = {
     "ipc": ("no-model", "ipc sharing needs two containers in one sandbox; a sandbox runs exactly one"),
     "userns_mode": ("no-model", "the sandbox is already the isolation domain; there is no mapping to choose"),
     "runtime": ("no-model", "the runtime is a deployment property, not something a task selects"),
-    "volumes_from": ("unimplemented", "would expand to the other service's mounts; not implemented yet"),
     "extends": ("unimplemented", "the input gate stops it before the Compose CLI, which would expand it"),
     "profiles": ("unimplemented", "not implemented yet (not seen in task data)"),
     "secrets": ("unimplemented", "would expand to mounts; not implemented yet (not seen in task data)"),
     "configs": ("unimplemented", "would expand to mounts; not implemented yet (not seen in task data)"),
-    "links": ("unimplemented", "would expand to hosts entries; not implemented yet (not seen in task data)"),
     "domainname": ("docker-internal", "an NIS domain has no counterpart in a sandbox"),
     "scale": ("unimplemented", "replicas would be several sandboxes; not implemented yet"),
 }
@@ -125,7 +118,8 @@ _BRIDGE_OPTIONS = frozenset(
 _HANDLED = {
     "image", "command", "entrypoint", "environment", "working_dir", "user", "healthcheck", "depends_on",
     "networks", "network_mode", "volumes", "tmpfs", "shm_size", "restart", "privileged", "hostname", "ports",
-    "cpus", "mem_limit", "deploy", "container_name", "devices", "cap_add",
+    "cpus", "mem_limit", "deploy", "container_name", "devices", "cap_add", "extra_hosts",
+    "links", "volumes_from",
 }  # fmt: skip
 
 
@@ -166,6 +160,8 @@ def normalize(compose: Mapping[str, Any]) -> Project:
     volumes = _top_volumes({} if compose.get("volumes") is None else compose["volumes"], c)
 
     services: dict[str, Service] = {}
+    links: dict[str, tuple[tuple[str, str], ...]] = {}
+    donors: dict[str, tuple[tuple[str, bool], ...]] = {}
     for name, raw in raw_services.items():
         raw = {} if raw is None else raw
         path = f"services.{name}"
@@ -175,9 +171,13 @@ def normalize(compose: Mapping[str, Any]) -> Project:
         env_raw = _environment(raw.get("environment"), f"{path}.environment", c)
         rest = {k: v for k, v in raw.items() if k != "environment"}
         services[name] = _service(name, rest, env_raw, volumes, c)
+        links[name] = _links(raw.get("links"), f"{path}.links", c)
+        donors[name] = _volumes_from(raw.get("volumes_from"), f"{path}.volumes_from", c)
 
     if MAIN not in services and not any(f.path.startswith(f"services.{MAIN}") for f in c.findings):
         c.reject("services", f"missing agent service {MAIN}")
+    _apply_links(services, links, c)
+    _apply_volumes_from(services, donors, c)
     _check_references(services, network_defs, c)
     used = {n for s in services.values() for n in s.networks}
     if DEFAULT_NETWORK in used and DEFAULT_NETWORK not in network_defs:
@@ -246,6 +246,7 @@ def _service(
         restart=_restart(raw.get("restart"), f"{path}.restart", c),
         privileged=_boolean(raw.get("privileged", False), f"{path}.privileged", c),
         devices=devices,
+        extra_hosts=_extra_hosts(raw.get("extra_hosts"), f"{path}.extra_hosts", c),
         container_name=_hostname(raw.get("container_name"), f"{path}.container_name", c, field="container_name"),
         hostname=_hostname(raw.get("hostname"), f"{path}.hostname", c, field="hostname"),
         udp_ports=_ports(raw.get("ports"), f"{path}.ports", c),
@@ -704,6 +705,53 @@ def _restart(value: object, path: str, c: _Collector) -> RestartPolicy:
     return "no"
 
 
+def _extra_hosts(value: object, path: str, c: _Collector) -> dict[str, str]:
+    """Static `/etc/hosts` entries, accepted only for literal addresses.
+
+    flotilla already writes each sandbox's hosts file to publish peer service names, so a literal
+    mapping simply joins that block. `host-gateway` is rejected at the value level: a sandbox has
+    no host to reach, so there is nothing for the name to resolve to. A mapped address is still
+    subject to the deployment's egress policy, which decides whether it is reachable at all.
+    """
+    if value is None:
+        return {}
+    items: list[tuple[object, object]]
+    if isinstance(value, dict):
+        items = list(value.items())
+    elif isinstance(value, list):
+        items = []
+        for i, item in enumerate(value):
+            if not isinstance(item, str) or ":" not in item:
+                c.reject(f"{path}[{i}]", "must be `name:address`")
+                continue
+            head, _, tail = item.partition(":")
+            items.append((head, tail))
+    else:
+        c.reject(path, "must be a mapping or a list of `name:address`")
+        return {}
+    out: dict[str, str] = {}
+    for name, address in items:
+        p = f"{path}.{name}" if isinstance(name, str) else path
+        if not valid_name(name):
+            c.reject(p, "host name must be a valid hostname")
+            continue
+        if not isinstance(address, str):
+            c.reject(p, "address must be a string")
+            continue
+        if address == "host-gateway":
+            c.reject(p, "`host-gateway` has no counterpart: a sandbox has no host to reach")
+            continue
+        try:
+            ipaddress.ip_address(address)
+        except ValueError:
+            c.reject(p, f"address must be a literal IPv4 or IPv6 address, not {address!r}")
+            continue
+        out[str(name)] = address
+    if out:
+        c.equivalent(path, "written into the sandbox's hosts file; reachability still follows the egress policy")
+    return out
+
+
 def _hostname(value: object, path: str, c: _Collector, *, field: str) -> str | None:
     if value is None:
         return None
@@ -800,6 +848,118 @@ def _top_volumes(value: object, c: _Collector) -> set[str]:
             else:
                 c.reject(f"volumes.{name}.{key}", "unsupported volume field")
     return {str(n) for n in value}
+
+
+def _links(value: object, path: str, c: _Collector) -> tuple[tuple[str, str], ...]:
+    """`service` or `service:alias`: the alias another service resolves the target by."""
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        c.reject(path, "must be a list of `service[:alias]`")
+        return ()
+    out: list[tuple[str, str]] = []
+    for i, item in enumerate(value):
+        p = f"{path}[{i}]"
+        if not isinstance(item, str):
+            c.reject(p, "must be a string")
+            continue
+        target, _, alias = item.partition(":")
+        alias = alias or target
+        if not valid_name(target) or not valid_name(alias):
+            c.reject(p, "must be `service[:alias]` with valid names")
+            continue
+        out.append((target, alias))
+    return tuple(out)
+
+
+def _apply_links(services: dict[str, Service], links: Mapping[str, tuple[tuple[str, str], ...]], c: _Collector) -> None:
+    """Turn each link into an alias of the target on a network both services are on.
+
+    Compose gives linked services a shared network, so when they have none in common both are
+    attached to `default` rather than relaxing the plan's rule that a named service is a member
+    of the network naming it. The alias is published on that network, so every member resolves
+    it, not only the service that declared the link.
+    """
+    for name, declared in links.items():
+        for target, alias in declared:
+            path = f"services.{name}.links"
+            if target not in services:
+                c.reject(path, f"links to a nonexistent service: {target}")
+                continue
+            if target == name:
+                c.reject(path, "a service cannot link to itself")
+                continue
+            shared = sorted(set(services[name].networks) & set(services[target].networks))
+            net = shared[0] if shared else DEFAULT_NETWORK
+            if not shared:
+                c.equivalent(path, f"linked services share a network: both joined {DEFAULT_NETWORK}")
+                for end in (name, target):
+                    attachments = dict(services[end].networks)
+                    attachments.setdefault(net, NetworkAttachment())
+                    services[end] = replace(services[end], networks=attachments)
+            attachments = dict(services[target].networks)
+            attachment = attachments[net]
+            if alias not in attachment.aliases:
+                attachments[net] = replace(attachment, aliases=(*attachment.aliases, alias))
+                services[target] = replace(services[target], networks=attachments)
+            c.equivalent(
+                f"{path}.{target}",
+                f"{alias} resolves to {target} on network {net}, for every service on it, not only {name}",
+            )
+
+
+def _volumes_from(value: object, path: str, c: _Collector) -> tuple[tuple[str, bool], ...]:
+    """`service` or `service:ro`: whose mounts to reuse, and whether to force them read-only."""
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        c.reject(path, "must be a list of `service[:ro|rw]`")
+        return ()
+    out: list[tuple[str, bool]] = []
+    for i, item in enumerate(value):
+        p = f"{path}[{i}]"
+        if not isinstance(item, str):
+            c.reject(p, "must be a string")
+            continue
+        if item.startswith("container:"):
+            c.reject(p, "`container:` names a Docker container outside the project; there is none here")
+            continue
+        donor, _, mode = item.partition(":")
+        if not valid_name(donor) or mode not in ("", "ro", "rw"):
+            c.reject(p, "must be `service[:ro|rw]`")
+            continue
+        out.append((donor, mode == "ro"))
+    return tuple(out)
+
+
+def _apply_volumes_from(
+    services: dict[str, Service], donors: Mapping[str, tuple[tuple[str, bool], ...]], c: _Collector
+) -> None:
+    """Copy a donor's declared mounts onto the user, as Docker copies a container's mounts.
+
+    Only the donor's own `volumes` are copied: this does not follow the donor's own
+    `volumes_from`. A target the user already mounts is a conflict and rejected, because the
+    layout keys mounts by target and would otherwise silently drop one of them.
+    """
+    for name, declared in donors.items():
+        for donor, read_only in declared:
+            path = f"services.{name}.volumes_from"
+            if donor not in services:
+                c.reject(path, f"takes volumes from a nonexistent service: {donor}")
+                continue
+            if donor == name:
+                c.reject(path, "a service cannot take volumes from itself")
+                continue
+            targets = {m.target for m in services[name].volumes}
+            added: list[VolumeMount] = []
+            for mount in services[donor].volumes:
+                if mount.target in targets:
+                    c.reject(f"{path}.{donor}", f"{mount.target} is already mounted by {name}")
+                    continue
+                added.append(replace(mount, read_only=mount.read_only or read_only))
+            if added:
+                services[name] = replace(services[name], volumes=(*services[name].volumes, *added))
+                c.equivalent(path, f"mounts {', '.join(m.target for m in added)} from {donor}")
 
 
 def _check_references(services: Mapping[str, Service], networks: Mapping[str, NetworkDef], c: _Collector) -> None:

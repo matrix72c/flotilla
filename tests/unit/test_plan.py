@@ -308,8 +308,19 @@ def test_hosts_only_names_on_shared_networks() -> None:
 
 
 def test_hosts_aliases_and_extra_hosts() -> None:
-    lines = hosts.entries(_web_app_db(), "app", ADDR)
+    plan = _web_app_db()
+    lines = hosts.entries(plan, "app", ADDR)
     assert ("10.0.0.6", ("database", "db")) in lines
+
+    # Compose extra_hosts join the same block, sorted with the rest, without network filtering.
+    declared = replace(
+        plan,
+        units={**plan.units, "app": replace(plan.units["app"], extra_hosts={"license": "10.9.9.9", "db": "10.0.0.6"})},
+    )
+    lines = hosts.entries(declared, "app", ADDR)
+    assert ("10.9.9.9", ("license",)) in lines
+    assert ("10.0.0.6", ("database", "db")) in lines  # a name already published is not duplicated
+    assert lines == sorted(lines)
 
 
 def test_hosts_isolated_unit_sees_nothing() -> None:

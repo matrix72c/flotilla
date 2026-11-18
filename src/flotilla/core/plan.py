@@ -86,6 +86,7 @@ class Unit:
     tmpfs_mounts: tuple[TmpfsMount, ...] = ()
     shm_size_bytes: int | None = None
     devices: frozenset[TaskDevice] = frozenset()
+    extra_hosts: Mapping[str, str] = field(default_factory=dict)  # name -> literal address
 
     @property
     def privileged_runtime(self) -> bool:

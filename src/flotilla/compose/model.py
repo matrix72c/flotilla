@@ -80,6 +80,7 @@ class Service:
     devices: frozenset[TaskDevice] = frozenset()  # run on the privileged runtime
     container_name: str | None = None
     hostname: str | None = None
+    extra_hosts: Mapping[str, str] = field(default_factory=dict)  # name -> literal address
     udp_ports: tuple[int, ...] = ()
     resources: Mapping[str, str] = field(default_factory=dict)
 

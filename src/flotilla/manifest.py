@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from flotilla.platform.base import TaskDevice, TmpfsMount
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 Condition = Literal["service_started", "service_healthy", "service_completed_successfully"]
 RestartPolicy = Literal["no", "always", "unless-stopped", "on-failure"]
@@ -61,6 +61,7 @@ class Unit(_Model):
     tmpfs_mounts: list[TmpfsMount] = []
     shm_size_bytes: Annotated[int, Field(gt=0)] | None = None
     devices: list[TaskDevice] = []  # sorted, unique; run on the privileged runtime
+    extra_hosts: dict[str, str] = {}  # name -> literal address, merged into the generated hosts block
 
     @model_validator(mode="after")
     def _sorted_devices(self) -> Unit:
@@ -124,11 +125,14 @@ class Manifest(_Model):
         would have copied out of the image into an empty named volume. Flotilla no
         longer emulates that copy-up, so a trial volume starts empty; `owner` gives
         its root identity.
+
+        Schema 9 lost nothing: schema 10 only adds `units[].extra_hosts`, which
+        defaults to empty, so a schema-9 manifest loads with no static entries.
         """
         if not isinstance(data, dict):
             return data
         version = data.get("schema", data.get("schema_"))
-        if version not in (7, 8):  # anything else is current, or too old to upgrade
+        if version not in (7, 8, 9):  # anything else is current, or too old to upgrade
             return data
         upgraded = dict(data)
         if version == 7:
