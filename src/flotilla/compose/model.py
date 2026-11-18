@@ -106,12 +106,16 @@ class Project:
 
 @dataclass(frozen=True)
 class ImageMeta:
-    """Image metadata (the Config part of `docker image inspect`, with USER resolved to numbers)."""
+    """Image metadata (the Config part of `docker image inspect`, with USER resolved to numbers).
+
+    The image `ENV` is deliberately absent: the container runtime applies it to everything execd
+    runs, so a unit's environment is the task's own variables overlaid on it. Reading it here only
+    rebuilt what the container already had.
+    """
 
     entrypoint: tuple[str, ...] | None = None
     cmd: tuple[str, ...] | None = None
     uid: int = 0
     gid: int = 0
     workdir: str = "/"
-    env: Mapping[str, str] = field(default_factory=dict)
     healthcheck: Healthcheck | None = None

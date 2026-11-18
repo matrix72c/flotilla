@@ -133,11 +133,12 @@ def test_synthesize_command(
     assert synthesize_command(svc, meta) == expected
 
 
-def test_context_merges_image_env_and_user() -> None:
+def test_context_carries_only_declared_env_with_the_image_user() -> None:
+    """The image ENV is applied by the container runtime, so only the task's own variables are sent."""
     p = _project({"app": {"image": "a", "environment": {"A": "compose", "B": "2"}, "working_dir": "/app"}})
-    meta = ImageMeta(env={"A": "image", "PATH": "/usr/bin"}, uid=33, gid=33, workdir="/var/www", cmd=("serve",))
+    meta = ImageMeta(uid=33, gid=33, workdir="/var/www", cmd=("serve",))
     unit = _manifest(p, {"app": meta}).units["app"]
-    assert unit.context.env == {"A": "compose", "B": "2", "PATH": "/usr/bin"}  # environment overrides image ENV
+    assert unit.context.env == {"A": "compose", "B": "2"}
     assert (unit.context.uid, unit.context.gid, unit.context.cwd) == (33, 33, "/app")
 
 
@@ -259,15 +260,23 @@ def test_rejected_project_cannot_be_written() -> None:
 
 
 def test_to_plan_agent_overlay() -> None:
-    m = _manifest(_project({"db": {"image": "d"}}), {"main": ImageMeta(env={"PATH": "/usr/bin"}), "db": ImageMeta()})
-    overlay = AgentOverlay(
-        env={"PATH": "/.flotilla/runtime/node/bin:${PATH}", "RT": "/.flotilla/runtime", "X": "${NOPE}"}
+    m = _manifest(
+        _project({"main": {"image": "m", "environment": {"PATH": "/usr/bin"}}, "db": {"image": "d"}}),
+        {"main": ImageMeta(), "db": ImageMeta()},
     )
+    overlay = AgentOverlay(env={"PATH": "/.flotilla/runtime/node/bin:${PATH}", "RT": "/.flotilla/runtime"})
     plan = to_plan(m, overlay=overlay)
     env = plan.units["main"].context.env
-    assert env["PATH"] == "/.flotilla/runtime/node/bin:/usr/bin"  # ${PATH} refers to the service's original value
-    assert env["RT"] == "/.flotilla/runtime" and env["X"] == ""
+    assert env["PATH"] == "/.flotilla/runtime/node/bin:/usr/bin"  # ${PATH} refers to the service's declared value
+    assert env["RT"] == "/.flotilla/runtime"
     assert "RT" not in plan.units["db"].context.env  # overlaid only onto the agent service by default
+
+
+def test_to_plan_agent_overlay_rejects_an_undeclared_reference() -> None:
+    """The image environment is not in the manifest, so `${PATH}` cannot stand for the image's own value."""
+    m = _manifest(_project({"db": {"image": "d"}}), {"main": ImageMeta(), "db": ImageMeta()})
+    with pytest.raises(PlanError, match=r"references \['PATH'\]"):
+        to_plan(m, overlay=AgentOverlay(env={"PATH": "/.flotilla/runtime/node/bin:${PATH}"}))
     with pytest.raises(PlanError):
         to_plan(m, overlay=AgentOverlay(env={"A": "1"}, services=frozenset({"ghost"})))
 

@@ -33,7 +33,7 @@ from flotilla.platform.opensandbox.http import Http
 BUSYBOX = "/.flotilla/bin/busybox"  # static busybox on the share
 _ENV_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")  # variable names referenceable as "$K" in sh
 #: Other names (Docker allows `discovery.type`) travel in `envs` under this prefix plus an index; the wrapper
-#: restores the original name for `env -i`, which clears the alias.
+#: restores the original name and unsets the alias, so the workload never sees the alias itself.
 _ENV_ALIAS = "FLOTILLA_ENV_"
 _CHOWN_TIMEOUT_S = 30.0  # chown after legacy upload
 _SYSTEM_FILES = frozenset({"/etc/hosts", "/etc/resolv.conf"})
@@ -44,7 +44,8 @@ _SYSTEM_FILE_TIMEOUT_S = 30.0
 _SAFE_PATH = re.compile(r"/[A-Za-z0-9_./-]+")
 #: Under legacy, `envs` first enter execd's outer (non-interactive) bash, where these change the shell itself --
 #: `BASH_ENV` is sourced, `SHELLOPTS=noexec` makes every command silently return 0 (false health check passes),
-#: likewise `BASHOPTS` / `ENV`. Docker has no such layer; reject them.
+#: likewise `BASHOPTS` / `ENV`. Docker has no such layer; reject them. This covers only the request `envs`: an
+#: image that declares them in its own `ENV` already has them in the container, out of flotilla's reach.
 LEGACY_UNSAFE_ENV = frozenset({"BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS"})
 
 ExecdProtocol = Literal["current", "legacy"]
@@ -181,27 +182,34 @@ def env_aliases(env_keys: Sequence[str]) -> dict[str, str]:
 
 
 def wrap_argv(argv: Sequence[str], env_keys: Sequence[str], *, wrapper: str) -> list[str]:
-    """Wrap with `env -i` to clear the inherited env, bring back only `env_keys` by name, then exec the argv.
+    """Wrap so the task's env overlays the image environment, then exec the argv.
 
-    Values reach sh's env via the request `envs`; sh expands `K="$K"` for `env -i`; `$0` is `flotilla`, `"$@"` the
-    original argv. A name sh cannot reference is quoted and reads its value from its alias (`env_aliases`). The
-    script holds only names, never values. Keys are sorted (deterministic). `wrapper` is the busybox path.
+    The container runtime already applies the image `ENV` to everything execd runs, so the task's
+    own variables are an overlay on it, as with `docker exec`. The wrapper exists only for the two
+    things the request cannot express: a name sh cannot reference travels under an alias
+    (`env_aliases`) and is restored here, and its alias is then unset so it does not reach the
+    workload; and `HOME` is resolved for the identity execd applied, since the inherited one
+    belongs to the image's own user.
+
+    Values reach sh's env via the request `envs`; sh expands `K="$K"` for `env`; `$0` is `flotilla`,
+    `"$@"` the original argv. The script holds only names, never values. Keys are sorted
+    (deterministic). `wrapper` is the busybox path.
     """
     aliases = sorted(env_aliases(env_keys).items())
     assigns = "".join(f'{shlex.quote(key)}="${alias}" ' for key, alias in aliases)
-    command = f'exec {wrapper} env -i {assigns}"$@"'
-    if "HOME" not in env_keys:
-        # Resolve inside the cleared environment, after execd applies uid/gid.
-        # Never reuse the daemon's HOME or load a login shell. Read passwd on
-        # each execution so user changes within a running sandbox take effect.
-        # The intermediate shell still reads values by alias; only the final `env -i` restores the names.
-        carried = "".join(f'{alias}="${alias}" ' for _, alias in aliases)
-        defaults = (
-            'HOME="$("$0" awk -F: -v uid="$("$0" id -u)" '
-            "'$3 == uid {print $6; exit}' /etc/passwd 2>/dev/null)\"; "
-            f'exec "$0" env -i HOME="${{HOME:-/}}" {assigns}"$@"'
-        )
-        command = f'exec {wrapper} env -i {carried}{wrapper} sh -c {shlex.quote(defaults)} {wrapper} "$@"'
+    # Only aliased names need unsetting; a referenceable key is its own alias and is simply re-set.
+    unset = "".join(f"-u {alias} " for key, alias in aliases if alias != key)
+    if "HOME" in env_keys:
+        return [wrapper, "sh", "-c", f'exec {wrapper} env {unset}{assigns}"$@"', "flotilla", *argv]
+    # Read passwd on each execution so user changes within a running sandbox take effect. The
+    # passwd entry wins only when it has one: otherwise the image's own HOME is left alone, and
+    # `/` is the last resort when the image declares none either.
+    defaults = (
+        '_h="$("$0" awk -F: -v uid="$("$0" id -u)" '
+        "'$3 == uid {print $6; exit}' /etc/passwd 2>/dev/null)\"; "
+        f'exec "$0" env {unset}HOME="${{_h:-${{HOME:-/}}}}" {assigns}"$@"'
+    )
+    command = f'exec {wrapper} sh -c {shlex.quote(defaults)} {wrapper} "$@"'
     return [wrapper, "sh", "-c", command, "flotilla", *argv]
 
 

@@ -8,10 +8,9 @@ COPY site-packages/ /opt/flotilla/lib/python3.12/site-packages/
 COPY busybox /.flotilla/bin/busybox
 COPY snapshot.json verify.py /opt/flotilla/
 COPY GPL-2.0.txt /.flotilla/licenses/busybox-GPL-2.0.txt
-# Execd intentionally drops ambient image environment; its controlled PATH must
-# still find the installed runtime, not a base-image or host Python environment.
-# A direct symlink outside the venv loses pyvenv.cfg discovery under Python 3.12.
-# Exec the venv interpreter instead, including when execd supplies its own PATH.
+# `python3` must resolve to the installed runtime, not a base-image or host Python
+# environment, whatever PATH a command runs with. A direct symlink outside the venv
+# loses pyvenv.cfg discovery under Python 3.12, so exec the venv interpreter instead.
 RUN chmod 0755 /.flotilla/bin/busybox \
     && printf '#!/bin/sh\nexec /opt/flotilla/bin/python "$@"\n' > /opt/flotilla/python-entrypoint \
     && chmod 0755 /opt/flotilla/python-entrypoint \
@@ -19,6 +18,8 @@ RUN chmod 0755 /.flotilla/bin/busybox \
     && ln -sf /opt/flotilla/python-entrypoint /usr/local/bin/python3 \
     && mkdir -p /tmp \
     && chmod 1777 /tmp
+# The image ENV is what every command starts with, so putting the venv first here is
+# enough; nothing clears it on the way to the workload.
 ENV PATH="/opt/flotilla/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 WORKDIR /
 ENTRYPOINT ["/.flotilla/bin/busybox", "sleep", "2147483647"]

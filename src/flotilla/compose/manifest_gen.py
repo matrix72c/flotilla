@@ -77,7 +77,8 @@ def _unit(
     resources: Resources,
     layout: Layout,
 ) -> Unit:
-    env = {**meta.env, **svc.environment}  # svc.environment includes env_file; it overrides image ENV.
+    # Only what the task declares: the image ENV is applied by the container runtime, not re-sent here.
+    env = dict(svc.environment)  # includes env_file
     hc = None if svc.healthcheck_disabled else (svc.healthcheck or meta.healthcheck)
     return Unit(
         image=image,

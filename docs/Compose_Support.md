@@ -70,7 +70,7 @@ field is rejected and carries the strictest of them, which is coarse but never w
 | `image` | Supported |
 | `build` | Rejected (out-of-scope): building an image is a different job from orchestrating one. Preparation consumes images that are already published, so it needs no builder, no push target and no registry write access. Publish the image first and name it in `image` or `[environment].docker_image` |
 | `command`, `entrypoint` | Supported (string form is split like a shell word list, without a shell). Docker semantics: `entrypoint` drops the image `CMD` |
-| `environment` | Supported, including names Docker accepts that are not shell identifiers (`discovery.type`). A key without a value (inherit from host) is rejected: there is no host environment |
+| `environment` | Supported, including names Docker accepts that are not shell identifiers (`discovery.type`). These variables overlay the image `ENV`, which the container runtime applies to every command; flotilla does not read or resend it. A key without a value (inherit from host) is rejected: there is no host environment |
 | `env_file` | A path or list of paths inside `environment/`, in short or long (`path`, `required`) form. Paths must be literal and stay inside the task: a dynamic or escaping path is rejected before Compose opens anything. `environment` entries win |
 | `working_dir` | Supported |
 | `user` | Supported; resolved to numeric uid/gid from the image |

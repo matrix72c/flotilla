@@ -144,20 +144,28 @@ def test_fold_exec_noninteger_error_value() -> None:
 # ───────────────────────────── Pure functions: argv wrapping (variable names only) ─────────────────────────────
 
 
-def test_wrap_argv_env_i_names_only() -> None:
+def test_wrap_argv_overlays_names_only() -> None:
+    """The image environment is the base, so the wrapper sets names over it instead of clearing it."""
     assert wrap_argv(("echo", "hi"), ["B", "A", "HOME"], wrapper=BUSYBOX) == [
         BUSYBOX,
         "sh",
         "-c",
-        f'exec {BUSYBOX} env -i A="$A" B="$B" HOME="$HOME" "$@"',  # keys sorted; only names in the script
+        f'exec {BUSYBOX} env A="$A" B="$B" HOME="$HOME" "$@"',  # keys sorted; only names in the script
         "flotilla",
         "echo",
         "hi",
     ]
 
 
-def test_wrap_argv_empty_env() -> None:
-    assert "env -i" in wrap_argv(("true",), [], wrapper=BUSYBOX)[3]
+def test_wrap_argv_does_not_clear_the_image_environment() -> None:
+    for keys in ([], ["A"], ["HOME"]):
+        assert "env -i" not in wrap_argv(("true",), keys, wrapper=BUSYBOX)[3]
+
+
+def test_wrap_argv_unsets_the_alias_it_restores() -> None:
+    """A name sh cannot reference travels under an alias; the alias itself must not reach the workload."""
+    command = wrap_argv(("x",), ["K", "a.b"], wrapper=BUSYBOX)[3]
+    assert 'a.b="$FLOTILLA_ENV_0"' in command and "-u FLOTILLA_ENV_0" in command
 
 
 def test_wrap_argv_uses_configured_wrapper() -> None:
@@ -501,8 +509,9 @@ HOSTILE_ARGS = (
 @pytest.mark.parametrize("shell", ["/bin/sh", "/bin/bash"])
 def test_legacy_command_reproduces_argv_and_env_in_a_real_shell(shell: str, tmp_path: Path) -> None:
     """execd's legacy mode runs `<shell> -c <command>` with the request envs layered over execd's environment:
-    verify against a real shell that one round of word splitting yields the original argv, and that the
-    process environment is exactly `proc.env`.
+    verify against a real shell that one round of word splitting yields the original argv, and that
+    `proc.env` lands on top of the ambient environment (the image environment, in a sandbox) without
+    the aliases used to carry unreferenceable names.
 
     The wrapper is a script forwarding sh / env / awk / id to the system tools instead of busybox.
     """
@@ -528,10 +537,13 @@ def test_legacy_command_reproduces_argv_and_env_in_a_real_shell(shell: str, tmp_
             return out.decode().split("\0")[:-1]
 
         assert run(("/usr/bin/printf", "%s\\0", *HOSTILE_ARGS)) == list(HOSTILE_ARGS)
-        expected = [f"{k}={v}" for k, v in env.items()]
-        if "HOME" not in env:
-            expected.append(f"HOME={_passwd_home()}")
-        assert sorted(run(("/usr/bin/env", "-0"))) == sorted(expected)
+        seen = dict(entry.split("=", 1) for entry in run(("/usr/bin/env", "-0")))
+        # Every requested variable arrives with its value, aliases are gone, and the ambient
+        # environment survives except where the request overrides it.
+        assert {k: seen.get(k) for k in env} == env
+        assert not [k for k in seen if k.startswith("FLOTILLA_ENV_")]
+        assert seen["NOISE"] == "1"  # `IFS` is not checked: the shell resets its own copy
+        assert seen["HOME"] == env.get("HOME", _passwd_home())
 
 
 def _passwd_home() -> str:
@@ -733,7 +745,12 @@ async def test_execution_output_is_bounded_without_fabricating_exit(clock: Manua
 def test_home_defaults_follow_execution_user_and_preserve_overrides(
     protocol: str, background: bool, tmp_path: Path
 ) -> None:
-    """Execute the wire command, with passwd/id fixtures standing in for the sandbox."""
+    """Execute the wire command, with passwd/id fixtures standing in for the sandbox.
+
+    `HOME` is the one variable the wrapper resolves rather than passes through: execd applies the
+    request's uid, but the ambient `HOME` belongs to whoever the image runs as. The passwd entry
+    for the execution uid wins; without one the image's own `HOME` is left alone.
+    """
     uid_file = tmp_path / "uid"
     passwd = tmp_path / "passwd"
     passwd.write_text("root:x:0:0::/root:/bin/sh\nagent:x:1000:1000::/home/agent:/bin/sh\n")
@@ -750,29 +767,36 @@ def test_home_defaults_follow_execution_user_and_preserve_overrides(
     bb.chmod(0o755)
     settings = ExecdSettings(protocol=protocol, wrapper=str(bb))  # type: ignore[arg-type]
 
-    def execute(uid: int, explicit: dict[str, str] | None = None) -> dict[str, str]:
+    def execute(uid: int, explicit: dict[str, str] | None = None, ambient: str = "/image-home") -> dict[str, str]:
         uid_file.write_text(str(uid))
         proc = ProcessSpec(("/usr/bin/env", "-0"), uid, uid, "/", explicit or {}, 10)
         body = command_body(proc, background=background, settings=settings)
         argv = body.get("argv") or ["/bin/bash", "-c", body["command"]]
         result = subprocess.run(
             argv,
-            env={"HOME": "/daemon-home", "EXECD_ACCESS_TOKEN": "must-not-leak", **body.get("envs", {})},
+            env={"HOME": ambient, "IMAGE_VAR": "kept", **body.get("envs", {})},
             capture_output=True,
             check=True,
         )
         return dict(entry.split("=", 1) for entry in result.stdout.decode().split("\0") if entry)
 
-    assert execute(0) == {"HOME": "/root"}
-    assert execute(1000) == {"HOME": "/home/agent"}
-    assert execute(98765) == {"HOME": "/"}
-    assert execute(1000, {"HOME": ""}) == {"HOME": ""}
+    def home(uid: int, explicit: dict[str, str] | None = None, ambient: str = "/image-home") -> str:
+        seen = execute(uid, explicit, ambient)
+        assert seen["IMAGE_VAR"] == "kept"  # the image environment is not cleared
+        return seen["HOME"]
+
+    assert home(0) == "/root"
+    assert home(1000) == "/home/agent"
+    assert home(1000, {"HOME": ""}) == ""
     explicit = "/custom home;$(do-not-execute)"
-    assert execute(0, {"HOME": explicit}) == {"HOME": explicit}
+    assert home(0, {"HOME": explicit}) == explicit
     passwd.write_text("agent:x:1000:1000::/changed home;$(literal):/bin/sh\n")
-    assert execute(1000) == {"HOME": "/changed home;$(literal)"}
+    assert home(1000) == "/changed home;$(literal)"
+    # No passwd entry for this uid: keep whatever the image set, and fall back to `/` if it set none.
+    assert home(98765) == "/image-home"
     passwd.unlink()
-    assert execute(1000) == {"HOME": "/"}
+    assert home(1000) == "/image-home"
+    assert home(1000, ambient="") == "/"
 
 
 @pytest.mark.asyncio

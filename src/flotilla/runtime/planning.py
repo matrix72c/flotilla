@@ -59,7 +59,7 @@ def to_plan(
     if unknown:
         raise PlanError(f"agent overlay services are not in the task: {sorted(unknown)}")
     for name in targets:
-        env_by_unit[name] = _overlay(env_by_unit[name], overlay.env)
+        env_by_unit[name] = _overlay(name, env_by_unit[name], overlay.env)
 
     plan = TrialPlan(
         task=manifest.task,
@@ -100,10 +100,22 @@ def _resolve_tmpfs(mounts: tuple[TmpfsMount, ...], resources: Resources) -> tupl
     return tuple(m if m.size_bytes is not None else replace(m, size_bytes=default) for m in mounts)
 
 
-def _overlay(env: dict[str, str], overlay: Mapping[str, str]) -> dict[str, str]:
+def _overlay(unit: str, env: dict[str, str], overlay: Mapping[str, str]) -> dict[str, str]:
+    """Apply the overlay, resolving `${VAR}` against the unit's declared environment.
+
+    A reference the unit does not declare is an error, not an empty string: the image `ENV` is
+    applied by the container runtime and is not visible here, so `PATH = "/x:${PATH}"` cannot be
+    written as an extension of the image's own value. Prepend the literal paths instead.
+    """
     out = dict(env)
     for key, value in overlay.items():
-        out[key] = _REF.sub(lambda m: env.get(m.group(1), ""), value)
+        missing = sorted({m.group(1) for m in _REF.finditer(value)} - set(env))
+        if missing:
+            raise PlanError(
+                f"agent overlay {key} on {unit} references {missing}, which the service does not declare; "
+                "the image environment is applied by the runtime and cannot be referenced here"
+            )
+        out[key] = _REF.sub(lambda m: env[m.group(1)], value)
     return out
 
 

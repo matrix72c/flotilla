@@ -44,7 +44,6 @@ def test_parse_config_fields() -> None:
             "Cmd": ["/bin/bash"],
             "User": "1000:1001",
             "WorkingDir": "/app",
-            "Env": ["PATH=/usr/bin", "EMPTY=", "NO_EQUALS", "=novalue"],
             "Healthcheck": {
                 "Test": ["CMD-SHELL", "curl -f localhost || exit 1"],
                 "Interval": 5_000_000_000,
@@ -55,7 +54,6 @@ def test_parse_config_fields() -> None:
     )
     assert m.entrypoint == ("/entrypoint.sh",) and m.cmd == ("/bin/bash",)
     assert (m.uid, m.gid, m.workdir) == (1000, 1001, "/app")
-    assert m.env == {"PATH": "/usr/bin", "EMPTY": ""}  # entries without `=` or with an empty key are ignored
     assert m.healthcheck is not None
     assert m.healthcheck.test == ("/bin/sh", "-c", "curl -f localhost || exit 1")
     assert (m.healthcheck.interval_s, m.healthcheck.timeout_s, m.healthcheck.retries) == (5.0, 2.0, 10)
@@ -64,7 +62,7 @@ def test_parse_config_fields() -> None:
 
 def test_parse_config_defaults_and_none_healthcheck() -> None:
     m = parse_config({})
-    assert (m.entrypoint, m.cmd, m.uid, m.gid, m.workdir, dict(m.env)) == (None, None, 0, 0, "/", {})
+    assert (m.entrypoint, m.cmd, m.uid, m.gid, m.workdir) == (None, None, 0, 0, "/")
     assert m.healthcheck is None
     # The image explicitly disables the healthcheck, and the CMD form.
     assert parse_config({"Healthcheck": {"Test": ["NONE"]}}).healthcheck is None

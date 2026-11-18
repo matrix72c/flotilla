@@ -234,7 +234,7 @@ Management-only extensions/profile/resources are excluded from the task capabili
 | Key | Meaning |
 |---|---|
 | `runtime_params` | Deployment-wide interpolation values for task Compose files, applied when a task is prepared or inspected; a per-call value for the same name wins |
-| `agent_overlay.env` | Environment variables added to the agent service. `${VAR}` refers to the service's original value, e.g. `PATH = "/opt/tools/bin:${PATH}"` |
+| `agent_overlay.env` | Environment variables added to the agent service. `${VAR}` refers to a value the service itself declares, e.g. a Compose `environment` entry; referencing a name the service does not declare is an error. The image `ENV` is applied by the container runtime and is not visible here, so it cannot be extended this way — write the literal paths |
 | `agent_overlay.services` | Services that receive the overlay instead of only the main service |
 
 ### `[probe]`

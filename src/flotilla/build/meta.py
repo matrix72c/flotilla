@@ -58,7 +58,6 @@ def parse_config(
         uid=uid,
         gid=gid,
         workdir=_str(config.get("WorkingDir")) or "/",
-        env=_env(config.get("Env")),
         healthcheck=_healthcheck(config.get("Healthcheck")),
     )
 
@@ -72,17 +71,6 @@ def _argv(value: object) -> tuple[str, ...] | None:
 
 def _str(value: object) -> str:
     return value if isinstance(value, str) else ""
-
-
-def _env(value: object) -> dict[str, str]:
-    """`Env` is a `KEY=VALUE` list; entries without `=` are ignored, as in Docker."""
-    out: dict[str, str] = {}
-    if isinstance(value, Sequence) and not isinstance(value, str):
-        for item in value:
-            key, sep, val = str(item).partition("=")
-            if sep and key:
-                out[key] = val
-    return out
 
 
 def _healthcheck(value: object) -> Healthcheck | None:
