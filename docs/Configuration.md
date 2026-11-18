@@ -209,12 +209,8 @@ Host `flotilla prepare` uses these settings to create immutable native releases.
 | `prepare.compose_command` | `["docker", "compose"]` | Official Compose argv used for normalization |
 | `prepare.compose_version` | `"2.39.4"` | Required official Compose version |
 | `prepare.export_timeout` | `600` | Seconds allowed for each `docker cp` that exports an image volume's initial content. Raise it for tasks with large volumes |
-| `build.target` | `""` | Repository for built/adapted and explicitly mirrored images, e.g. `registry.example.com/team/tasks`; `--image-repo` overrides it |
-| `build.pullable_registries` | `[]` | Registries or prefixes the platform can pull from directly; other sources fail unless mirroring is explicitly requested |
-| `build.mirror_images` | `false` | Explicitly mirror `image:` services, including pullable sources |
-| `build.oci_mediatypes` | `false` | Publish OCI rather than Docker schema2 image manifests |
-| `build.attestations` | `false` | Enable provenance/SBOM attestations; requires `oci_mediatypes=true` |
-| `build.image_replacements` | `{}` | Map of image references to substitutes, e.g. to use an internal mirror |
+| `build.pullable_registries` | `[]` | Registries or prefixes the platform can pull from directly; a service whose image comes from anywhere else is rejected |
+| `build.image_replacements` | `{}` | Map of image references to substitutes, e.g. to use an internal mirror. Applied before the `pullable_registries` check |
 
 The launch anchor that reads task metadata can be sized and placed separately from the ordinary task runtime:
 

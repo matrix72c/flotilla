@@ -79,7 +79,7 @@ With the selected `sandbox-system-v1` protocol the probe requests 96 MiB, then c
 
 ## Preparation and runtime storage
 
-The current measured internal container backend supports missing mount directories, including nested targets with readonly rootfs. The native probe profile checks this behavior rather than assuming it from protocol selection. Preparation does not inspect image paths or build an image merely to create empty tmpfs/runtime directories. A target that is a symlink in the image is resolved inside the container's root filesystem by the container runtime, as Docker does; a target that is a regular file fails at sandbox creation. A non-root image may still require the independent minimal USER0 adaptation; its original application UID/GID is resolved before adaptation. The real tmpfs mount hides existing image content.
+The current measured internal container backend supports missing mount directories, including nested targets with readonly rootfs. The native probe profile checks this behavior rather than assuming it from protocol selection. Preparation does not inspect image paths, and it produces no image at all. A target that is a symlink in the image is resolved inside the container's root filesystem by the container runtime, as Docker does; a target that is a regular file fails at sandbox creation. The real tmpfs mount hides existing image content.
 
 For read-only services, single-service writable named volumes and bind mounts become real environment-owned storage mounts rather than writable image directories. Seeding, `nocopy`, and shared-reference relationships are retained.
 

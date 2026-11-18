@@ -14,17 +14,16 @@ flotilla select --host-root ./source-tasks --deployment deployment.toml \
   --out selected.jsonl --report selection-report.json
 ```
 
-Probe records measured capabilities and requires confirmed cleanup. Selection normalizes supported task definitions but does not build or open task sandboxes. Inspect its report before preparing. The report lists each service's image source (`image`, `build`, or `config-only`). `--require-prebuilt-images` rejects tasks that would need application builds, for preparation hosts without Docker.
+Probe records measured capabilities and requires confirmed cleanup. Selection normalizes supported task definitions but does not open task sandboxes. Inspect its report before preparing. The report lists each service's image. A task that declares `build:` instead of an image is rejected: images must be published before preparation.
 
 ## 2. Prepare once
 
 ```sh
 flotilla prepare selected.jsonl --deployment deployment.toml \
-  --out ./release --name example --report prepare-report.json \
-  --image-repo registry.example.org/team/task-runtime
+  --out ./release --name example --report prepare-report.json
 ```
 
-This command may build and publish required images. Provide registry credentials explicitly via your tool configuration or `--env prepare.env`. The repository argument has no tag or digest. Dockerfiles that only set configuration reuse their base digest; other builds are reused from the registry when an identical build exists (see [Native tasks](Native_Tasks.md)). Non-root source images get a minimal USER0 adaptation after the original application identity is resolved. Runtime images are fixed by remote digest. Static bind files, hidden tests and volume seeds are captured in the release. tmpfs/readonly rootfs do not by themselves require derived images.
+This command reads registries and never writes to them: provide pull credentials via your tool configuration or `--env prepare.env`. Every image must be pullable from a registry in `build.pullable_registries` and must declare a root `USER`; anything else is rejected rather than rewritten. Images are fixed in the release by remote digest. Static bind files, hidden tests and volume seeds are captured there too.
 
 A selected row that fails is left out of the release and reported with its reason; nothing is published only when no row prepared. Output must be a new directory. Pass `--cache <dir>` to keep image configs, account databases and volume seeds between runs, so a later run does not pull the same images again. Keep reports and the cache outside the release. No platform task instances or static uploads are created by this command.
 

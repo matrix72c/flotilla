@@ -1,15 +1,13 @@
-"""Normalize image references and resolve runtime link, mirror, or build dispositions."""
+"""Normalize image references and pin them to digests."""
 
 from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Any, Literal, Protocol
+from typing import Any, Protocol
 
 from flotilla.compose.model import Project, Service
-
-Disposition = Literal["link", "mirror", "build"]
 
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 
@@ -57,18 +55,10 @@ class ImageRef:
 class BuildSettings:
     """Deployment config `[build]`."""
 
-    pullable_registries: tuple[str, ...] = ()  # registries / prefixes the platform can pull; image services link
-    mirror_images: bool = False  # if true, image services always mirror (content pinned into the user's registry)
-    target: str = ""  # push target repo for mirror / build, like `registry/namespace/repo`
-    #: Public image substitutions (applied after parsing, before building): original ref -> substituted ref. Both
-    #: service `image` and Dockerfile `FROM` are substituted. Points to internal copies when public registries are
-    #: unreachable; a substituted ref under a pullable prefix makes the service link. Keys match exactly (with tag).
+    pullable_registries: tuple[str, ...] = ()  # registries / prefixes the platform can pull
+    #: Public image substitutions, applied after parsing: original ref -> substituted ref. Points to internal
+    #: copies when public registries are unreachable. Keys match exactly (with tag).
     image_replacements: Mapping[str, str] = field(default_factory=dict)
-    #: Publications default to Docker schema2 manifests without attestations: OCI image
-    #: indexes are rejected by some internal registries. Registries that require OCI
-    #: mediatypes opt in explicitly; attestations additionally require OCI mediatypes.
-    oci_mediatypes: bool = False
-    attestations: bool = False
 
     def __post_init__(self) -> None:
         for prefix in self.pullable_registries:
@@ -79,8 +69,6 @@ class BuildSettings:
                 raise ValueError(
                     f"image_replacements entries must be non-empty on both sides: {source!r} -> {target!r}"
                 )
-        if self.attestations and not self.oci_mediatypes:
-            raise ValueError("attestations require oci_mediatypes; a schema2 manifest cannot reference them")
 
     def replace(self, ref: str) -> str:
         """Map an image reference through the substitution table; unchanged if absent."""
@@ -94,31 +82,22 @@ class BuildSettings:
 @dataclass(frozen=True)
 class ServiceImage:
     service: str
-    disposition: Disposition
-    ref: ImageRef | None  # None: build from the service Dockerfile; set for link / mirror
+    ref: ImageRef
 
 
 def plan_images(project: Project, settings: BuildSettings) -> list[ServiceImage]:
-    """Decide image dispositions per service for a whole task (pure function).
-
-    Mount directories (tmpfs, readonly roots, binds, volumes) are runtime
-    responsibilities: no service is derived or built for them here.
-    """
+    """Each service's source image for a whole task (pure function, no network)."""
     return [plan_image(name, svc, settings) for name, svc in sorted(project.services.items())]
 
 
 def plan_image(service: str, svc: Service, settings: BuildSettings) -> ServiceImage:
-    """Decide one service's image disposition (pure function, no network)."""
-    if svc.build is not None:
-        return ServiceImage(service, "build", None)
+    """One service's source image. Preparation consumes published images; it never produces one."""
     if svc.image is None:
-        raise ImageError(f"service {service} has neither image nor build")
+        raise ImageError(f"service {service} has no image")
     ref = ImageRef.parse(settings.replace(svc.image))
-    if settings.mirror_images:
-        return ServiceImage(service, "mirror", ref)
     if not settings.pullable(ref):
-        raise ImageError(f"service {service}: source registry is not pullable; explicitly enable mirror_images")
-    return ServiceImage(service, "link", ref)
+        raise ImageError(f"service {service}: source registry is not pullable by the platform")
+    return ServiceImage(service, ref)
 
 
 class Registry(Protocol):
@@ -128,31 +107,13 @@ class Registry(Protocol):
         """Manifest digest (`sha256:...`) of `name` (registry/repo) at `reference` (tag or digest)."""
         ...
 
-    def find(self, name: str, reference: str) -> str | None:
-        """Like `digest`, but `None` when the tag does not exist; other failures still raise.
-
-        The default finds nothing, so registries without lookup support always build.
-        """
-        return None
-
     def image_config(self, pinned: str) -> Mapping[str, Any]:
         """`config` section of the image config of `pinned` (`repo@sha256:...`); reads only manifest and blob."""
         ...
 
-    def copy(self, source: str, target: str) -> None:
-        """Copy `source` (`repo@sha256:...`) by digest to `target` (`repo:tag`), preserving the digest."""
-        ...
-
-
-@dataclass(frozen=True)
-class ImageResolution:
-    images: Mapping[str, str]  # service -> `repo@sha256:...` (link / mirror services only)
-    dispositions: Mapping[str, Disposition]
-    to_build: tuple[str, ...]  # services needing BuildKit build/derive (no images produced here)
-
 
 def pin_images(plans: Sequence[ServiceImage], registry: Registry) -> list[ServiceImage]:
-    """Resolve all source images read-only (including derive bases), without copying or building, for cache keys.
+    """Resolve every source image read-only, without copying or building.
 
     Tags are deduplicated by full reference; explicit digests skip the tag cache. Re-passing the result never
     queries the registry again.
@@ -161,9 +122,6 @@ def pin_images(plans: Sequence[ServiceImage], registry: Registry) -> list[Servic
     pinned: list[ServiceImage] = []
     for plan in plans:
         ref = plan.ref
-        if ref is None:
-            pinned.append(plan)
-            continue
         digest = ref.digest
         if digest is None:
             key = (ref.name, ref.tag or "latest")
@@ -177,43 +135,12 @@ def pin_images(plans: Sequence[ServiceImage], registry: Registry) -> list[Servic
     return pinned
 
 
-def resolve_images(
-    plans: Sequence[ServiceImage],
-    settings: BuildSettings,
-    registry: Registry,
-) -> ImageResolution:
-    """Resolve digests for link / mirror services and copy (for mirror); return each service's `repo@sha256:...`.
-
-    A source image (same registry/repo + digest) is resolved once and mirrored once per build. Build services
-    produce no image here; they are only listed in `to_build` for the BuildKit step.
-    """
+def pinned_images(plans: Sequence[ServiceImage]) -> dict[str, str]:
+    """Service -> `repo@sha256:...` for already pinned plans."""
     images: dict[str, str] = {}
-    dispositions: dict[str, Disposition] = {}
-    to_build: list[str] = []
-    mirrored: dict[str, str] = {}  # source pinned -> target pinned (dedup)
-    for plan in pin_images(plans, registry):
-        dispositions[plan.service] = plan.disposition
-        if plan.disposition == "build":
-            to_build.append(plan.service)
-            continue
-        assert plan.ref is not None
-        ref = plan.ref
-        digest = ref.digest
-        assert digest is not None
-        source = ref.pinned(digest)
-        if plan.disposition == "link":
-            images[plan.service] = source
-            continue
-        if not settings.target:
-            raise ImageError(f"service {plan.service} needs a mirror, but [build].target is not configured")
-        pinned = mirrored.get(source)
-        if pinned is None:
-            target_tag = f"{settings.target}:mirror-{digest.removeprefix('sha256:')[:12]}"
-            registry.copy(source, target_tag)
-            remote_digest = registry.digest(settings.target, target_tag.rsplit(":", 1)[1])
-            if not _DIGEST.fullmatch(remote_digest):
-                raise ImageError("mirror returned an invalid remote digest")
-            pinned = f"{settings.target}@{remote_digest}"
-            mirrored[source] = pinned
-        images[plan.service] = pinned
-    return ImageResolution(images=images, dispositions=dispositions, to_build=tuple(to_build))
+    for plan in plans:
+        digest = plan.ref.digest
+        if digest is None:
+            raise ImageError(f"service {plan.service} image was not pinned")
+        images[plan.service] = plan.ref.pinned(digest)
+    return images

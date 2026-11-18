@@ -121,7 +121,7 @@ def test_adapter_delegates_ordered_merge_and_interpolation(tmp_path: Path, monke
         )
     assert not project.rejected, project.findings
     service = project.services["main"]
-    assert service.image == "harbor-image" and service.build is None
+    assert service.image == "harbor-image"
     assert service.command == service.entrypoint == ()
     assert service.environment == {"LITERAL": "${UNCHANGED}", "DOLLARS": "$HOME", "KEY$$": "one$two$$three$$$"}
     assert service.volumes[0].source == "./data"
@@ -282,12 +282,12 @@ def test_null_and_empty_command_entrypoint(entrypoint: str | list[str] | None, c
 def test_docker_only_semantics_are_recorded_not_rejected(field: str, value: object, tmp_path: Path) -> None:
     from flotilla.build.driver import build_task
     from flotilla.compose.task import HarborTask
-    from flotilla.testing.build import FakeBuilder, FakeRegistry, _ctx
+    from flotilla.testing.build import FakeRegistry, _ctx
 
     project = normalize({"services": {"main": {"image": "r.io/image", field: value}}})
     kinds = {f.kind for f in project.findings if f.path == f"services.main.{field}"}
     assert kinds and kinds <= {"equivalent", "warn"}, project.findings
-    builder, registry = FakeBuilder(), FakeRegistry()
+    registry = FakeRegistry()
     task = HarborTask("accepted", tmp_path, tmp_path, project, ())
-    outcome = build_task(task, tmp_path / "out", _ctx(builder=builder, registry=registry))
+    outcome = build_task(task, tmp_path / "out", _ctx(registry=registry))
     assert outcome.status == "built", outcome.reason

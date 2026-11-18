@@ -72,7 +72,6 @@ def import_task(
     *,
     caps: Capabilities,
     compose_adapter: ComposeConfigAdapter,
-    require_prebuilt_images: bool = False,
 ) -> ImportedTask:
     """Resolve every role through Harbor's inheritance and the official Compose adapter."""
     from harbor.models.task.config import TaskConfig
@@ -114,10 +113,6 @@ def import_task(
             warnings.append(f"{role}: environment.storage_mb ignored; the platform has no per-sandbox disk quota")
         if declared.get("os", "linux") != "linux":
             raise UnsupportedTask(f"{role}: only linux images are supported")
-        if require_prebuilt_images:
-            pending = [name for name, svc in environment.project.services.items() if svc.build is not None]
-            if pending:
-                raise UnsupportedTask(f"{role}: application images must be published first: {', '.join(pending)}")
         scan = scan_task(environment, caps)
         if scan.status == "rejected":
             raise UnsupportedTask(f"{role}: " + "; ".join(f.reason for f in scan.findings if f.kind == "reject"))

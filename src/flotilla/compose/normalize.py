@@ -11,7 +11,6 @@ from typing import Any, Literal, cast
 from flotilla import resources as resource_values
 from flotilla.compose.model import (
     MAIN,
-    Build,
     Condition,
     Dependency,
     Finding,
@@ -45,6 +44,7 @@ _EQUIVALENT = {
 # carries the same category for every key, and a test keeps the two from drifting.
 #
 #   unimplemented     flotilla's own work; nothing outside it is missing
+#   out-of-scope      a different job than orchestration; preparation consumes published images
 #   platform-gap      the task semantics are real, but the sandbox API has no request surface for them
 #   no-model          a sandbox is one container in one isolation domain, so the field has no subject
 #   unsafe            honoring it would remove the isolation the sandbox exists to provide
@@ -53,13 +53,20 @@ _EQUIVALENT = {
 #
 # A field whose values span categories is marked `mixed` in the documentation and carries the
 # strictest category here: the whole field is rejected, which is coarse but never wrong.
-Category = Literal["unimplemented", "platform-gap", "no-model", "unsafe", "not-reproducible", "docker-internal"]
+Category = Literal[
+    "unimplemented", "out-of-scope", "platform-gap", "no-model", "unsafe", "not-reproducible", "docker-internal"
+]  # fmt: skip
 
 # Rejected service fields, as (category, reason). A `platform-gap` reason names the sandbox API's
 # request surface: each sandbox is created from one image with cpu/memory, volumes, ports, tmpfs,
 # a network policy and a fixed set of extension keys. Those fields have no counterpart there, so
 # the task cannot be honored rather than merely being unimplemented here.
 _REJECT: dict[str, tuple[Category, str]] = {
+    "build": (
+        "out-of-scope",
+        "building an image is a different job from orchestrating one; "
+        "preparation consumes images that are already published",
+    ),
     "group_add": ("platform-gap", "the sandbox API exposes no supplementary groups"),
     "cap_drop": (
         "platform-gap",
@@ -116,7 +123,7 @@ _BRIDGE_OPTIONS = frozenset(
     }
 )
 _HANDLED = {
-    "image", "build", "command", "entrypoint", "environment", "working_dir", "user", "healthcheck", "depends_on",
+    "image", "command", "entrypoint", "environment", "working_dir", "user", "healthcheck", "depends_on",
     "networks", "network_mode", "volumes", "tmpfs", "shm_size", "restart", "privileged", "hostname", "ports",
     "cpus", "mem_limit", "deploy", "container_name", "devices", "cap_add",
 }  # fmt: skip
@@ -210,8 +217,8 @@ def _service(
         )
     devices = _devices(raw.get("devices"), f"{path}.devices", c)
     _cap_add(raw.get("cap_add"), f"{path}.cap_add", devices, c)
-    if "image" not in raw and "build" not in raw:
-        c.reject(path, "neither image nor build")
+    if "image" not in raw:
+        c.reject(path, "no image")
     hc, hc_disabled = _healthcheck(raw.get("healthcheck"), f"{path}.healthcheck", c)
     mounts = _volumes(raw.get("volumes"), f"{path}.volumes", volumes, c)
     tmpfs = (*_tmpfs(raw.get("tmpfs"), f"{path}.tmpfs", c), *_long_tmpfs(raw.get("volumes"), f"{path}.volumes", c))
@@ -223,7 +230,6 @@ def _service(
         name=name,
         resources=_resources(raw, path, c),
         image=_opt_str(raw.get("image"), f"{path}.image", c),
-        build=_build(raw.get("build"), f"{path}.build", c),
         command=_argv(raw.get("command"), f"{path}.command", c),
         entrypoint=_argv(raw.get("entrypoint"), f"{path}.entrypoint", c),
         environment=env,
@@ -347,28 +353,6 @@ def _argv(value: object, path: str, c: _Collector) -> tuple[str, ...] | None:
         return tuple(str(x) for x in value)
     c.reject(path, f"unrecognized syntax: {value!r}")
     return None
-
-
-def _build(value: object, path: str, c: _Collector) -> Build | None:
-    if value is None:
-        return None
-    if isinstance(value, str):
-        return Build(context=value)
-    if not isinstance(value, dict):
-        c.reject(path, f"unrecognized syntax: {value!r}")
-        return None
-    for key in value:
-        if key not in ("context", "dockerfile", "args"):
-            c.reject(f"{path}.{key}", "unsupported build field")
-    args = {} if value.get("args") is None else value["args"]
-    if isinstance(args, list):
-        args = dict(_split_kv(x) for x in args)
-    args = _mapping(args, f"{path}.args", c)
-    return Build(
-        context=_opt_str(value.get("context", "."), f"{path}.context", c) or ".",
-        dockerfile=_opt_str(value.get("dockerfile"), f"{path}.dockerfile", c),
-        args={str(k): "" if v is None else str(v) for k, v in args.items()},
-    )
 
 
 def _environment(value: object, path: str, c: _Collector) -> dict[str, str]:

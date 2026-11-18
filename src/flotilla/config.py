@@ -108,10 +108,6 @@ class Build(_Model):
     """Dataset builder config `[build]`, used by `flotilla prepare`."""
 
     pullable_registries: tuple[str, ...] = ()
-    mirror_images: bool = False
-    oci_mediatypes: bool = False
-    attestations: bool = False
-    target: str = ""
     image_replacements: dict[str, str] = {}
 
     def settings(self) -> BuildSettings:
@@ -119,10 +115,6 @@ class Build(_Model):
 
         return BuildSettings(
             pullable_registries=self.pullable_registries,
-            mirror_images=self.mirror_images,
-            oci_mediatypes=self.oci_mediatypes,
-            attestations=self.attestations,
-            target=self.target,
             image_replacements=self.image_replacements,
         )
 
