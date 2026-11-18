@@ -1,4 +1,4 @@
-"""Operator commands for inspection, preparation, capability probes, publication, and garbage collection."""
+"""Operator commands for inspection, capability probes, publication, and garbage collection."""
 
 from __future__ import annotations
 
@@ -24,32 +24,13 @@ from flotilla.share.release import ReleaseError, VerifyReport, gc_releases, publ
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="flotilla", description="prepare portable native tasks and orchestrate sandbox environments"
+        prog="flotilla", description="inspect published tasks and operate a deployment's sandbox storage"
     )
     sub = parser.add_subparsers(dest="command", required=True)
     command = sub.add_parser("inspect", help="inspect task environments and resources")
     command.add_argument("tasks", nargs="+", type=Path)
     command.add_argument("--deployment", required=True, type=Path)
     command.add_argument("--out", type=Path)
-    sel = sub.add_parser("select", help="select host-side Harbor tasks without creating sandboxes")
-    sel.add_argument("--host-root", required=True, type=Path)
-    sel.add_argument("--deployment", required=True, type=Path)
-    sel.add_argument("--out", required=True, type=Path)
-    sel.add_argument("--report", required=True, type=Path)
-    pr = sub.add_parser("prepare", help="prepare a native task release from published images")
-    pr.add_argument(
-        "selected", type=Path, help="host-side selected.jsonl; old warmup task-key arguments are unsupported"
-    )
-    pr.add_argument("--deployment", required=True, type=Path)
-    pr.add_argument("--env", type=Path, help="explicit preparation credentials; platform credentials are not needed")
-    pr.add_argument("--out", required=True, type=Path, help="new native release directory (not uploaded automatically)")
-    pr.add_argument("--name", required=True, help="release name; rows carry it and [task_releases.<name>] binds it")
-    pr.add_argument("--report", required=True, type=Path)
-    pr.add_argument(
-        "--cache",
-        type=Path,
-        help="directory kept across runs for image configs and account databases, keyed by image digest",
-    )
     anc = sub.add_parser("anchor", help="installed-package Anchor tools")
     anchor_sub = anc.add_subparsers(dest="anchor_command", required=True)
     ab = anchor_sub.add_parser("build", help="build and verify an Anchor; publication requires --push")
@@ -140,37 +121,6 @@ async def _tasks(args: argparse.Namespace) -> int:
         args.out.write_text(output + "\n")
     print(output)
     return int(failed)
-
-
-def _prepare(args: argparse.Namespace) -> int:
-    from flotilla.prepare import prepare
-
-    result = prepare(
-        args.selected,
-        deployment=args.deployment,
-        out=args.out,
-        name=args.name,
-        report=args.report,
-        cache=args.cache,
-    )
-    print(f"native release prepared: {args.out} ({result.prepared} rows); publish it using your storage tools")
-    if result.failed:
-        print(f"{result.failed} selected rows failed and are not in the release; see {args.report}", file=sys.stderr)
-    return 0
-
-
-def _select(args: argparse.Namespace) -> int:
-    from flotilla.prepare import select
-
-    cfg = FlotillaConfig.load(args.deployment)
-    select(
-        args.host_root,
-        caps=cfg.platform_capabilities(),
-        out=args.out,
-        report=args.report,
-    )
-    print(f"selected tasks: {args.out}")
-    return 0
 
 
 def _anchor(args: argparse.Namespace) -> int:
@@ -370,9 +320,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         except (ConfigError, ValueError, OSError, FlotillaError) as exc:
             print(exc, file=sys.stderr)
             return 2
-    if args.command in ("prepare", "select", "anchor"):
+    if args.command == "anchor":
         try:
-            return {"prepare": _prepare, "select": _select, "anchor": _anchor}[args.command](args)
+            return _anchor(args)
         except (ConfigError, ValueError, RuntimeError, OSError, FlotillaError) as exc:
             print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
             return 2

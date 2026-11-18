@@ -8,7 +8,11 @@ from flotilla.core.plan import Mount, TrialPlan
 from flotilla.platform.base import SharedVolume
 
 LAUNCHES = "launches"
+SHARE = "share"
 SHARE_MOUNT = "/.flotilla"
+
+#: Top-level storage keys that are flotilla's own state, not anyone's task data.
+RESERVED_KEYS = frozenset({LAUNCHES, SHARE})
 
 
 def launch_key(launch_id: str) -> str:
@@ -20,7 +24,7 @@ def trial_key(launch_id: str, trial_id: str) -> str:
 
 
 def share_key(release: str) -> str:
-    return f"share/releases/{release}"
+    return f"{SHARE}/releases/{release}"
 
 
 def unit_volumes(

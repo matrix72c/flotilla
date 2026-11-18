@@ -1,10 +1,10 @@
-"""Native Harbor task-source and trial-runtime extension for task releases.
+"""Native Harbor task-source and trial-runtime extension over a published dataset.
 
 Requires Harbor's explicit task_source/runtime interfaces. No global registries,
 local task uploads, source task keys, or patches to Harbor internals are used.
-Selection is a portable release ``dataset.jsonl``; Harbor presentation is rebuilt
-from each task's ``provenance.harbor.config``; execution and verification follow
-the release through :class:`flotilla.native.NativeAttempt`.
+Selection names a dataset the deployment declares, optionally narrowed by a file
+of task keys; Harbor presentation is each task's own ``task.toml``; execution and
+verification go through :class:`flotilla.native.NativeAttempt`.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import math
+import tomllib
 from dataclasses import asdict
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -27,8 +28,10 @@ from harbor.tasks.client import TaskDownloadResult
 from harbor.verifier.verifier import RewardFileEmptyError, RewardFileNotFoundError, VerifierOutputParseError
 
 from flotilla.config import FlotillaConfig
+from flotilla.core.plan import TaskSource
 from flotilla.integrations.harbor import FlotillaEnvironment
-from flotilla.native import BoundTask, NativeAttempt, ReleaseBindings
+from flotilla.native import Dataset, NativeAttempt
+from flotilla.native.runtime import INSTRUCTION
 from flotilla.runtime.client import Flotilla
 from flotilla.runtime.types import CleanupError, OpenOptions
 
@@ -44,19 +47,27 @@ def _supported(config: Any) -> None:
 
 
 class FlotillaTaskSource:
-    """Release selection: one Harbor trial task per dataset row, in row order."""
+    """Dataset selection: one Harbor trial task per task directory, in a stable order.
 
-    def __init__(self, *, dataset: str | Path, deployment: str | Path, metadata_workers: int = 8) -> None:
+    `dataset` names a dataset the deployment declares. `selection` optionally narrows it to the
+    task keys listed in a text file, one per line, in that file's order; without it every task
+    in the dataset is selected. Nothing is copied: a selected task stays where it is published.
+    """
+
+    def __init__(
+        self, *, dataset: str, deployment: str | Path, selection: str | Path | None = None, metadata_workers: int = 8
+    ) -> None:
         if isinstance(metadata_workers, bool) or not isinstance(metadata_workers, int) or metadata_workers < 1:
             raise ValueError("metadata_workers must be a positive integer")
         if not hasattr(Task, "from_metadata"):
             raise RuntimeError("native Flotilla requires Harbor with task_source/runtime extension support")
-        self.dataset = Path(dataset).expanduser()
+        self.dataset = dataset
         self.deployment = Path(deployment).expanduser()
+        self.selection = None if selection is None else Path(selection).expanduser()
         self.metadata_workers = metadata_workers
-        self._bindings: ReleaseBindings | None = None
-        # Absolute release task payload directories of loaded tasks.
-        self.bounds: dict[Path, BoundTask] = {}
+        self._resolved: Dataset | None = None
+        # Absolute task directories of selected tasks, keyed by where they are on this host.
+        self.sources: dict[Path, TaskSource] = {}
 
     def _resolve_input(self, value: Path, name: str, base_dirs: dict[str, Path | None] | None) -> Path:
         if value.is_absolute():
@@ -66,73 +77,74 @@ class FlotillaTaskSource:
             raise ValueError(f"relative {name} requires a local config file; use absolute paths in remote configs")
         return base / value
 
-    def _init_bindings(self, config: Any) -> None:
-        if self._bindings is not None:
+    def _init_dataset(self, config: Any) -> None:
+        if self._resolved is not None:
             return
         source_config = config.task_source
         base_dirs = None if source_config is None else source_config.kwargs_base_dirs
-        dataset = self._resolve_input(self.dataset, "dataset", base_dirs)
         deployment = self._resolve_input(self.deployment, "deployment", base_dirs)
-        bindings = FlotillaConfig.load(deployment).release_bindings()
+        selection = None if self.selection is None else self._resolve_input(self.selection, "selection", base_dirs)
+        declared = FlotillaConfig.load(deployment).resolve_datasets()
+        if self.dataset not in declared:
+            raise ValueError(f"the deployment declares no dataset {self.dataset!r}; declared: {sorted(declared)}")
         # Snapshots carry resolved external paths, not the invocation's CWD.
-        self.dataset, self.deployment, self._bindings = dataset, deployment, bindings
+        self.deployment, self.selection, self._resolved = deployment, selection, declared[self.dataset]
         if source_config is not None:
-            source_config.kwargs["dataset"] = str(dataset)
             source_config.kwargs["deployment"] = str(deployment)
+            if selection is not None:
+                source_config.kwargs["selection"] = str(selection)
 
     @property
-    def bindings(self) -> ReleaseBindings:
-        if self._bindings is None:
-            raise RuntimeError("task source must resolve or load tasks before accessing its bindings")
-        return self._bindings
+    def tasks(self) -> Dataset:
+        if self._resolved is None:
+            raise RuntimeError("task source must resolve or load tasks before accessing its dataset")
+        return self._resolved
 
     async def resolve_task_configs(self, config: Any) -> list[Any]:
-        self._init_bindings(config)
+        self._init_dataset(config)
         if config.tasks or config.datasets:
-            raise ValueError(
-                "native releases replace Harbor task/dataset discovery; select rows in the release dataset.jsonl"
-            )
+            raise ValueError("a published dataset replaces Harbor task/dataset discovery; narrow it with `selection`")
         return await self._resolve_selection()
 
+    def _keys(self) -> list[str]:
+        if self.selection is None:
+            return self.tasks.tasks()
+        lines = self.selection.read_text(encoding="utf-8").splitlines()
+        keys = [stripped for line in lines if (stripped := line.strip()) and not stripped.startswith("#")]
+        if not keys:
+            raise ValueError(f"{self.selection} selects no tasks")
+        return keys
+
     async def _resolve_selection(self) -> list[TrialTaskConfig]:
-        rows = await asyncio.to_thread(self.bindings.read_dataset, self.dataset)
-        if not rows:
-            raise ValueError("the release dataset selects no tasks")
-        # Validate every selected row before the job starts: duplicates and order
-        # are preserved verbatim, and a broken row is never silently dropped.
+        keys = await asyncio.to_thread(self._keys)
+        # Validate every selected key before the job starts: duplicates and order
+        # are preserved verbatim, and a broken key is never silently dropped.
         semaphore = asyncio.Semaphore(self.metadata_workers)
 
-        async def resolve(row: Any) -> BoundTask:
+        async def resolve(key: str) -> TaskSource:
             async with semaphore:
-                return await asyncio.to_thread(self.bindings.resolve, row)
+                return await asyncio.to_thread(self.tasks.source, key)
 
-        bound_tasks = await asyncio.gather(*(resolve(row) for row in rows))
-        tasks = []
-        for bound in bound_tasks:
-            directory = bound.directory.absolute()
-            self.bounds.setdefault(directory, bound)
-            tasks.append(TrialTaskConfig(path=directory, source=bound.row.release))
-        return tasks
+        sources = await asyncio.gather(*(resolve(key) for key in keys))
+        configs = []
+        for source in sources:
+            directory = source.local.absolute()
+            self.sources.setdefault(directory, source)
+            configs.append(TrialTaskConfig(path=directory, source=self.dataset))
+        return configs
 
     async def load_task(self, config: Any) -> tuple[Task, TaskDownloadResult]:
-        self._init_bindings(config)
+        self._init_dataset(config)
         task_config = config.task
         if task_config.path is None or task_config.is_git_task() or task_config.is_package_task():
-            raise ValueError("native trials point at release task payloads, not remote downloads")
+            raise ValueError("native trials point at published task directories, not remote downloads")
         # A restored standalone Trial has no in-memory Job selection cache.
-        if not self.bounds:
+        if not self.sources:
             await self._resolve_selection()
-        bound = self._bound_for(task_config.path)
-        provenance = bound.task.provenance or {}
-        harbor = provenance.get("harbor") if isinstance(provenance, dict) else None
-        presentation = harbor.get("config") if isinstance(harbor, dict) else None
-        if provenance.get("importer") != "harbor-v1" or not isinstance(presentation, dict):
-            raise ValueError("release task lacks harbor-v1 presentation provenance")
-        from harbor.models.task.config import TaskConfig
-
-        parsed = TaskConfig.model_validate(presentation)
+        source = self._source_for(task_config.path)
+        parsed = await asyncio.to_thread(_read_task_config, source.local)
         _supported(parsed)
-        instruction = await asyncio.to_thread(bound.instruction)
+        instruction = await asyncio.to_thread(_read_instruction, source.local)
         task = Task.from_metadata(
             Path(task_config.path),
             config=parsed,
@@ -142,15 +154,25 @@ class FlotillaTaskSource:
         )
         return task, TaskDownloadResult(path=Path(task_config.path), download_time_sec=0, cached=True)
 
-    def _bound_for(self, path: Path) -> BoundTask:
+    def _source_for(self, path: Path) -> TaskSource:
         try:
-            return self.bounds[Path(path).absolute()]
+            return self.sources[Path(path).absolute()]
         except KeyError:
-            raise ValueError(f"{path} is not a task payload of this release selection") from None
+            raise ValueError(f"{path} is not a task directory of this selection") from None
 
-    def bound_for(self, task: Task) -> BoundTask:
-        """The release binding a loaded task came from, for its trial runtime."""
-        return self._bound_for(Path(task.task_dir))
+    def source_for(self, task: Task) -> TaskSource:
+        """Where a loaded task's files are, on both sides, for its trial runtime."""
+        return self._source_for(Path(task.task_dir))
+
+
+def _read_task_config(path: Path) -> Any:
+    from harbor.models.task.config import TaskConfig
+
+    return TaskConfig.model_validate(tomllib.loads((path / "task.toml").read_text(encoding="utf-8")))
+
+
+def _read_instruction(path: Path) -> str:
+    return (path / INSTRUCTION).read_text(encoding="utf-8")
 
 
 def _safe_output(name: str) -> PurePosixPath:
@@ -212,16 +234,14 @@ class NativeFlotillaRuntime:
         if not isinstance(source, FlotillaTaskSource):
             raise ValueError("native Flotilla requires FlotillaTaskSource")
         if config.verifier.import_path is not None:
-            raise ValueError(
-                "native releases bake verification at prepare time; verifier.import_path cannot replace it"
-            )
+            raise ValueError("verification comes from the task's own [verifier] table; import_path cannot replace it")
         if config.verifier.env:
-            raise ValueError("verifier.env is baked into the release; prepare a new release to change it")
+            raise ValueError("verifier.env comes from the task's own [verifier] table and cannot be overridden")
         if runtime_params:
-            raise ValueError("runtime parameters are resolved at preparation; set them on the dataset row")
+            raise ValueError("runtime parameters belong to the deployment; set them in [runtime_params]")
         if not config.environment.delete:
             raise ValueError("native Flotilla always releases trial resources; environment.delete must be true")
-        self.bound = source.bound_for(task)
+        self.source = source.source_for(task)
         self.config = config
         self.task = task
         self.paths = paths
@@ -252,7 +272,7 @@ class NativeFlotillaRuntime:
                 return
             if self.attempt is not None:
                 raise RuntimeError("native Trial already has a main environment")
-            self.attempt = await NativeAttempt.create(self.fleet, self.bound)
+            self.attempt = await NativeAttempt.create(self.fleet, self.source)
             environment._environment = await self.attempt.open(
                 "main",
                 OpenOptions(

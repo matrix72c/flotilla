@@ -5,6 +5,7 @@ from __future__ import annotations
 import posixpath
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Literal
 
 from flotilla.platform.base import (
@@ -20,6 +21,24 @@ from flotilla.platform.base import (
 
 Condition = Literal["service_started", "service_healthy", "service_completed_successfully"]
 RestartPolicy = Literal["no", "always", "unless-stopped", "on-failure"]
+
+
+@dataclass(frozen=True)
+class TaskSource:
+    """Where a task's files are, on the client and on the platform's shared storage.
+
+    `local` is read to resolve the task. `key` is the same directory as the platform sees it,
+    which is what a sandbox mounts. Keeping both means flotilla never has to assume the two
+    filesystems are mounted at the same path, and never has to copy the task to make them agree.
+    """
+
+    local: Path
+    key: str | None = None
+    root: StorageRoot = "work"
+
+    def __post_init__(self) -> None:
+        if self.key is not None and (not self.key or self.key.startswith("/") or ".." in self.key.split("/")):
+            raise ValueError(f"task files key must be a canonical relative path: {self.key!r}")
 
 
 @dataclass(frozen=True)
@@ -127,10 +146,12 @@ class TrialPlan:
     """All inputs of a trial. Unit names are Compose service names (replicas get their own) and `link` member names."""
 
     task: str  # task slug, written to the `flotilla/task` label (truncated)
-    task_files: (
-        str | None
-    )  # published task files directory (relative to the shared root); None if there are no task files
+    task_files: str | None  # the task's files directory (relative to the shared root); None if the task has no files
     units: Mapping[str, Unit]
+    #: The unit the agent works in, and the default target of anything addressed to "the task".
+    #: Unset means the only unit there is; a trial with several units has to name one. Read it
+    #: through `agent`, which resolves the single-unit case.
+    agent_service: str | None = None
     networks: Mapping[str, Network] = field(default_factory=dict)
     depends_on: Mapping[str, Mapping[str, Dependency]] = field(default_factory=dict)
     volumes: tuple[TrialVolume, ...] = ()
@@ -143,11 +164,23 @@ class TrialPlan:
     task_files_root: StorageRoot = "work"
     workspace_mounts: Mapping[str, tuple[SharedVolume, ...]] = field(default_factory=dict)
 
+    @property
+    def agent(self) -> str:
+        """The unit anything addressed to "the task" goes to."""
+        if self.agent_service is not None:
+            return self.agent_service
+        (only,) = self.units
+        return only
+
     def validate(self) -> None:
         """Check cross-field consistency; raise `ValueError` if not (a manifest or translation bug, not platform)."""
         units = set(self.units)
         if not units:
             raise ValueError("a trial needs at least one unit")
+        if self.agent_service is not None and self.agent_service not in units:
+            raise ValueError(f"agent_service {self.agent_service!r} is not one of this trial's units")
+        if self.agent_service is None and len(units) > 1:
+            raise ValueError("a trial with several units must name its agent_service")
         for name, net in self.networks.items():
             _require_subset(net.members, units, f"members of network {name}")
             for host, targets in net.names.items():

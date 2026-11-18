@@ -1,8 +1,7 @@
-"""Native release selection and runtime contracts for Harbor extensions."""
+"""Dataset selection and runtime contracts for Harbor extensions."""
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,73 +26,39 @@ from flotilla.integrations.harbor_native import (
     NativeFlotillaEnvironment,
     NativeFlotillaRuntime,
 )
-from flotilla.manifest import Context, Manifest, Resources, Unit
-from flotilla.native import (
-    Artifact,
-    ReleaseWriter,
-    Task,
-    Verification,
-    VerificationResult,
-    read_dataset,
-)
+from flotilla.native import VerificationResult
 
 pytestmark = pytest.mark.asyncio
 LOGGER = logging.getLogger(__name__)
 
-Selection = tuple["FlotillaTaskSource", Path, Path, dict[str, Any]]
+Selection = tuple["FlotillaTaskSource", Path, Path, str]
 
-VERIFY_COMMAND = ("verify", "run")
-PRESENTATION = {
-    "environment": {"docker_image": "r.io/main:1"},
-    "artifacts": [{"source": "/evidence/main.txt", "destination": "main.txt"}],
-}
-
-
-def unit() -> Unit:
-    return Unit(
-        image="image@sha256:" + "b" * 64,
-        resources=Resources(cpu="1", memory="512Mi"),
-        context=Context(env={}, uid=0, gid=0, cwd="/"),
-        command=None,
-    )
+IMAGE = "r.io/ns/main@sha256:" + "b" * 64
+TASK_KEY = "datasets/task"
+#: What `verification_of` computes for a task that ships a `tests/` directory.
+VERIFY_COMMAND = ("bash", "/tests/test.sh")
+ARTIFACTS = [{"source": "/evidence/main.txt", "destination": "main.txt"}]
 
 
-def role(name: str, *, services: tuple[str, ...] = ("main",)) -> Manifest:
-    return Manifest(task=name, agent_service="main", units={service: unit() for service in services})
-
-
-def build_release(
-    base: Path, *, mode: str = "separate", presentation: dict[str, Any] | None = None, importer: str = "harbor-v1"
-) -> Path:
-    """A real release: baked verification, agent artifact handoff, Harbor provenance."""
-    tests = base / "tests"
-    tests.mkdir(parents=True)
-    (tests / "test.sh").write_text("#!/bin/sh\nexit 0\n")
-    roles: dict[str, Manifest] = {"main": role("datasets/task")}
+def build_dataset(base: Path, *, mode: str = "separate", steps: bool = False) -> Path:
+    """A published dataset holding one task: hidden tests, an instruction, a Harbor presentation."""
+    task = base / "dataset" / TASK_KEY
+    (task / "environment").mkdir(parents=True)
+    (task / "tests").mkdir()
+    (task / "tests/test.sh").write_text("#!/bin/sh\nexit 0\n")
+    (task / "instruction.md").write_text("A neutral native instruction.\n")
+    config: dict[str, Any] = {
+        "environment": {"docker_image": IMAGE},
+        "artifacts": ARTIFACTS,
+        "verifier": {"env": {"TASK_TOKEN": "native"}, "timeout_sec": 600},
+    }
     if mode == "separate":
-        roles["verifier"] = role("datasets/task#verifier")
-    with ReleaseWriter(base / "release", "fixture") as writer:
-        task = Task(
-            key="datasets/task",
-            roles=roles,
-            verification=Verification(
-                role="verifier" if mode == "separate" else "main",
-                command=VERIFY_COMMAND,
-                tests="tasks/datasets/task/tests",
-                env={"TASK_TOKEN": "native"},
-                optional_output_paths={"reward.txt": "/logs/verifier/reward.txt"},
-                require_output=True,
-                timeout_s=600.0,
-            ),
-            artifacts=(Artifact(name="agent", role="main", target="/logs/agent", verifier_target="/handoff/agent"),),
-            provenance={
-                "importer": importer,
-                "harbor": {"config": PRESENTATION if presentation is None else presentation},
-            },
-        )
-        writer.add_task(task, "A neutral native instruction.\n", {"tests": tests})
-        writer.publish([{"task": "datasets/task", "annotations": {}}])
-    return base / "release"
+        config["verifier"]["environment_mode"] = "separate"
+        (task / "tests/docker-compose.yaml").write_text(f"services:\n  main:\n    image: {IMAGE}\n")
+    if steps:
+        config["steps"] = [{"name": "step-one"}]
+    (task / "task.toml").write_text(toml.dumps(config))
+    return base / "dataset"
 
 
 def write_deployment(path: Path, root: Path, *, name: str = "fixture") -> Path:
@@ -108,7 +73,7 @@ def write_deployment(path: Path, root: Path, *, name: str = "fixture") -> Path:
                 },
                 "storage": {"host_path": "/mnt/shared"},
                 "share": {"release": "test", "release_sha256": "a" * 64},
-                "task_releases": {name: {"local_root": str(root), "platform_root": f"/mnt/shared/releases/{name}"}},
+                "datasets": {name: {"local_root": str(root), "platform_root": f"/mnt/shared/datasets/{name}"}},
             }
         )
     )
@@ -117,10 +82,10 @@ def write_deployment(path: Path, root: Path, *, name: str = "fixture") -> Path:
 
 @pytest.fixture
 def selection(tmp_path: Path) -> Selection:
-    root = build_release(tmp_path)
+    root = build_dataset(tmp_path)
     deployment_file = write_deployment(tmp_path / "deployment.toml", root)
-    source = FlotillaTaskSource(dataset=root / "dataset.jsonl", deployment=deployment_file, metadata_workers=2)
-    return source, root, deployment_file, read_dataset(root / "dataset.jsonl")[0].model_dump()
+    source = FlotillaTaskSource(dataset="fixture", deployment=deployment_file, metadata_workers=2)
+    return source, root, deployment_file, TASK_KEY
 
 
 # --------------------------------------------------------------------------- #
@@ -129,59 +94,69 @@ def selection(tmp_path: Path) -> Selection:
 
 
 def job_config(source: FlotillaTaskSource) -> JobConfig:
+    kwargs: dict[str, Any] = {
+        "dataset": source.dataset,
+        "deployment": str(source.deployment),
+        "metadata_workers": source.metadata_workers,
+    }
+    if source.selection is not None:
+        kwargs["selection"] = str(source.selection)
     return JobConfig.model_validate(
         {
             "task_source": {
                 "import_path": "flotilla.integrations.harbor_native:FlotillaTaskSource",
-                "kwargs": {
-                    "dataset": str(source.dataset),
-                    "deployment": str(source.deployment),
-                    "metadata_workers": source.metadata_workers,
-                },
+                "kwargs": kwargs,
             }
         }
     )
 
 
-async def test_resolve_preserves_row_order_and_duplicates(tmp_path: Path, selection: Selection) -> None:
-    source, root, _deployment_file, row = selection
-    duplicates = tmp_path / "duplicates.jsonl"
-    duplicates.write_text(
-        "".join(json.dumps(payload) + "\n" for payload in (row, dict(row, annotations={"repeat": 1}), row))
-    )
-    source.dataset = duplicates
+async def test_a_selection_file_preserves_its_order_and_duplicates(tmp_path: Path, selection: Selection) -> None:
+    source, root, _deployment_file, key = selection
+    chosen = tmp_path / "selection.txt"
+    chosen.write_text(f"# chosen tasks\n{key}\n{key}\n\n{key}\n")
+    source.selection = chosen
     resolved = await source.resolve_task_configs(job_config(source))
-    assert [task.path for task in resolved] == [
-        root / "tasks" / row["task"]
-    ] * 3  # duplicates are separate trials, not deduplicated
-    assert [task.source for task in resolved] == [row["release"]] * 3
-    # Every row was validated against the release, not just the first.
-    assert set(source.bounds) == {(root / "tasks" / row["task"]).absolute()}
+    # Duplicates are separate trials, not deduplicated; comments and blank lines are skipped.
+    assert [task.path for task in resolved] == [root / key] * 3
+    assert [task.source for task in resolved] == ["fixture"] * 3
+    # Every selected key was resolved against the dataset, not just the first.
+    assert set(source.sources) == {(root / key).absolute()}
+
+
+async def test_without_a_selection_file_the_whole_dataset_is_selected(selection: Selection) -> None:
+    source, root, _deployment_file, key = selection
+    resolved = await source.resolve_task_configs(job_config(source))
+    assert [task.path for task in resolved] == [root / key]
 
 
 async def test_resolve_rejects_harbor_task_selection(selection: Selection) -> None:
     source, _, _, _ = selection
     config = job_config(source).model_copy(update={"tasks": [TrialTaskConfig(path=Path("/somewhere/else"))]})
-    with pytest.raises(ValueError, match="replace Harbor task/dataset discovery"):
+    with pytest.raises(ValueError, match="replaces Harbor task/dataset discovery"):
         await source.resolve_task_configs(config)
 
 
-async def test_resolve_rejects_empty_and_unbound_selections(tmp_path: Path, selection: Selection) -> None:
-    source, _root, _deployment_file, row = selection
-    empty = tmp_path / "empty.jsonl"
-    empty.write_text("\n")
-    source.dataset = empty
+async def test_resolve_rejects_empty_selections_and_undeclared_datasets(tmp_path: Path, selection: Selection) -> None:
+    source, _root, deployment_file, key = selection
+    empty = tmp_path / "empty.txt"
+    empty.write_text("\n# nothing\n")
+    source.selection = empty
     with pytest.raises(ValueError, match="selects no tasks"):
         await source.resolve_task_configs(job_config(source))
-    foreign = tmp_path / "foreign.jsonl"
-    foreign.write_text(json.dumps(dict(row, release="other")) + "\n")
-    source.dataset = foreign
-    with pytest.raises(ValueError, match="without a \\[task_releases\\] binding"):
-        await source.resolve_task_configs(job_config(source))
+    absent = tmp_path / "absent.txt"
+    absent.write_text("datasets/missing\n")
+    other = FlotillaTaskSource(dataset="fixture", deployment=deployment_file, selection=absent)
+    with pytest.raises(ValueError, match="not a task directory"):
+        await other.resolve_task_configs(job_config(other))
+    foreign = FlotillaTaskSource(dataset="absent-name", deployment=deployment_file)
+    with pytest.raises(ValueError, match="declares no dataset"):
+        await foreign.resolve_task_configs(job_config(foreign))
+    del key
 
 
-async def test_load_rebuilds_the_harbor_task_from_provenance(selection: Selection) -> None:
-    source, _root, _, row = selection
+async def test_load_builds_the_harbor_task_from_the_tasks_own_config(selection: Selection) -> None:
+    source, _root, _, key = selection
     resolved = await source.resolve_task_configs(job_config(source))
     config = TrialConfig.model_validate(
         {
@@ -189,7 +164,7 @@ async def test_load_rebuilds_the_harbor_task_from_provenance(selection: Selectio
             "extra_instructions": ["Run-specific instruction."],
             "task_source": {
                 "import_path": "flotilla.integrations.harbor_native:FlotillaTaskSource",
-                "kwargs": {"dataset": str(source.dataset), "deployment": str(source.deployment)},
+                "kwargs": {"dataset": source.dataset, "deployment": str(source.deployment)},
             },
         }
     )
@@ -198,59 +173,38 @@ async def test_load_rebuilds_the_harbor_task_from_provenance(selection: Selectio
     assert task.task_dir == resolved[0].path
     assert "A neutral native instruction." in task.instruction
     assert "Run-specific instruction." in task.instruction
-    assert task.config.environment.docker_image == "r.io/main:1"
+    assert task.config.environment.docker_image == IMAGE
     assert download.cached and download.download_time_sec == 0
-    bound = source.bound_for(task)
-    assert bound.row.task == row["task"]
-    assert bound.task.provenance["harbor"]["config"]["environment"]["docker_image"] == "r.io/main:1"
+    assert source.source_for(task).key == f"datasets/fixture/{key}"
 
 
-async def test_load_rejects_unprovenanced_unsupported_and_foreign_tasks(tmp_path: Path, selection: Selection) -> None:
-    source, _, _deployment_file, _row = selection
+async def test_load_rejects_unsupported_and_foreign_tasks(tmp_path: Path, selection: Selection) -> None:
+    source, _, _deployment_file, _key = selection
     resolved = await source.resolve_task_configs(job_config(source))
     good = TrialConfig.model_validate(
         {
             "task": {"path": str(resolved[0].path)},
             "task_source": {
                 "import_path": "flotilla.integrations.harbor_native:FlotillaTaskSource",
-                "kwargs": {"dataset": str(source.dataset), "deployment": str(source.deployment)},
+                "kwargs": {"dataset": source.dataset, "deployment": str(source.deployment)},
             },
         }
     )
     with pytest.raises(ValueError, match="remote downloads"):
         await source.load_task(good.model_copy(update={"task": TrialTaskConfig(name="org/task")}))
-    with pytest.raises(ValueError, match="not a task payload"):
+    with pytest.raises(ValueError, match="not a task directory"):
         await source.load_task(good.model_copy(update={"task": TrialTaskConfig(path=tmp_path / "elsewhere")}))
 
-    unprovenanced = build_release(tmp_path / "bare", importer="unknown-v9")
-    write_deployment(tmp_path / "bare.toml", unprovenanced)
-    bare = FlotillaTaskSource(dataset=unprovenanced / "dataset.jsonl", deployment=tmp_path / "bare.toml")
-    bare_resolved = await bare.resolve_task_configs(job_config(bare))
-    assert bare_resolved  # presentation validation happens at load time
-    bare_config = TrialConfig.model_validate(
-        {
-            "task": {"path": str(bare_resolved[0].path)},
-            "task_source": {
-                "import_path": "flotilla.integrations.harbor_native:FlotillaTaskSource",
-                "kwargs": {"dataset": str(bare.dataset), "deployment": str(bare.deployment)},
-            },
-        }
-    )
-    with pytest.raises(ValueError, match="presentation provenance"):
-        await bare.load_task(bare_config)
-
-    multi = build_release(
-        tmp_path / "multi", presentation={"environment": {"docker_image": "r.io/x:1"}, "steps": [{"name": "step-one"}]}
-    )
+    multi = build_dataset(tmp_path / "multi", steps=True)
     write_deployment(tmp_path / "multi.toml", multi)
-    many = FlotillaTaskSource(dataset=multi / "dataset.jsonl", deployment=tmp_path / "multi.toml")
+    many = FlotillaTaskSource(dataset="fixture", deployment=tmp_path / "multi.toml")
     many_resolved = await many.resolve_task_configs(job_config(many))
     many_config = TrialConfig.model_validate(
         {
             "task": {"path": str(many_resolved[0].path)},
             "task_source": {
                 "import_path": "flotilla.integrations.harbor_native:FlotillaTaskSource",
-                "kwargs": {"dataset": str(many.dataset), "deployment": str(many.deployment)},
+                "kwargs": {"dataset": many.dataset, "deployment": str(many.deployment)},
             },
         }
     )
@@ -258,10 +212,10 @@ async def test_load_rejects_unprovenanced_unsupported_and_foreign_tasks(tmp_path
         await many.load_task(many_config)
 
 
-async def test_relative_inputs_resolve_against_the_config_and_freeze_absolute(
+async def test_a_relative_deployment_resolves_against_the_config_and_snapshots_absolute(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    root = build_release(tmp_path / "data")
+    root = build_dataset(tmp_path / "data")
     deployment_file = write_deployment(tmp_path / "data" / "deployment.toml", root)
     origin = tmp_path / "data"
     elsewhere = tmp_path / "elsewhere"
@@ -271,14 +225,13 @@ async def test_relative_inputs_resolve_against_the_config_and_freeze_absolute(
         {
             "task_source": {
                 "import_path": "flotilla.integrations.harbor_native:FlotillaTaskSource",
-                "kwargs": {"dataset": "release/dataset.jsonl", "deployment": "deployment.toml"},
-                "kwargs_base_dirs": {"dataset": origin, "deployment": origin},
+                "kwargs": {"dataset": "fixture", "deployment": "deployment.toml"},
+                "kwargs_base_dirs": {"deployment": origin},
             }
         }
     )
     source = config.task_source.resolve()
     resolved = await source.resolve_task_configs(config)
-    assert config.task_source.kwargs["dataset"] == str(origin / "release/dataset.jsonl")
     assert config.task_source.kwargs["deployment"] == str(deployment_file)
     # Snapshots taken after resolution load from any working directory.
     restored = JobConfig.model_validate_json(config.model_dump_json())
@@ -288,21 +241,21 @@ async def test_relative_inputs_resolve_against_the_config_and_freeze_absolute(
     assert "A neutral native instruction." in task.instruction
 
 
-async def test_relative_inputs_fail_without_a_local_config_file(
+async def test_a_relative_deployment_fails_without_a_local_config_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    root = build_release(tmp_path / "release")
+    root = build_dataset(tmp_path / "data")
     write_deployment(tmp_path / "deployment.toml", root)
     config = JobConfig.model_validate(
         {
             "task_source": {
                 "import_path": "flotilla.integrations.harbor_native:FlotillaTaskSource",
-                "kwargs": {"dataset": "release/dataset.jsonl", "deployment": "deployment.toml"},
-                "kwargs_base_dirs": {"dataset": None, "deployment": None},
+                "kwargs": {"dataset": "fixture", "deployment": "deployment.toml"},
+                "kwargs_base_dirs": {"deployment": None},
             }
         }
     )
-    with pytest.raises(ValueError, match="relative dataset requires a local config file"):
+    with pytest.raises(ValueError, match="relative deployment requires a local config file"):
         await config.task_source.resolve().resolve_task_configs(config)
 
 
@@ -321,17 +274,17 @@ async def make_runtime(
 ) -> NativeFlotillaRuntime:
     await selection[0].resolve_task_configs(job_config(selection[0]))
 
-    source, root, deployment_file, row = selection
+    source, root, deployment_file, key = selection
     config = SimpleNamespace(
         task_source=None,
         verifier=SimpleNamespace(import_path=None, env={}),
         environment=SimpleNamespace(delete=True),
         artifacts=list(artifacts),
     )
-    task_config = TaskConfig.model_validate(PRESENTATION)
+    task_config = TaskConfig.model_validate({"environment": {"docker_image": IMAGE}, "artifacts": ARTIFACTS})
     task = HarborTask.from_metadata(root, config=task_config, instruction="A neutral native instruction.\n")
     runtime = NativeFlotillaRuntime.__new__(NativeFlotillaRuntime)
-    runtime.bound = source.bounds[(root / "tasks" / row["task"]).absolute()]
+    runtime.source = source.sources[(root / key).absolute()]
     runtime.config = config
     runtime.task = task
     runtime.paths = paths_of(tmp_path)
@@ -486,14 +439,14 @@ async def test_native_initialization_preserves_declared_readonly_filesystem() ->
 async def test_constructor_rejects_incompatible_trials(
     tmp_path: Path, selection: Selection, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    source, _root, deployment_file, _row = selection
+    source, _root, deployment_file, _key = selection
     resolved = await source.resolve_task_configs(job_config(source))
     config = TrialConfig.model_validate(
         {
             "task": {"path": str(resolved[0].path)},
             "task_source": {
                 "import_path": "flotilla.integrations.harbor_native:FlotillaTaskSource",
-                "kwargs": {"dataset": str(source.dataset), "deployment": str(deployment_file)},
+                "kwargs": {"dataset": source.dataset, "deployment": str(deployment_file)},
             },
             "runtime": {
                 "import_path": "flotilla.integrations.harbor_native:NativeFlotillaRuntime",
@@ -521,11 +474,11 @@ async def test_constructor_rejects_incompatible_trials(
     config.task_source._instance = source
     custom_verifier = config.model_copy(deep=True)
     custom_verifier.verifier.import_path = "custom:Verifier"
-    with pytest.raises(ValueError, match=r"verifier\.import_path"):
+    with pytest.raises(ValueError, match="import_path cannot replace it"):
         build(config=custom_verifier)
     custom_env = config.model_copy(deep=True)
     custom_env.verifier.env = {"OVERRIDE": "1"}
-    with pytest.raises(ValueError, match="baked into the release"):
+    with pytest.raises(ValueError, match="cannot be overridden"):
         build(config=custom_env)
     retain = config.model_copy(deep=True)
     retain.environment.delete = False

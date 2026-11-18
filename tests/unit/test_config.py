@@ -364,8 +364,8 @@ def test_protocol_runtime_extension_binding() -> None:
         assert cfg.evidence_profile() != config().evidence_profile()
 
 
-def test_build_prepare_changes_do_not_invalidate_evidence() -> None:
-    cfg = config(prepare={"concurrency": 17}, build={"image_replacements": {"a": "b"}})
+def test_prepare_changes_do_not_invalidate_evidence() -> None:
+    cfg = config(prepare={"concurrency": 17})
     assert cfg.evidence_profile() == config().evidence_profile()
     assert cfg.platform_capabilities(report()).link
 
@@ -461,39 +461,32 @@ def test_serialized_config_keeps_evidence_binding(tmp_path: Path) -> None:
     assert restored.evidence_profile() == cfg.evidence_profile()
 
 
-def test_releases_default_to_the_work_root(tmp_path: Path) -> None:
-    cfg = config(task_releases={"tb": {"local_root": str(tmp_path), "platform_root": "releases/tb"}})
-    assert cfg.inputs == {} and cfg.task_releases["tb"].input is None
+def test_datasets_default_to_the_work_root(tmp_path: Path) -> None:
+    cfg = config(inputs={}, datasets={"tb": {"local_root": str(tmp_path), "platform_root": "datasets/tb"}})
+    assert cfg.inputs == {} and cfg.datasets["tb"].input is None
     assert cfg.storage_settings_for("work") == cfg.storage_settings()
     assert cfg.anchor_settings().inputs == ()
     assert "inputs" not in cfg.evidence_profile()
 
 
-def test_named_inputs_bind_releases_and_the_anchor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import flotilla.native
-
+def test_named_inputs_bind_datasets_and_the_anchor(tmp_path: Path) -> None:
     cfg = config(
         storage={"host_path": "@user", "root_subpath": "work"},
         inputs={
             "datasets": {"host_path": "@user:owner", "root_subpath": "datasets"},
             "runtimes": {"host_path": "@user:owner", "root_subpath": "runtimes"},
         },
-        task_releases={
+        datasets={
             "tb": {"local_root": str(tmp_path), "platform_root": "tb/r1", "input": "datasets"},
-            "local": {"local_root": str(tmp_path), "platform_root": "releases/r2"},
+            "local": {"local_root": str(tmp_path), "platform_root": "sets/r2"},
         },
     )
     assert cfg.storage_settings().root == "host:@user/work"
     assert cfg.storage_settings_for("datasets").root == "host:@user:owner/datasets"
     assert set(cfg.input_settings()) == {"datasets", "runtimes"}
-    seen: list[Any] = []
-
-    def capture(bindings: dict[str, Any], *, storage: Any, inputs: Any) -> None:
-        seen.append(({name: b.root for name, b in bindings.items()}, storage, inputs))
-
-    monkeypatch.setattr(flotilla.native, "ReleaseBindings", capture)
-    cfg.release_bindings()
-    assert seen == [({"tb": "datasets", "local": "work"}, cfg.storage_settings(), cfg.input_settings())]
+    # Each dataset resolves against the storage root it was declared on, the work root by default.
+    resolved = cfg.resolve_datasets()
+    assert {name: ds.root for name, ds in resolved.items()} == {"tb": "datasets", "local": "work"}
     assert cfg.anchor_settings().inputs == ("datasets", "runtimes")
     assert cfg.anchor_settings(workspace=True).inputs == ("datasets", "runtimes")
 
@@ -503,7 +496,7 @@ def test_named_inputs_bind_releases_and_the_anchor(tmp_path: Path, monkeypatch: 
     [
         ({"inputs": {"work": {"host_path": "@user"}}}, "work"),
         ({"inputs": {"Bad": {"host_path": "@user"}}}, "name"),
-        ({"task_releases": {"tb": {"local_root": "/r", "platform_root": "tb/r1", "input": "missing"}}}, "missing"),
+        ({"datasets": {"tb": {"local_root": "/r", "platform_root": "tb/r1", "input": "missing"}}}, "missing"),
         (
             {
                 "agent_runtime": {

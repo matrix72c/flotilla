@@ -18,9 +18,8 @@ import pytest
 
 pytest.importorskip("harbor")
 
-from flotilla.build.driver import build_task
 from flotilla.integrations import workspace as compiler
-from flotilla.testing.build import _ctx
+from flotilla.testing.planning import plan as plan_environment
 
 
 def task_copy(tmp_path: Path, *, toml: str = "", script: bool = True) -> tuple[Path, Path]:
@@ -386,8 +385,6 @@ async def test_resource_reader_matches_compiled_reservations(
     from flotilla.compose import parse as parse_module
     from flotilla.config import ResourceDefaults
     from flotilla.integrations.harbor_source import task_environments
-    from flotilla.manifest import Manifest
-    from flotilla.prepared import PreparedEnvironment
     from flotilla.testing.config import config
 
     toml = "cpus=3\nmemory_mb=768\n"
@@ -434,9 +431,7 @@ async def test_resource_reader_matches_compiled_reservations(
     roles = ["main"] if mode == "shared" else ["main", "verifier"]
     expected = {}
     for role, environment in zip(roles, environments, strict=True):
-        outcome = build_task(environment, tmp_path / "built" / role, _ctx())
-        assert outcome.manifest_path is not None, outcome.reason
-        expected[role] = fleet.reservation(PreparedEnvironment(Manifest.load_json(outcome.manifest_path.read_bytes())))
+        expected[role] = fleet.reservation(plan_environment(environment, resources=policy))
     before = source_snapshot(source)
     calls.clear()
     forbidden = Mock(side_effect=AssertionError("resource inspection must not build, export or run a tool"))

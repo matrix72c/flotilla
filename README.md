@@ -6,19 +6,21 @@
 
 [中文](README_zh.md)
 
-**Prepare portable multi-service tasks once; execute isolated attempts on a sandbox platform.**
+**Run a multi-service Compose task as isolated attempts on a sandbox platform.**
 
-Flotilla owns a native task protocol shared by evaluation and RL consumers. Its optional Harbor importer normalizes Compose on a preparation host, pins images and captures static assets. Users publish that immutable release to platform storage. Attempts then open one sandbox per service, connect them under an explicit network policy, and clean up their private state—without parsing Compose or reading source images again.
+Flotilla reads a published task directory, resolves it into one sandbox per service, connects them
+under an explicit network policy, and cleans up its private state afterwards. Resolving a task is a
+local computation: it reads the task's own files plus each image's config from the registry, and
+writes nothing it later reads back. There is no build step and no intermediate artifact to publish.
 
 ```mermaid
 flowchart LR
-    subgraph task["task/environment/docker-compose.yaml"]
+    subgraph task["dataset/<task>/environment/docker-compose.yaml"]
         m[main]
         c[cache]
     end
-    task --> F["Host prepare<br/>pin images · capture assets"]
-    F --> R["Native release<br/>user publishes static files"]
-    R --> P
+    task --> F["plan()<br/>parse Compose · read image configs"]
+    F --> P
     subgraph P["Sandbox platform"]
         direction LR
         sm["sandbox: main"] <--> sc["sandbox: cache"]
@@ -53,17 +55,23 @@ services:
       retries: 15
 ```
 
-Prepare on a CPU host, then publish the output with your existing storage tools:
+Publish that directory tree to shared storage with your existing tools, and declare where it is on
+both sides. Nothing is generated in between, so the directory the platform mounts is the one you
+published:
+
+```toml
+[datasets.example]
+local_root = "./tasks"
+platform_root = "/shared/datasets/example"
+```
+
+Check the deployment's capabilities once, before running anything on it:
 
 ```sh
 flotilla probe --deployment deployment.toml --env sandbox.env
-flotilla select --host-root ./tasks --deployment deployment.toml \
-  --out selected.jsonl --report selection-report.json
-flotilla prepare selected.jsonl --deployment deployment.toml \
-  --out ./release --name example --report prepare-report.json
 ```
 
-`prepare` reads published images; it never builds or pushes one. It does not upload the static release. Bind the local release and its published platform location in `[task_releases.example]` before executing. See [Native tasks](docs/Native_Tasks.md) for path binding, installation, credentials and migration.
+See [Native tasks](docs/Native_Tasks.md) for path binding, installation and credentials.
 
 ```python
 import asyncio
@@ -75,10 +83,9 @@ from flotilla.native import NativeAttempt
 
 async def main():
     config = FlotillaConfig.load("deployment.toml")
-    bindings = config.release_bindings()
-    row = bindings.read_dataset("release/dataset.jsonl")[0]
+    dataset = config.resolve_datasets()["example"]
     async with Flotilla(deployment=config) as fleet:
-        attempt = await NativeAttempt.create(fleet, bindings.resolve(row))
+        attempt = await NativeAttempt.create(fleet, dataset.source("demo/redis"))
         try:
             env = await attempt.open("main", OpenOptions(startup_timeout=600, lifetime=300))
             pong = await env.service("cache").exec(["redis-cli", "ping"], timeout=30)
@@ -91,13 +98,17 @@ async def main():
 asyncio.run(main())
 ```
 
-`NativeAttempt` consumes the bound task definition and assets, creates attempt-private writable state and opens its roles. Hidden tests are staged only for verification. No source-task or builder fallback is permitted. Dataset rows name their release and task and keep order and duplicates. Metadata and capacity inspection use the prepared definitions rather than recompiling source tasks.
+`NativeAttempt` resolves the task directory into one plan per role, creates attempt-private writable
+state and opens those roles. The task's own files are mounted read-only, straight from where they are
+published; only a writable volume is materialized per attempt. Hidden tests are staged only for
+verification.
 
-Harbor and Voyager share this lifecycle. Harbor remains optional, using a pinned patched build for its source/runtime interfaces.
+Harbor and Voyager share this lifecycle. Harbor remains optional, using a pinned patched build for its
+source/runtime interfaces.
 
 ## Features
 
-- **Compose semantics, checked up front.** `depends_on` with health conditions, healthchecks, multiple and internal networks, aliases, named volumes, bind mounts, `env_file`, `.env` interpolation, resource limits, and `user`. Every key is classified as equivalent, warned, or rejected, and a rejected key fails the task with its field path before anything is created. `flotilla inspect` shows the result locally. See [Compose support](docs/Compose_Support.md).
+- **Compose semantics, checked up front.** `depends_on` with health conditions, healthchecks, multiple and internal networks, aliases, named volumes, bind mounts, `env_file`, `.env` interpolation, resource limits, and `user`. Every key is classified as equivalent, warned, or rejected, and a rejected key fails the task with its field path before anything is created. The Compose subset is parsed by Flotilla itself, with no `docker compose` binary; `flotilla inspect` shows the result locally. See [Compose support](docs/Compose_Support.md).
 - **Explicit isolation.** Network policies are compiled from the Compose networks and the deployment's egress policy: none, an allowlist, or any. A task can turn off internet access entirely. Security properties the platform cannot demonstrate must be accepted by name in the deployment configuration.
 - **Confirmed cleanup.** Every sandbox and directory is labeled with its owner. A lost create response is reconciled, capacity is released only after deletion is confirmed, and `flotilla gc` collects what a crashed process left behind.
 - **No silent replays.** A command is never sent twice. `timed_out=True` means the remote process was confirmed stopped; if that cannot be confirmed, you get `ExecOutcomeUnknown` and the environment is retired.
@@ -106,7 +117,11 @@ Harbor and Voyager share this lifecycle. Harbor remains optional, using a pinned
 
 ## Get started
 
-Flotilla runs on **Linux x86_64 with Python 3.12**. Host import needs the optional `harbor` extra, pinned Docker Compose and preparation tools. Native execution and its Anchor do not need Harbor, Compose, Docker or a GPU stack. Build the Anchor from the installed package with `flotilla anchor build`, using a pinned Python base; publication requires explicit `--push`. Platform capabilities and cleanup must pass `flotilla probe` before consumption. See [Native tasks](docs/Native_Tasks.md) for the complete workflow and migration boundaries.
+Flotilla runs on **Linux x86_64 with Python 3.12**. Reading a task's `task.toml` the way Harbor does
+needs the optional `harbor` extra; nothing needs Docker, a Compose binary or a GPU stack. Build the
+Anchor from the installed package with `flotilla anchor build`, using a pinned Python base; publication
+requires explicit `--push`. Platform capabilities and cleanup must pass `flotilla probe` before
+consumption. See [Native tasks](docs/Native_Tasks.md) for the complete workflow.
 
 ```sh
 git clone https://github.com/matrix72c/flotilla.git
@@ -149,7 +164,7 @@ Then pick a path:
 
 ## Status
 
-Flotilla is alpha software. The supported targets are Linux x86_64, Python 3.12, the OpenSandbox `current` and `legacy` execd protocols, and a compatible patched Harbor build for the optional native source/runtime adapter (stock Harbor 0.24.0 lacks those interfaces). APIs and configuration may change between minor versions before 1.0; see the [changelog](CHANGELOG.md).
+Flotilla is alpha software. The supported targets are Linux x86_64, Python 3.12, the OpenSandbox `current` and `legacy` execd protocols, and a compatible patched Harbor build for the optional source/runtime adapter (stock Harbor 0.24.0 lacks those interfaces). APIs and configuration may change between minor versions before 1.0; see the [changelog](CHANGELOG.md).
 
 ## Contributing
 

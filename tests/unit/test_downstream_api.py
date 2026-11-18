@@ -1,41 +1,46 @@
 """Public admission reservations and confirmed background process control."""
 
 import asyncio
+import pathlib
+from dataclasses import replace
 
 import pytest
 
 from flotilla import Flotilla
 from flotilla.config import FlotillaConfig, Resource
-from flotilla.manifest import Resources
-from flotilla.platform.base import ExecOutcomeUnknown
-from flotilla.runtime.types import Task
+from flotilla.platform.base import ExecOutcomeUnknown, Resources
 from flotilla.testing.environments import FixtureRequest, open_fixture
+from flotilla.testing.planning import APP, FakeConfigs, _task, planned_environment
 from flotilla.testing.platform import FakePlatform, SharedTree
 from flotilla.testing.runtime import deployment as deployment
 from flotilla.testing.runtime import task
 
 
-def test_reservation_uses_prepared_resources_and_deployment_overrides(
+def test_reservation_uses_the_resources_its_plan_resolved_to(
     deployment: tuple[FlotillaConfig, FakePlatform, SharedTree],
+    tmp_path: pathlib.Path,
 ) -> None:
+    """The reservation reads the plan, and the deployment's own defaults are already in it.
+
+    A plan is resolved once, against the deployment that will run it, so what is reserved and
+    what is created cannot disagree.
+    """
     cfg, _, _ = deployment
     main = task()
-    manifest = main.manifest()
-    unit = manifest.units["main"]
-    verifier = Task(
-        manifest.model_copy(
-            update={"units": {"main": unit.model_copy(update={"resources": Resources(cpu="8", memory="16Gi")})}}
-        )
-    )
+    unit = main.units["main"]
+    verifier = replace(main, units={"main": replace(unit, resources=Resources(cpu="8", memory="16Gi"))})
     fleet = Flotilla(deployment=cfg)
     assert fleet.reservation(main).resources["main"]["cpu"] == "1"
     assert fleet.reservation(verifier).resources["main"] == {"cpu": "8", "memory": "16Gi"}
     assert fleet.reservation(verifier).instances == 2  # one active and one reserved generation
+    assert fleet.client_reservation().instances == 1
+
     overridden = cfg.model_copy(
         update={"resources": cfg.resources.model_copy(update={"services": {"main": Resource(cpu="3", memory="1Gi")}})}
     )
-    assert Flotilla(deployment=overridden).reservation(main).resources["main"]["cpu"] == "3"
-    assert fleet.client_reservation().instances == 1
+    path = _task(tmp_path, "task", compose=f"services:\n  main:\n    image: {APP}\n")
+    planned = planned_environment(path, overridden, configs=FakeConfigs())
+    assert Flotilla(deployment=overridden).reservation(planned).resources["main"]["cpu"] == "3"
 
 
 def test_client_reservation_uses_workspace_anchor_resources(

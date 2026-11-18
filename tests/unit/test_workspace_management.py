@@ -1,14 +1,13 @@
 """Builder connectivity belongs only to explicitly configured runtime management."""
 
-from dataclasses import replace
+from dataclasses import fields, replace
 
 import pytest
-from pydantic import ValidationError
 
 from flotilla.compose.normalize import normalize
 from flotilla.config import FlotillaConfig
 from flotilla.core.anchor import Anchor
-from flotilla.manifest import Unit
+from flotilla.core.plan import Unit
 from flotilla.platform.base import Capabilities, ExternalPolicy, Resources, SharedVolume
 from flotilla.platform.opensandbox import OpenSandboxPlatform
 from flotilla.testing.config import config, config_data
@@ -81,8 +80,8 @@ async def test_runtime_anchor_receives_explicit_builder_mount_and_network(
         spec = platform.spec_of(anchor.iid)
         assert spec.external.hosts == ("builder.example.test",)
         assert spec.volumes[0].key == ""  # trusted management storage root
-        assert spec.volumes[1].key == "operator/build-credentials"
-        assert spec.volumes[1].read_only
+        credentials = next(v for v in spec.volumes if v.key == "operator/build-credentials")
+        assert credentials.read_only
         assert spec.profile == "management" and not spec.privileged
         assert spec.resources == Resources(cpu="2", memory="4Gi")
         # Exercise config -> backend factory -> request assembly without contacting a platform.
@@ -113,14 +112,7 @@ def test_default_workspace_runtime_and_resources_are_unchanged() -> None:
 
 @pytest.mark.parametrize("field", ["profile", "management_profile", "management_extensions"])
 def test_task_data_cannot_select_management_profile(field: str) -> None:
-    raw = {
-        "image": "reg/app:tag",
-        "resources": {},
-        "context": {"env": {}, "uid": 0, "gid": 0, "cwd": "/"},
-        "command": None,
-        field: "management",
-    }
-    with pytest.raises(ValidationError, match=field):
-        Unit.model_validate(raw)
+    """The management profile is the deployment's, so a task cannot name it anywhere on the way in."""
+    assert field not in {f.name for f in fields(Unit)}
     project = normalize({"services": {"main": {"image": "reg/app:tag", field: "management"}}})
     assert any(f.kind == "reject" and f.path == f"services.main.{field}" for f in project.findings)

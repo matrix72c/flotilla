@@ -6,9 +6,9 @@ import pytest
 
 pytest.importorskip("harbor.agents.nop")
 
-from flotilla.compose.manifest_gen import synthesize_command
 from flotilla.compose.model import ImageMeta
 from flotilla.compose.normalize import normalize
+from flotilla.compose.plan_task import synthesize_command
 from tests.contract.native_consumers import fixture_files
 
 

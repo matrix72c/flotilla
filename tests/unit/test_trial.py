@@ -54,6 +54,7 @@ def _three() -> TrialPlan:
     return TrialPlan(
         task="web-app-db",
         task_files=None,
+        agent_service="main",
         units={"main": _unit(), "app": _unit(), "db": _unit(healthcheck=Healthcheck(test=("check",), interval_s=2))},
         networks={"default": Network(internal=False, members=frozenset(names), names=names)},
         depends_on={"app": {"db": Dependency("service_healthy")}},
@@ -578,6 +579,7 @@ async def test_bad_unit_label_rejected_before_any_create(
     plan = TrialPlan(
         task="t",
         task_files=None,
+        agent_service="main",
         units={"main": _unit(), unit: _unit()},
         networks={"default": Network(internal=False, members=frozenset(names), names=names)},
     )

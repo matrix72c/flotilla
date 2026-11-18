@@ -32,7 +32,7 @@ def inspect(
 ) -> tuple[EnvironmentInspection, ...]:
     """Inspect every environment of the task at `path` against the deployment's capabilities.
 
-    Loading uses the deployment's pinned Compose tool, so findings and resources
+    Loading uses the deployment's own Compose dialect, so findings and resources
     match what preparation would compute for the same task.
     """
     return tuple(inspect_task(cfg, task) for task in environments(Path(path).resolve()))

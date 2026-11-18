@@ -1,4 +1,4 @@
-"""Native filesystem semantics survive parsing, preparation, admission and wire adaptation."""
+"""Native filesystem semantics survive parsing, planning, admission and wire adaptation."""
 
 from __future__ import annotations
 
@@ -8,30 +8,27 @@ from typing import Any
 
 import pytest
 
-from flotilla.build.driver import build_task
 from flotilla.compose.layout import classify
 from flotilla.compose.normalize import normalize
 from flotilla.compose.task import load_task
 from flotilla.config import FlotillaConfig
-from flotilla.manifest import SCHEMA_VERSION, Manifest
-from flotilla.platform.base import Capabilities, Resources, TmpfsMount
-from flotilla.platform.filesystem import memory_bytes
+from flotilla.platform.base import Capabilities, TmpfsMount
+from flotilla.platform.filesystem import memory_bytes, unsized_tmpfs_bytes
 from flotilla.platform.opensandbox.filesystem import INTERNAL_LIMITS, parse_effective
-from flotilla.runtime.planning import _resolve_tmpfs, to_plan
 from flotilla.scan import scan
-from flotilla.testing.build import _ctx, _task
 from flotilla.testing.config import config_data
+from flotilla.testing.planning import APP, _caps, _task, plan
 from flotilla.testing.reports import ok, report
 
 
-def test_compose_filesystem_fields_roundtrip_to_runtime(tmp_path: Path) -> None:
+def test_compose_filesystem_fields_roundtrip_to_the_plan(tmp_path: Path) -> None:
     task = load_task(
         _task(
             tmp_path,
             "fs",
-            compose="""services:
+            compose=f"""services:
   main:
-    image: r.io/app
+    image: {APP}
     read_only: true
     user: "1000:1001"
     tmpfs: ["/tmp:size=16m,mode=0750,uid=1000,gid=1001"]
@@ -46,23 +43,16 @@ def test_compose_filesystem_fields_roundtrip_to_runtime(tmp_path: Path) -> None:
 """,
         )
     )
-    ctx = _ctx()
-    ctx = replace(
-        ctx, caps=replace(ctx.caps, readonly_rootfs=True, native_tmpfs=True, filesystem_limits=INTERNAL_LIMITS)
-    )
-    outcome = build_task(task, tmp_path / "out", ctx)
-    assert outcome.manifest_path, outcome.reason
-    manifest = Manifest.load_json(outcome.manifest_path.read_bytes())
-    unit = to_plan(manifest).units["main"]
+    supported = replace(_caps(), readonly_rootfs=True, native_tmpfs=True, filesystem_limits=INTERNAL_LIMITS)
+    assert scan(task.name, task.project, supported).status == "accepted"
+    unit = plan(task).units["main"]
     assert unit.readonly_rootfs
     assert unit.tmpfs_mounts == (
         TmpfsMount("/tmp", 16 * 1024**2, 0o750, 1000, 1001),
         TmpfsMount("/cache", 8 * 1024**2, 0o700),
     )
     # Mount points and the readonly runtime dir are runtime responsibilities: no derived image build.
-    assert not any(f.kind == "equivalent" and "tmpfs" in f.path for f in manifest.findings)
-    with pytest.raises(ValueError, match="schema"):
-        Manifest.load_json(manifest.dump_json().replace(f'"schema": {SCHEMA_VERSION}', '"schema": 5'))
+    assert not any(f.kind == "equivalent" and "tmpfs" in f.path for f in task.project.findings)
 
 
 @pytest.mark.parametrize(
@@ -83,12 +73,12 @@ def test_compose_filesystem_fields_roundtrip_to_runtime(tmp_path: Path) -> None:
     ],
 )
 def test_tmpfs_invalid_or_unrepresentable_options_are_rejected(fields: dict[str, Any]) -> None:
-    project = normalize({"services": {"main": {"image": "r.io/app", **fields}}})
+    project = normalize({"services": {"main": {"image": APP, **fields}}})
     assert project.rejected, project
 
 
 def test_filesystem_admission_and_internal_limits(caps: Capabilities) -> None:
-    project = normalize({"services": {"main": {"image": "r.io/app", "read_only": True, "tmpfs": ["/tmp"]}}})
+    project = normalize({"services": {"main": {"image": APP, "read_only": True, "tmpfs": ["/tmp"]}}})
     assert scan("fs", project, caps).status == "rejected"
     supported = replace(caps, readonly_rootfs=True, native_tmpfs=True, filesystem_limits=INTERNAL_LIMITS)
     assert scan("fs", project, supported).status == "accepted"
@@ -110,21 +100,29 @@ def test_filesystem_admission_and_internal_limits(caps: Capabilities) -> None:
         supported.require_filesystem(False, (TmpfsMount("/tmp"),), privileged=True)
 
 
-def test_unsized_tmpfs_resolves_to_half_service_memory_at_planning() -> None:
-    planned = _resolve_tmpfs((TmpfsMount("/tmp"), TmpfsMount("/cache", 8 * 1024**2)), Resources(cpu="1", memory="2Gi"))
-    assert planned == (TmpfsMount("/tmp", 1024**3), TmpfsMount("/cache", 8 * 1024**2))
-    small = _resolve_tmpfs((TmpfsMount("/tmp"),), Resources(cpu="1", memory="128Mi"))
-    assert small == (TmpfsMount("/tmp", 64 * 1024**2),)
+def test_unsized_tmpfs_resolves_to_half_service_memory_at_planning(tmp_path: Path) -> None:
+    compose = f"""services:
+  main:
+    image: {APP}
+    tmpfs: ["/tmp", "/cache:size=8m"]
+    mem_limit: 2g
+    cpus: 1
+"""
+    unit = plan(load_task(_task(tmp_path, "fs", compose=compose))).units["main"]
+    assert unit.tmpfs_mounts == (TmpfsMount("/tmp", 1024**3), TmpfsMount("/cache", 8 * 1024**2))
+    assert unsized_tmpfs_bytes("128Mi") == 64 * 1024**2  # floored, so small services keep working
 
 
 def test_scan_and_planning_agree_on_unsized_tmpfs_with_shm_size(caps: Capabilities) -> None:
     supported = replace(caps, native_tmpfs=True, shm_size=True, filesystem_limits=INTERNAL_LIMITS)
     for shm, status in (("1g", "accepted"), ("1100m", "rejected")):  # unsized /tmp takes 1 GiB of 2 GiB
-        raw = {"services": {"main": {"image": "r.io/app", "tmpfs": ["/tmp"], "shm_size": shm, "mem_limit": "2g"}}}
+        raw = {"services": {"main": {"image": APP, "tmpfs": ["/tmp"], "shm_size": shm, "mem_limit": "2g"}}}
         project = normalize(raw)
         assert scan("fs", project, supported).status == status, shm
         svc = project.services["main"]
-        planned = _resolve_tmpfs(svc.tmpfs, Resources(cpu="1", memory="2Gi"))
+        planned = tuple(
+            m if m.size_bytes is not None else replace(m, size_bytes=unsized_tmpfs_bytes("2Gi")) for m in svc.tmpfs
+        )
         if status == "accepted":
             supported.require_filesystem(False, planned, memory="2Gi", shm_size_bytes=svc.shm_size_bytes)
         else:
@@ -146,10 +144,11 @@ def test_readonly_rootfs_promotes_single_writer_mounts_to_real_storage() -> None
     assert all(not m.read_only for m in readonly.mounts["main"])
 
 
-def test_unsupported_tmpfs_is_rejected_before_building(tmp_path: Path) -> None:
-    task = load_task(_task(tmp_path, "fs", compose="services:\n  main:\n    image: r.io/app\n    tmpfs: /tmp\n"))
-    outcome = build_task(task, tmp_path / "out", _ctx())
-    assert outcome.status == "rejected" and "native_tmpfs" in (outcome.reason or "")
+def test_unsupported_tmpfs_is_rejected_at_admission(tmp_path: Path) -> None:
+    task = load_task(_task(tmp_path, "fs", compose=f"services:\n  main:\n    image: {APP}\n    tmpfs: /tmp\n"))
+    result = scan(task.name, task.project, _caps())
+    assert result.status == "rejected"
+    assert any("native_tmpfs" in f.reason for f in result.findings if f.kind == "reject")
 
 
 def test_report_requires_probed_evidence_and_the_internal_dialect() -> None:

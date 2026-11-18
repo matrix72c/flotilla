@@ -10,6 +10,7 @@ from flotilla.capabilities import CapabilityReport
 from flotilla.cli import _build_parser, main
 from flotilla.config import ConfigError, FlotillaConfig
 from flotilla.environment import load_env_file
+from flotilla.native.dataset import DatasetError
 from flotilla.testing.config import config
 from flotilla.testing.reports import no, report
 
@@ -22,17 +23,18 @@ def test_probe_cleanup_is_required() -> None:
         cfg.check_against(evidence)
 
 
-def test_deployment_loading_does_not_open_releases(tmp_path: Path) -> None:
+def test_deployment_loading_does_not_open_datasets(tmp_path: Path) -> None:
+    """Loading a deployment touches no dataset: a config that names a missing directory still loads."""
     data = config().model_dump(exclude={"base_dir"})
-    data["task_releases"] = {"future": {"local_root": "not-created", "platform_root": "releases/future"}}
+    data["datasets"] = {"future": {"local_root": "not-created", "platform_root": "datasets/future"}}
     data["agent_runtime"] = {"layers": {"lagent": {"local_root": "not-created", "platform_root": "runtimes/l1"}}}
     cfg = FlotillaConfig.from_mapping(data, base_dir=tmp_path)
-    assert cfg.task_releases["future"].local_root == Path("not-created")
+    assert cfg.datasets["future"].local_root == Path("not-created")
     assert cfg.agent_runtime is not None and cfg.agent_runtime.layers["lagent"].local_root == Path("not-created")
-    assert cfg.to_mapping()["task_releases"]["future"]["local_root"] == str(tmp_path / "not-created")
-    bindings = cfg.release_bindings()
-    with pytest.raises(OSError):
-        bindings.resolve({"release": "future", "task": "t"})
+    assert cfg.to_mapping()["datasets"]["future"]["local_root"] == str(tmp_path / "not-created")
+    # Resolving it is what fails, and only then.
+    with pytest.raises(DatasetError, match="not a directory"):
+        cfg.resolve_datasets()
 
 
 def test_env_is_literal_and_errors_never_echo_values(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

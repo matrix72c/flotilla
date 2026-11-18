@@ -18,12 +18,13 @@ from flotilla.platform.base import (
     FlotillaError,
     InstanceHandle,
     ProcessSpec,
+    Resources,
     SharedVolume,
     TmpfsMount,
 )
 from flotilla.platform.opensandbox.filesystem import INTERNAL_LIMITS
 from flotilla.runtime.manager import Manager
-from flotilla.runtime.types import RunRequest, Task
+from flotilla.runtime.types import RunRequest
 from flotilla.testing.environments import FixtureRequest, environment
 from flotilla.testing.platform import FakePlatform, SharedTree
 from flotilla.testing.runtime import deployment as deployment
@@ -60,7 +61,8 @@ def test_external_mount_requires_storage_capability(
     cfg, platform, _ = deployment
     platform.caps = replace(platform.caps, shared_volume=False)
     manager = Manager(cfg, platform=platform)
-    request = RunRequest(task(), "mount", external_mounts={"main": (SharedVolume("external/data", "/data", True),)})
+    plan = replace(task(), external_mounts={"main": (SharedVolume("external/data", "/data", True),)})
+    request = RunRequest(plan, "mount")
     with pytest.raises(FlotillaError, match="external shared volumes"):
         manager.plan(request)
     assert platform.calls["create"] == 0
@@ -72,18 +74,20 @@ def test_tmpfs_budget_uses_final_resource_defaults_and_overrides(
     cfg, platform, _ = deployment
     platform.caps = replace(platform.caps, native_tmpfs=True, filesystem_limits=INTERNAL_LIMITS)
     manager = Manager(cfg, platform=platform)
-    manifest = task().manifest()
-    unit = manifest.units["main"]
-    unit = unit.model_copy(
-        update={
-            "tmpfs_mounts": [TmpfsMount("/tmp")],
-            "resources": unit.resources.model_copy(update={"memory": None}),
-        }
+    base = task()
+    unit = base.units["main"]
+    # Planning resolved the memory; an unsized tmpfs took half of it, and admission checks that size.
+    sized = replace(
+        base,
+        units={"main": replace(unit, tmpfs_mounts=(TmpfsMount("/tmp", 1024**3),), resources=Resources("1", "2Gi"))},
     )
-    request = RunRequest(Task(manifest.model_copy(update={"units": {"main": unit}})), "budget")
-    assert manager.plan(request).units["main"].resources.memory == cfg.resources.default.memory
+    assert manager.plan(RunRequest(sized, "budget")).units["main"].resources.memory == "2Gi"
+    too_small = replace(
+        base,
+        units={"main": replace(unit, tmpfs_mounts=(TmpfsMount("/tmp", 1024**3),), resources=Resources("1", "32Mi"))},
+    )
     with pytest.raises(FlotillaError, match="capacities exceed") as failure:
-        manager.plan(replace(request, resources={"main": {"memory": "32Mi"}}))
+        manager.plan(RunRequest(too_small, "budget"))
     assert not failure.value.retryable and platform.calls["create"] == 0
 
 
@@ -110,15 +114,19 @@ async def test_readonly_directory_transfers_use_scratch_and_preserve_environment
     )
     cfg.capabilities_path().write_text(report.dump_json())
     platform.caps = cfg.platform_capabilities(report)
-    manifest = task().manifest()
-    unit = manifest.units["main"].model_copy(
-        update={
-            "readonly_rootfs": True,
-            "tmpfs_mounts": [TmpfsMount("/tmp", 1024**2)],
-            "context": manifest.units["main"].context.model_copy(update={"uid": 1000, "gid": 1001}),
-        }
+    base = task()
+    unit = base.units["main"]
+    prepared = replace(
+        base,
+        units={
+            "main": replace(
+                unit,
+                readonly_rootfs=True,
+                tmpfs_mounts=(TmpfsMount("/tmp", 1024**2),),
+                context=replace(unit.context, uid=1000, gid=1001),
+            )
+        },
     )
-    prepared = Task(manifest.model_copy(update={"units": {"main": unit}}))
     source = tmp_path / "source"
     source.mkdir()
     (source / "result.txt").write_text("contents")

@@ -1,19 +1,23 @@
-"""Versioned, portable task protocol. No importer or runtime dependencies."""
+"""What a graded attempt needs beyond its Compose project: verification and artifacts.
+
+These used to be a persisted protocol — a `Task` written into a release, read back by a trainer,
+with a schema version and migrations. They are computed from the task's own `task.toml` now
+(`flotilla.compose.verification`), so what is left is the shape of the two values and the path
+rules they must obey.
+
+The path validators stay because the values still name directories a trial mounts. A key that
+escapes its root, or an output path that is not canonical, is a task input error — and it has to
+be caught before anything is created, not after a sandbox is already running with the wrong mount.
+"""
 
 from __future__ import annotations
 
-import json
 import posixpath
-import re
-from typing import Any, Final, Literal
+from collections.abc import Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from flotilla.manifest import SCHEMA_VERSION, Manifest
-from flotilla.prepared import PreparedEnvironment
-
-PROTOCOL_VERSION: Final = 2
-_IMAGE = re.compile(r"[^\s@]+@sha256:[0-9a-f]{64}")
+from flotilla.core.plan import TrialPlan
 
 
 def relative_path(value: str) -> str:
@@ -31,10 +35,8 @@ def absolute_path(value: str) -> str:
     return value
 
 
-def canonical(value: Any) -> bytes:
-    if isinstance(value, BaseModel):
-        value = value.model_dump(mode="json", by_alias=True)
-    return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode()
+def overlaps(a: str, b: str) -> bool:
+    return a == b or a.startswith(b + "/") or b.startswith(a + "/")
 
 
 class Model(BaseModel):
@@ -42,7 +44,7 @@ class Model(BaseModel):
 
 
 class Artifact(Model):
-    """A private output directory, explicitly handed to the verification role."""
+    """A private output directory the agent writes, handed to the verification role afterwards."""
 
     name: str
     role: str = "main"
@@ -67,9 +69,12 @@ class Artifact(Model):
 
 
 class Verification(Model):
+    """How an attempt is graded: what runs, where, and which outputs are collected."""
+
     role: str = "main"
     service: str | None = None
     command: tuple[str, ...] = Field(min_length=1)
+    #: Where the verification script lives, relative to the task directory.
     tests: str | None = None
     tests_target: str = "/tests"
     output_paths: dict[str, str] = {}
@@ -104,82 +109,43 @@ class Verification(Model):
         return value
 
 
-class Task(Model):
-    schema_version: Literal[2] = PROTOCOL_VERSION
-    key: str = Field(min_length=1)
-    instruction: Literal["instruction.md"] = "instruction.md"
-    roles: dict[str, Manifest]
-    verification: Verification | None = None
-    artifacts: tuple[Artifact, ...] = ()
-    provenance: dict[str, Any] = {}
-    parameters: dict[str, Any] = {}
+def check_against_plans(
+    verification: Verification | None,
+    artifacts: tuple[Artifact, ...],
+    *,
+    plans: Mapping[str, TrialPlan],
+) -> None:
+    """Refuse a verification or artifact the task's own plans cannot support.
 
-    @model_validator(mode="after")
-    def consistent(self) -> Task:
-        if "main" not in self.roles or set(self.roles) - {"main", "verifier"}:
-            raise ValueError("roles require main and optional verifier")
-        relative_path(self.key)
-        refs: list[str] = []
-        for manifest in self.roles.values():
-            if manifest.schema_ != SCHEMA_VERSION:
-                raise ValueError("unsupported nested manifest version")
-            PreparedEnvironment(manifest)
-            if manifest.task_files is not None:
-                raise ValueError("native manifests cannot contain publication paths")
-            for unit in manifest.units.values():
-                if not _IMAGE.fullmatch(unit.image):
-                    raise ValueError("native images must be digest pinned")
-                if unit.context.uid < 0 or unit.context.gid < 0:
-                    raise ValueError("application uid/gid must be nonnegative")
-                for mount in unit.mounts:
-                    absolute_path(mount.target)
-                    relative_path(mount.key)
-                    if mount.scope == "task":
-                        if not mount.read_only:
-                            raise ValueError("static mounts must be read-only")
-                        refs.append(mount.key)
-            for volume in manifest.trial_volumes:
-                if volume.copy_from is not None:
-                    refs.append(volume.copy_from)
-        if self.verification:
-            v = self.verification
-            if v.role not in self.roles or (v.service and v.service not in self.roles[v.role].units):
-                raise ValueError("unknown verification role/service")
-            if v.tests:
-                refs.append(v.tests)
-                # Tests are staged only after agent execution, never mounted as ordinary input.
-                for manifest in self.roles.values():
-                    for unit in manifest.units.values():
-                        for mount in unit.mounts:
-                            if mount.scope == "task" and overlaps(mount.key, v.tests):
-                                raise ValueError("hidden tests cannot be mounted in task inputs")
-                    for volume in manifest.trial_volumes:
-                        if volume.copy_from and overlaps(volume.copy_from, v.tests):
-                            raise ValueError("hidden tests cannot initialize task inputs")
-        for ref in refs:
-            relative_path(ref)
-        names: set[str] = set()
-        for artifact in self.artifacts:
-            if artifact.name in names:
-                raise ValueError("duplicate artifact name")
-            names.add(artifact.name)
-            if artifact.role not in self.roles or (
-                artifact.service and artifact.service not in self.roles[artifact.role].units
-            ):
-                raise ValueError("unknown artifact role/service")
-        return self
-
-
-def overlaps(a: str, b: str) -> bool:
-    return a == b or a.startswith(b + "/") or b.startswith(a + "/")
-
-
-class DatasetRow(Model):
-    """One selected task: `release` names its deployment binding, `task` its directory under `tasks/`."""
-
-    release: str = Field(min_length=1)
-    task: str
-    annotations: dict[str, Any] = {}
-    parameters: dict[str, Any] = {}
-
-    _path = field_validator("task")(relative_path)
+    `Task` checked this as a model validator, because the whole thing was one persisted document.
+    The values are computed separately now, so the cross-check is explicit and runs where both
+    halves are in hand -- and it must still run, because one of these rules is what keeps the
+    hidden tests hidden.
+    """
+    names: set[str] = set()
+    for artifact in artifacts:
+        if artifact.name in names:
+            raise ValueError(f"duplicate artifact name: {artifact.name}")
+        names.add(artifact.name)
+        if artifact.role not in plans:
+            raise ValueError(f"artifact {artifact.name} names unknown role {artifact.role!r}")
+        if artifact.service and artifact.service not in plans[artifact.role].units:
+            raise ValueError(f"artifact {artifact.name} names unknown service {artifact.service!r}")
+    if verification is None:
+        return
+    if verification.role not in plans:
+        raise ValueError(f"verification names unknown role {verification.role!r}")
+    if verification.service and verification.service not in plans[verification.role].units:
+        raise ValueError(f"verification names unknown service {verification.service!r}")
+    if verification.tests is None:
+        return
+    # The tests are staged only after the agent is done. If anything the agent can reach mounts
+    # them, or a volume is initialized from them, the answers are inside the task it is solving.
+    for plan in plans.values():
+        for name, unit in plan.units.items():
+            for mount in unit.mounts:
+                if mount.scope == "task" and overlaps(mount.key, verification.tests):
+                    raise ValueError(f"{name} mounts the hidden tests as a task input: {mount.key}")
+        for volume in plan.volumes:
+            if volume.copy_from and overlaps(volume.copy_from, verification.tests):
+                raise ValueError(f"volume {volume.key} is initialized from the hidden tests")

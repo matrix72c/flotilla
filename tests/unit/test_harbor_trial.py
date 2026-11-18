@@ -18,12 +18,12 @@ from harbor.trial.trial import Trial
 
 from flotilla.config import FlotillaConfig
 from flotilla.core import labels
+from flotilla.core.plan import TrialPlan
 from flotilla.integrations.harbor import FlotillaEnvironment
 from flotilla.integrations.harbor_source import task_environments
 from flotilla.platform.base import ErrorCategory, FlotillaError, InstanceSpec
-from flotilla.prepared import PreparedEnvironment
-from flotilla.testing.build import prepared_task
 from flotilla.testing.harbor_local import attach_local_files
+from flotilla.testing.planning import planned_task
 from flotilla.testing.platform import FakePlatform, SharedTree
 from flotilla.testing.runtime import deployment as deployment
 
@@ -74,12 +74,12 @@ async def test_native_harbor_trial(
     definitions = task_environments(source)
     assert len(definitions) == (1 if mode == "shared" else 2)
     assert all(definition.environment_config is not None for definition in definitions)
-    compiled = prepared_task(source, cfg, environments=task_environments)
+    compiled = planned_task(source, cfg, environments=task_environments)
 
-    def transient_role(environment: FlotillaEnvironment) -> PreparedEnvironment:
+    def transient_role(environment: FlotillaEnvironment) -> TrialPlan:
         return compiled["main" if Path(environment.environment_dir).name == "environment" else "verifier"]
 
-    monkeypatch.setattr(FlotillaEnvironment, "_prepared_environment", transient_role)
+    monkeypatch.setattr(FlotillaEnvironment, "_plan", transient_role)
 
     # Seed the separate verifier's prebuilt /tests, which Harbor intentionally
     # does not upload. Main/shared receives tests through real tar transfers.

@@ -14,9 +14,10 @@ from typing import Any
 
 import pytest
 
-from flotilla.compose.plan_task import NO_OVERLAY, AgentOverlay, PlanError, TaskSource, plan_task
+from flotilla.compose.plan_task import NO_OVERLAY, AgentOverlay, PlanError, plan_task
 from flotilla.compose.task import load_task
 from flotilla.config import ResourceDefaults
+from flotilla.core.plan import TaskSource
 from flotilla.platform.base import Resources
 
 APP = "r.io/ns/app@sha256:" + "a" * 64
@@ -69,16 +70,32 @@ def test_task_files_point_at_the_dataset_directory(tmp_path: Path) -> None:
     assert result.task_files_root == "work"
 
 
-def test_a_bind_volume_is_copied_from_where_it_lies(tmp_path: Path) -> None:
-    """`copy_from` names the bind source under the task directory, not a staged `files/binds/<n>`."""
+def test_a_read_only_bind_is_mounted_where_it_lies(tmp_path: Path) -> None:
+    """Nothing is copied: the mount names the bind source inside the published task directory."""
     path = task_dir(
         tmp_path,
         compose="services:\n  main:\n    volumes:\n      - ./conf:/etc/app:ro\n",
         files={"environment/conf/app.conf": "x\n"},
     )
+    result = plan(path, key="datasets/vulhub/task")
+    assert result.volumes == ()
+    assert [(m.scope, m.key, m.target, m.read_only) for m in result.units["main"].mounts] == [
+        ("task", "environment/conf", "/etc/app", True)
+    ]
+
+
+def test_a_writable_bind_becomes_the_trials_own_copy(tmp_path: Path) -> None:
+    """A writer makes the group the trial's, so it is copied out of the task directory first."""
+    path = task_dir(
+        tmp_path,
+        compose="services:\n  main:\n    volumes:\n      - ./conf:/etc/app\n",
+        files={"environment/conf/app.conf": "x\n"},
+    )
     result = plan(path)
     assert [(v.key, v.copy_from) for v in result.volumes] == [("binds/0", "environment/conf")]
-    assert [(m.key, m.target, m.read_only) for m in result.units["main"].mounts] == [("binds/0", "/etc/app", True)]
+    assert [(m.scope, m.key, m.target, m.read_only) for m in result.units["main"].mounts] == [
+        ("trial", "binds/0", "/etc/app", False)
+    ]
 
 
 def test_a_named_volume_starts_empty(tmp_path: Path) -> None:
@@ -178,7 +195,7 @@ def test_a_task_with_no_files_needs_no_key(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("key", ["/absolute", "../escape", "a/../b", ""])
 def test_a_task_key_that_is_not_a_canonical_relative_path_is_refused(key: str) -> None:
-    with pytest.raises(PlanError, match="canonical relative path"):
+    with pytest.raises(ValueError, match="canonical relative path"):
         TaskSource(local=Path("/tmp"), key=key)
 
 

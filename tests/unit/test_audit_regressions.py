@@ -7,32 +7,23 @@ from pathlib import Path
 
 import pytest
 
-from flotilla.build.driver import build_task
-from flotilla.build.files import ExportError, export_task_files
-from flotilla.build.meta import ImageAccounts, parse_user
-from flotilla.compose.manifest_gen import synthesize_command
-from flotilla.compose.model import ImageMeta, Project, Service, VolumeMount
+from flotilla.compose.model import ImageMeta
 from flotilla.compose.normalize import normalize
+from flotilla.compose.plan_task import PlanError, synthesize_command
 from flotilla.compose.task import load_task
 from flotilla.config import ResourceDefaults
-from flotilla.manifest import Manifest, Resources
 from flotilla.scan import scan
-from flotilla.testing.build import _caps, _ctx, _task
+from flotilla.testing.planning import APP, FakeConfigs, _caps, _task, plan
 
 
-def test_volume_name_never_controls_recursive_deletion(tmp_path: Path) -> None:
+def test_a_volume_name_that_is_a_path_never_reaches_storage(tmp_path: Path) -> None:
+    """A volume key becomes a directory under the trial root, so a path in its name is refused."""
     decoy = tmp_path / "precious"
     decoy.mkdir()
     sentinel = decoy / "sentinel"
     sentinel.write_text("keep")
     for name in (str(decoy), "../precious", "..", "x/../../precious"):
-        services = {
-            s: Service(s, image="r.io/a", volumes=(VolumeMount("volume", name, "/data"),)) for s in ("main", "db")
-        }
-        project = Project(services, {}, frozenset({name}))
-        with pytest.raises(ExportError, match="unsafe volume"):
-            export_task_files(project, tmp_path, tmp_path / "files")
-        parsed = normalize({"services": {"main": {"image": "r.io/a"}}, "volumes": {name: {}}})
+        parsed = normalize({"services": {"main": {"image": APP}}, "volumes": {name: {}}})
         assert parsed.rejected
         assert sentinel.read_text() == "keep"
 
@@ -44,7 +35,7 @@ def test_sibling_prefix_symlink_is_rejected_before_build(tmp_path: Path) -> None
     outside.mkdir()
     (env / "escape").symlink_to(outside, target_is_directory=True)
     service: dict[str, object] = {
-        "image": "r.io/a",
+        "image": APP,
         "volumes": [{"type": "bind", "source": "./escape", "target": "/data"}],
     }
     result = scan("t", normalize({"services": {"main": service}}), _caps(), env_dir=str(env))
@@ -59,7 +50,7 @@ def test_string_command_and_explicit_empty_preserve_entrypoint() -> None:
         ("", ("/app/server",)),
         (None, ("/app/server", "--old")),
     ]:
-        p = normalize({"services": {"main": {"image": "r.io/a", "command": value}}})
+        p = normalize({"services": {"main": {"image": APP, "command": value}}})
         assert synthesize_command(p.services["main"], meta) == expected
 
 
@@ -76,44 +67,35 @@ def test_string_command_and_explicit_empty_preserve_entrypoint() -> None:
     ],
 )
 def test_invalid_nested_fields_are_visible_rejections(field: dict[str, object]) -> None:
-    assert normalize({"services": {"main": {"image": "r.io/a", **field}}, "volumes": {"data": {}}}).rejected
+    assert normalize({"services": {"main": {"image": APP, **field}}, "volumes": {"data": {}}}).rejected
 
 
 def test_tmpfs_is_not_derived_without_approximating_container_identity(tmp_path: Path) -> None:
-    task = load_task(
-        _task(
-            tmp_path,
-            "tmpfs",
-            compose="""services:
+    path = _task(
+        tmp_path,
+        "tmpfs",
+        compose=f"""services:
   main:
-    image: r.io/a
+    image: {APP}
     tmpfs: /cache
     volumes:
-      - {type: tmpfs, target: /scratch}
+      - {{type: tmpfs, target: /scratch}}
 """,
-        )
     )
-    ctx = _ctx()
-    outcome = build_task(task, tmp_path / "out", replace(ctx, caps=replace(ctx.caps, native_tmpfs=True)))
-    assert outcome.status == "built", outcome.reason
-    # Mount-point directories are runtime responsibilities: no derivation build.
-    assert outcome.manifest_path
-    manifest = Manifest.load_json(outcome.manifest_path.read_bytes())
-    assert [m.mount_path for m in manifest.units["main"].tmpfs_mounts] == ["/cache", "/scratch"]
-    assert manifest.networks["default"].names == {"main": ["main"]}
+    task = load_task(path)
+    assert scan(task.name, task.project, replace(_caps(), native_tmpfs=True)).status == "accepted"
+    result = plan(task)
+    # Mount-point directories are runtime responsibilities: nothing is derived from the image.
+    assert [m.mount_path for m in result.units["main"].tmpfs_mounts] == ["/cache", "/scratch"]
+    assert result.networks["default"].names == {"main": frozenset({"main"})}
     compose = task.env_dir / "docker-compose.yaml"
-    compose.write_text(compose.read_text().replace("image: r.io/a", "image: r.io/a\n    container_name: agent-alias"))
-    aliased = build_task(
-        load_task(task.path), tmp_path / "aliased", replace(ctx, caps=replace(ctx.caps, native_tmpfs=True))
-    )
-    assert aliased.status == "built", aliased.reason
-    assert aliased.manifest_path
-    names = Manifest.load_json(aliased.manifest_path.read_bytes()).networks["default"].names
-    assert names == {"agent-alias": ["main"], "main": ["main"]}
+    compose.write_text(compose.read_text().replace(f"image: {APP}", f"image: {APP}\n    container_name: agent-alias"))
+    names = plan(load_task(path)).networks["default"].names
+    assert names == {"agent-alias": frozenset({"main"}), "main": frozenset({"main"})}
 
 
 def test_resource_precedence_and_harbor_declaration(tmp_path: Path) -> None:
-    path = _task(tmp_path, "resources", compose="services:\n  main:\n    image: r.io/a\n")
+    path = _task(tmp_path, "resources", compose=f"services:\n  main:\n    image: {APP}\n")
     (path / "task.toml").write_text("[environment]\ncpus=8\nmemory_mb=16384\n")
     task = load_task(path)
     assert task.project.services["main"].resources == {"cpu": "8", "memory": "16384Mi"}
@@ -124,20 +106,26 @@ def test_resource_precedence_and_harbor_declaration(tmp_path: Path) -> None:
             "tasks": {"resources": {"services": {"main": {"cpu": "4", "memory": "4Gi"}}}},
         }
     )
-    outcome = build_task(task, tmp_path / "out", _ctx())
-    assert outcome.manifest_path, outcome.reason
-    manifest = Manifest.load_json(outcome.manifest_path.read_bytes())
-    assert manifest.units["main"].resources == Resources(cpu="8", memory="16384Mi")
-    assert config.for_manifest(manifest)["main"].cpu == "4"
-    assert config.for_manifest(manifest)["main"].memory == "4Gi"
+    declared = {name: svc.resources for name, svc in task.project.services.items()}
+    # The deployment's task-scoped policy wins over what the task declares.
+    assert config.for_services(task.name, declared)["main"].cpu == "4"
+    assert config.for_services(task.name, declared)["main"].memory == "4Gi"
     assert config.effective("other", "db", {"cpu": "8"}) == {"cpu": "8", "memory": "1Gi"}
+    # With no policy for this task, the declaration is what the plan runs with.
+    assert plan(task, resources=ResourceDefaults()).units["main"].resources.cpu == "8"
 
 
-def test_image_user_and_group_have_distinct_namespaces() -> None:
-    accounts = ImageAccounts("app:x:123:456::/:/bin/sh\n", "app:x:789:\nwriters:x:42:\n")
-    assert parse_user("123", lookup=accounts.user) == (123, 456)
-    assert parse_user("999", lookup=accounts.user) == (999, 0)
-    assert parse_user("app:writers", lookup=accounts.user, group_lookup=accounts.group) == (123, 42)
+def test_a_named_identity_is_refused_rather_than_looked_up_in_the_image(tmp_path: Path) -> None:
+    """Resolving `app:writers` meant creating a container and reading its passwd and group files."""
+    path = _task(tmp_path, "named", compose=f'services:\n  main:\n    image: {APP}\n    user: "app:writers"\n')
+    with pytest.raises(PlanError, match="numeric uid"):
+        plan(load_task(path))
+    numeric = _task(tmp_path, "numeric", compose=f'services:\n  main:\n    image: {APP}\n    user: "123:456"\n')
+    context = plan(load_task(numeric)).units["main"].context
+    assert (context.uid, context.gid) == (123, 456)
+    # A non-root image USER is refused too: the exec daemon is the sandbox entrypoint.
+    with pytest.raises(PlanError, match="USER"):
+        plan(load_task(numeric), configs=FakeConfigs(user="1000:1000"))
 
 
 def test_resource_policy_is_task_scoped() -> None:
@@ -162,7 +150,7 @@ def test_client_configuration_snapshot_cannot_be_mutated_via_public_accessor() -
 
 
 def test_rl_corpus_memory_alias_is_applied_not_silently_defaulted(tmp_path: Path) -> None:
-    path = _task(tmp_path, "rl-memory", compose="services:\n  main:\n    image: r.io/a\n")
+    path = _task(tmp_path, "rl-memory", compose=f"services:\n  main:\n    image: {APP}\n")
     metadata = path / "task.toml"
     metadata.write_text('[environment]\nmemory="12G"\n')
     assert load_task(path).project.services["main"].resources["memory"] == "12Gi"

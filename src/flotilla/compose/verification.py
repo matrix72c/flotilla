@@ -22,6 +22,9 @@ TESTS_TARGET = "/tests"
 #: The agent's own output directory, handed to the verifier read-only.
 AGENT_ARTIFACT = "agent"
 AGENT_TARGET = "/logs/agent"
+#: Where the verifier sees it. A separate path, because the verifier writes its own `/logs/...`
+#: and must not have the agent's directory mounted over part of it.
+AGENT_HANDOFF_TARGET = "/handoff/agent"
 
 #: A reward the verifier may write, either as a bare number or as JSON. Optional, because a
 #: verifier is also allowed to express the outcome through its exit status alone.
@@ -60,4 +63,6 @@ def artifacts_of(config: Any, *, has_tests: bool) -> tuple[Artifact, ...]:
     here, so there is nothing else to collect.
     """
     del config  # reserved: a task-declared artifact list is refused at import, not encoded here
-    return (Artifact(name=AGENT_ARTIFACT, role="main", target=AGENT_TARGET),) if has_tests else ()
+    if not has_tests:
+        return ()
+    return (Artifact(name=AGENT_ARTIFACT, role="main", target=AGENT_TARGET, verifier_target=AGENT_HANDOFF_TARGET),)
