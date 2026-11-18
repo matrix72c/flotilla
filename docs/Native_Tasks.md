@@ -30,7 +30,7 @@ A selected row that fails is left out of the release and its report row carries 
 
 `--name` names the release. Every dataset row carries it, and the consumer's deployment binds it as `[task_releases.<name>]`. A task selected several times is packaged once; its rows repeat.
 
-The prepare report includes invocation-local `metrics`: total `elapsed_s`, per-phase `calls`/`failed`/`seconds`, and counts of registry cache hits and `stored_hits` (served from `--cache`). `import_normalize` combines importing and official Compose normalization. Phase times are inclusive and overlap across concurrent tasks, so do not sum them. Tool calls exclude cache hits and failures remain counted. The Compose executable's version is checked once per process.
+The prepare report includes invocation-local `metrics`: total `elapsed_s`, per-phase `calls`/`failed`/`seconds`, and counts of registry cache hits and `stored_hits` (served from `--cache`). `import_normalize` combines importing and Compose normalization. Phase times are inclusive and overlap across concurrent tasks, so do not sum them. Tool calls exclude cache hits and failures remain counted.
 
 ## Static publication belongs to the user
 

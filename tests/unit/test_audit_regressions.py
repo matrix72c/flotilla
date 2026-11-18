@@ -13,11 +13,11 @@ from flotilla.build.meta import ImageAccounts, parse_user
 from flotilla.compose.manifest_gen import synthesize_command
 from flotilla.compose.model import ImageMeta, Project, Service, VolumeMount
 from flotilla.compose.normalize import normalize
+from flotilla.compose.task import load_task
 from flotilla.config import ResourceDefaults
 from flotilla.manifest import Manifest, Resources
 from flotilla.scan import scan
 from flotilla.testing.build import _caps, _ctx, _task
-from flotilla.testing.compose import offline_task as load_task
 
 
 def test_volume_name_never_controls_recursive_deletion(tmp_path: Path) -> None:

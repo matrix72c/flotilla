@@ -1,4 +1,4 @@
-"""Read the main task environment deterministically, independently of optional adapters."""
+"""Read a task directory: its `task.toml` and the Compose project under `environment/`."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from flotilla.compose.adapter import ComposeConfigAdapter
+from flotilla.compose import parse
 from flotilla.compose.model import MAIN, Finding, Project
 from flotilla.compose.paths import confined
 from flotilla.resources import cpu, memory
@@ -51,12 +51,11 @@ def find_tasks(roots: Iterable[Path]) -> Iterator[Path]:
 def load_task(
     path: Path,
     *,
-    compose_adapter: ComposeConfigAdapter,
     compose_files: tuple[Path, ...] | None = None,
     compose_environment: Mapping[str, str] | None = None,
 ) -> HarborTask:
     try:
-        return _load_task(path, compose_adapter, compose_files, compose_environment)
+        return _load_task(path, compose_files, compose_environment)
     except TaskError:
         raise
     except (ValueError, OSError, RuntimeError) as exc:
@@ -65,7 +64,6 @@ def load_task(
 
 def _load_task(
     path: Path,
-    compose_adapter: ComposeConfigAdapter,
     compose_files: tuple[Path, ...] | None,
     compose_environment: Mapping[str, str] | None,
 ) -> HarborTask:
@@ -79,7 +77,6 @@ def _load_task(
         env_dir,
         _table(config, "environment"),
         name=_table(config, "task").get("name") or path.name,
-        compose_adapter=compose_adapter,
         compose_files=compose_files,
         compose_environment=compose_environment,
     )
@@ -92,7 +89,6 @@ def load_environment(
     *,
     name: str,
     findings: tuple[Finding, ...] = (),
-    compose_adapter: ComposeConfigAdapter,
     compose_files: tuple[Path, ...] | None = None,
     compose_environment: Mapping[str, str] | None = None,
 ) -> HarborTask:
@@ -106,7 +102,7 @@ def load_environment(
     image = environment.get("docker_image")
     main_image = image if isinstance(image, str) and image else None
     main_build = main_image is None and (env_dir / "Dockerfile").is_file()
-    project = compose_adapter.load(
+    project = parse.load_project(
         env_dir,
         files=compose_files if compose_files is not None else ((compose_path,) if compose_path.is_file() else ()),
         environment=compose_environment or {},

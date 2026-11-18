@@ -192,8 +192,6 @@ class WorkspaceStore:
         return await self._describe(
             task_keys,
             options={
-                "compose_command": self.config.prepare.compose_command,
-                "compose_version": self.config.prepare.compose_version,
                 "runtime_params": {**self.config.runtime_params, **runtime_parameters(runtime_params)},
             },
         )

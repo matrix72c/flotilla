@@ -13,6 +13,7 @@ from flotilla import Flotilla
 from flotilla.build.driver import build_task
 from flotilla.capabilities import Item, ProbeSettings
 from flotilla.compose.normalize import normalize
+from flotilla.compose.task import load_task
 from flotilla.config import FlotillaConfig
 from flotilla.core.anchor import Anchor, AnchorSettings
 from flotilla.manifest import Manifest
@@ -33,7 +34,6 @@ from flotilla.runtime.planning import to_plan
 from flotilla.runtime.types import RunRequest, Task
 from flotilla.scan import scan
 from flotilla.testing.build import _ctx, _task
-from flotilla.testing.compose import offline_task as load_task
 from flotilla.testing.config import config_data
 from flotilla.testing.platform import FakePlatform, ManualClock, SharedTree
 from flotilla.testing.reports import ok, report

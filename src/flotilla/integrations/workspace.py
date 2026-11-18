@@ -24,7 +24,6 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
-from flotilla.compose.adapter import ComposeConfigAdapter
 from flotilla.compose.paths import confined
 from flotilla.compose.task import COMPOSE_FILE
 from flotilla.integrations.harbor_source import task_environments
@@ -157,14 +156,8 @@ def _describe_source(source: Path) -> dict[str, Any]:
 def _describe_resources(
     source: Path, metadata: dict[str, Any], request: dict[str, Any], budget: _ReadBudget
 ) -> dict[str, Any]:
-    adapter = ComposeConfigAdapter(
-        command=tuple(request["compose_command"]),
-        expected_version=request["compose_version"],
-        resources_only=True,
-    )
-
     def inspect(path: Path) -> dict[str, Any]:
-        environments = task_environments(path, compose_adapter=adapter, compose_environment=request["runtime_params"])
+        environments = task_environments(path, compose_environment=request["runtime_params"])
         result = {}
         for role, environment in zip(metadata["definitions"], environments, strict=True):
             rejected = [

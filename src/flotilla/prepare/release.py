@@ -17,7 +17,6 @@ from typing import Any, TypeVar
 from flotilla.build.driver import BuildContext, build_task
 from flotilla.build.images import _DIGEST, pin_images, pinned_images, plan_images
 from flotilla.build.meta import ImageAccounts
-from flotilla.compose.adapter import ComposeConfigAdapter
 from flotilla.compose.task import TaskError
 from flotilla.integrations.native_import import ImportedTask, SelectedTask, UnsupportedTask, discover, import_task
 from flotilla.manifest import Manifest
@@ -197,7 +196,6 @@ def select(
     caps: Capabilities,
     out: str | Path | None = None,
     report: str | Path | None = None,
-    compose_adapter: ComposeConfigAdapter | None = None,
     runtime_params: Mapping[str, str] | None = None,
 ) -> SelectionResult:
     """Select supported host tasks without Docker image access or platform credentials.
@@ -207,7 +205,6 @@ def select(
     selection fail the operation rather than publishing a misleading selection.
     """
     root = Path(host_root).expanduser().resolve(strict=True)
-    adapter = compose_adapter or ComposeConfigAdapter()
     rows, reports = [], []
     paths = discover(root)
     for path in paths:
@@ -216,11 +213,7 @@ def select(
             task_path=path, task_key=key if key != "." else root.name, parameters=dict(runtime_params or {})
         )
         try:
-            imported = import_task(
-                row,
-                caps=caps,
-                compose_adapter=adapter,
-            )
+            imported = import_task(row, caps=caps)
             rows.append(row)
             reports.append(
                 {
@@ -331,7 +324,6 @@ def prepare(
     deployment: Any = None,
     report: str | Path | None = None,
     context: BuildContext | None = None,
-    compose_adapter: ComposeConfigAdapter | None = None,
     cache: str | Path | None = None,
     concurrency: int | None = None,
 ) -> PrepareResult:
@@ -374,7 +366,6 @@ def prepare(
             deployment=deployment,
             report=report,
             context=context,
-            compose_adapter=compose_adapter,
             metrics=metrics,
         )
     finally:
@@ -402,14 +393,13 @@ def _prepare_task(
     row: SelectedTask,
     *,
     context: BuildContext,
-    adapter: ComposeConfigAdapter,
     work: Path,
     published: set[str],
     metrics: _Metrics,
 ) -> _Prepared:
     settings, registry = context.settings, context.registry
     try:
-        imported = metrics.call("import_normalize", import_task, row, caps=context.caps, compose_adapter=adapter)
+        imported = metrics.call("import_normalize", import_task, row, caps=context.caps)
     except (OSError, ValueError, RuntimeError) as exc:
         raise _TaskFailure("import", "input_or_image_error", str(exc)) from exc
     try:
@@ -483,7 +473,6 @@ def _prepare(
     deployment: Any,
     report: str | Path | None,
     context: BuildContext | None,
-    compose_adapter: ComposeConfigAdapter | None,
     metrics: _Metrics,
 ) -> PrepareResult:
     from flotilla.native import ReleaseWriter
@@ -496,9 +485,6 @@ def _prepare(
             raise ValueError("prepare requires deployment or an explicit BuildContext")
         cfg = deployment if isinstance(deployment, FlotillaConfig) else FlotillaConfig.load(deployment)
         context = docker_context(cfg, work / "containers")
-        compose_adapter = compose_adapter or ComposeConfigAdapter(
-            command=cfg.prepare.compose_command, expected_version=cfg.prepare.compose_version
-        )
         concurrency = concurrency or cfg.prepare.concurrency
     workers = concurrency or 1
     if workers < 1:
@@ -511,7 +497,6 @@ def _prepare(
         if context.image_accounts is not None
         else None,
     )
-    adapter = compose_adapter or ComposeConfigAdapter()
     if not rows:
         raise PreparationError("cannot prepare an empty selection", [])
     reports = [
@@ -542,7 +527,6 @@ def _prepare(
                         _prepare_task,
                         row,
                         context=context,
-                        adapter=adapter,
                         work=work,
                         published=published,
                         metrics=metrics,

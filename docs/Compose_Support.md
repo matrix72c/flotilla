@@ -100,7 +100,7 @@ field is rejected and carries the strictest of them, which is coarse but never w
 | `tty`, `stdin_open` | Rejected (unimplemented): both require a pty |
 | `devices` | Only `/dev/fuse`, `/dev/kvm` and `/dev/net/tun`, at the same path with `rwm` (the default). The service runs on the privileged runtime with the matching platform extension, written per instance so one service can hold a device without every sandbox carrying it; requires that device verified in the capability report. The platform itself asks for no special runtime for FUSE, but the probe measures it only on a privileged instance, so admitting it elsewhere would claim a configuration nothing verified. Read-only rootfs, tmpfs and `shm_size` are not available on that runtime. Trial volumes such a service mounts writable are opened to every identity (`chmod -R a+rwX`), because its root does not own anchor-created storage. Other devices are rejected (unsafe) |
 | `cap_add` | Only `[NET_ADMIN]` together with `/dev/net/tun` (equivalent: root in the privileged runtime holds it in the sandbox network namespace). Other capabilities are rejected (unsafe) |
-| `extends`, `profiles`, `secrets`, `configs`, `scale` | Rejected (unimplemented): each would expand into something the model already has — merged documents, mounts, or several sandboxes. `extends` is stopped by the input gate before the Compose CLI, which would otherwise expand it |
+| `extends`, `profiles`, `secrets`, `configs`, `scale` | Rejected (unimplemented): each would expand into something the model already has — merged documents, mounts, or several sandboxes. The parser never expands `extends`, so it is reported here by name rather than acted on |
 | Any other key, including `deploy` keys other than resource limits and `x-*` | Rejected |
 
 A service can have dependents requiring health and others requiring successful completion. Both conditions are tracked independently. A service required only for successful completion does not need to pass its healthcheck.
@@ -127,7 +127,7 @@ Compose `network_mode: none` also excludes the service from peer links and requi
 
 ## Variable interpolation
 
-The pinned `docker compose config` command performs interpolation, so the syntax it accepts is the syntax a task may use. The host environment is never read: values come from `environment/.env`, from `CONTEXT_DIR` (the absolute environment directory), and from the values the caller supplies for the run — the deployment's `runtime_params` table and, for one call, `describe_task_resources(runtime_params=...)` or a dataset row's `parameters` (the more specific wins).
+Interpolation supports `${VAR}`, `${VAR:-default}`, `${VAR-default}`, `${VAR:+alt}`, `${VAR+alt}` and `$$` for a literal dollar, with references allowed inside a default. A bare `$VAR` is rejected; write the braces. The host environment is never read: values come from `environment/.env`, from `CONTEXT_DIR` (the absolute environment directory), and from the values the caller supplies for the run — the deployment's `runtime_params` table and, for one call, `describe_task_resources(runtime_params=...)` or a dataset row's `parameters` (the more specific wins).
 
 Interpolation happens once, at preparation or inspection, and the result is fixed in the prepared definition. There is no deferred substitution at open time.
 

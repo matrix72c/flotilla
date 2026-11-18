@@ -7,81 +7,67 @@ Unsupported declarations fail closed; there is no automatic Docker-in-Docker
 fallback. `privileged: true` runs on the privileged runtime with a warning;
 that sandbox is not treated as Docker privileged mode on the host.
 
-## Production normalization
+## Reading a project
 
-Harbor production loading uses `flotilla.compose.adapter.ComposeConfigAdapter`.
-The adapter requires the official Compose CLI at the exact configured release
-(default **2.39.4**). Its executable argv and expected version are constructor
-arguments. Missing tooling, a different version, or a failed `config` invocation
-is an error, never a reason to use the lightweight parser. The adapter does not
-install tooling or contact a Docker daemon.
+`flotilla.compose.parse.load_project` reads a task's Compose files in-process:
+YAML load, interpolation, `env_file` expansion, the ordered merge of several
+files, and Harbor's synthetic `main` service. There is no Compose executable and
+no Docker daemon, so a host that prepares or inspects a task needs neither.
 
-The caller supplies an attempt-private environment directory, ordered Compose
-files, and explicit interpolation variables. The loader defaults to that
-directory's `docker-compose.yaml`. The adapter passes an explicit project
-directory, project name, file list and `.env` path (or `/dev/null`). The process
-environment contains a fixed executable-search PATH and caller-supplied values,
-not the invoking shell's environment. `CONTEXT_DIR` is the environment directory.
-Other Harbor variables must be supplied explicitly by the caller.
+The caller supplies an environment directory, ordered Compose files, and
+explicit interpolation values; the loader defaults to that directory's
+`docker-compose.yaml`. Caller values override a task-local `.env`, as the
+process environment overrides it in Compose, and the ambient process
+environment is never read: a task resolves to the same project on any host.
+`CONTEXT_DIR` is the environment directory. Other Harbor variables must be
+supplied explicitly by the caller.
 
-An explicit base document provides Harbor's main-service keepalive and default
-image. Official `compose config --format json --no-path-resolution` owns
-file merging, interpolation, `env_file` loading, and short-form expansion.
-Harbor's explicit `docker_image` supersedes the resulting main image;
-its explicit working directory also wins. Compose's serialized `$$` escaping is
-decoded exactly once, including mapping keys, without evaluating variable names
-or expressions. Resolved output is translated without a second interpolation
-pass: literal dollars remain literal and there are no implicitly deferred
-environment variables. Compose-resolved bind paths
-must remain within the environment directory. Before any official CLI call, a
-narrow YAML-node gate rejects `include`, `extends`, `label_file`, `configs`, and
-`secrets`, and confines `.env` and literal service `env_file` paths to that
-directory (including symlink resolution). Dynamic `$` paths in `env_file` are
-unsupported. This gate preserves YAML aliases and official `!reset`/`!override`
-tags without implementing Compose merging or interpolation. Project-generated
-resource names are removed; arbitrary Docker resource names and external
-resources are not supported.
+Only three kinds of file are opened: the Compose files named in the arguments, a
+task-local `.env`, and the literal `env_file` paths a service declares. Each is
+confined to the environment directory, symlinks resolved. A dynamic `$` path in
+`env_file` is refused. `include` and `extends` would name further files and are
+never acted on: they reach `normalize` and are rejected there by name, with
+their field path, rather than expanded.
 
-`normalize` is the pure resolved-model translation entry: it maps the adapter's
-output to the runtime model and classifies fields, and never substitutes a
-variable or opens a file. Offline tests drive it through a double that merges
-the selected files without interpolating, not through a second parser.
+Harbor's explicit `docker_image` supersedes the resulting main image, and its
+explicit working directory also wins. Bind sources and build contexts are
+rewritten to normalized task-relative paths, because the layout keys
+attempt-owned storage by bind source and `conf`, `./conf` and `./x/../conf` must
+name one thing. A path outside the environment directory is refused. Arbitrary
+Docker resource names and external resources are not supported.
 
-## The dialect parser
+`normalize` is the pure translation entry: it maps that document to the runtime
+model and classifies fields, and never substitutes a variable or opens a file.
 
-`flotilla.compose.parse.load_project` reads the same inputs without an external
-executable, producing the document `normalize` consumes. Nothing uses it yet;
-it exists to be compared against official Compose before it replaces the
-adapter, and that comparison is the only thing that makes it trustworthy (see
-[verification scope](#verification-scope)).
+## Where the dialect differs from Compose
 
-It opens only the files named in its arguments, a task-local `.env`, and the
-literal `env_file` paths a service declares, each confined to the environment
-directory. `include` and `extends` are never acted on, so they reach `normalize`
-and are rejected there by name rather than expanded. Caller values override
-`.env`; the process environment is never read, so a task resolves to the same
-project on any host. `${VAR}`, `${VAR:-d}`, `${VAR-d}`, `${VAR:+a}`, `${VAR+a}`
-and `$$` are supported, with references inside a default; a reference nothing
-provides a value for and that has no default is refused.
+Interpolation supports `${VAR}`, `${VAR:-d}`, `${VAR-d}`, `${VAR:+a}`,
+`${VAR+a}` and `$$`, with references allowed inside a default. A reference
+nothing provides a value for and that has no default is **refused**: Compose
+only warns and substitutes a blank string, so a task referencing `${TAG}` would
+otherwise bake an empty string into an image reference and fail much later with
+an unrelated-looking error.
 
-It is stricter than Compose in three places, each a case where Compose
-substitutes something the author did not write. A bare `$VAR` is refused
-(`${VAR}` is required). A `$` in an env file value or variable name is refused,
+Three further rules are stricter than Compose, each a case where Compose
+substitutes something the author did not write. A bare `$VAR` is refused;
+`${VAR}` is required. A `$` in an env file value or variable name is refused,
 quoted or not: Compose interpolates those values in turn, against the shell
 environment, the keys above them in the same file, the files read before them,
 and the service's own `environment`, so one env file's value can depend on
-another's, and a single-quoted value is kept literal while a double-quoted one
-is substituted.
+another's, and a single-quoted value stays literal while a double-quoted one is
+substituted. Each is pinned by a test asserting Compose reads what flotilla
+refuses, so it stays a choice rather than quietly becoming redundant.
 
-Beyond interpolation it reproduces three Compose rules that are easy to miss. A
-key written with no value is refused, as Compose's schema refuses it, except
-`command`, `entrypoint` and `deploy`, where the null means "unset" and resets
-what an earlier file set. One mount survives per target: a repeated target keeps
-the last declaration at the first position, and two targets that differ as
-written but name the same directory (`/x/` and `/x`) are refused. Bind sources
-and build contexts are rewritten to normalized task-relative paths, because the
-layout keys attempt-owned storage by bind source and `conf`, `./conf` and
-`./x/../conf` must name one thing.
+Three Compose rules that are easy to miss are reproduced rather than
+simplified. A key written with no value is refused, as Compose's schema refuses
+it, except `command`, `entrypoint` and `deploy`, where the null means "unset"
+and resets what an earlier file set. One mount survives per target: a repeated
+target keeps the last declaration at the first position, and two targets that
+differ as written but name the same directory (`/x/` and `/x`) are refused. A
+declared network or named volume nothing uses is dropped.
+
+YAML anchors and `<<` merge keys are resolved while loading. Compose's
+`!reset` and `!override` tags are not implemented and fail the load.
 
 ## Storage and command behavior
 
@@ -133,32 +119,29 @@ translation is not proof of Docker equivalence or deployment support.
 
 ## Verification scope
 
-Unit contracts mock the official Compose subprocess, cover version/error
-handling and explicit arguments, and verify that resolved dollar expressions are
-not expanded again and that an undefined reference without a default is refused
-rather than blanked. Model and preparation tests cover null/empty argv, shared mixed RO/RW
-binds, nested mounts, named volumes, real single-reference mounts and hardlinks.
+`tests/unit/test_compose_parse.py` states each parser rule once, so CI covers
+them with no executable and no datasets: which files are opened, what is
+refused, interpolation form by form, and the Compose rules above. Model and
+preparation tests cover null/empty argv, shared mixed RO/RW binds, nested
+mounts, named volumes, real single-reference mounts and hardlinks.
 
-`tests/contract/test_compose_official.py` is an opt-in check against an explicit
-official Compose 2.39.4 executable, selected with `FLOTILLA_TEST_COMPOSE`. It
-covers ordered files, reset/override tags, null/empty argv, env files, and one
-through five literal dollars originating in YAML, explicit environment, `.env`,
-and raw or quoted service env files. This normalization-only check uses no
-Docker daemon or workloads and does not verify the management image's
-build/runtime toolchain. Translation is not proof of Docker equivalence.
+`tests/contract/compose_differential.py` is the evidence that the parser agrees
+with Docker. It is opt-in: `FLOTILLA_TEST_COMPOSE` names an official Compose
+2.39.4 executable, which `tests/contract/official_compose.py` drives to produce
+a reference `Project`. That reader lives in the tests, not the package — the
+package has no Compose adapter.
 
-`tests/contract/compose_differential.py` compares the dialect parser against
-that same executable. Its two sets of inputs fail differently and neither
-replaces the other. `FLOTILLA_TEST_CORPUS` names dataset roots: every task in
-them is read both ways and the resulting `Project`s must be equal field by
-field, findings included. That covers what generated tasks actually use and says
-nothing about a field no generator writes yet, so written cases cover what a
-corpus does not contain at all — interpolation forms, `env_file`, `.env`,
-multi-file merge, short volume syntax — and the three deliberate strictness
-rules are pinned by a test asserting Compose reads what flotilla refuses, so
-each stays a choice rather than quietly becoming redundant.
+Its two sets of inputs fail differently and neither replaces the other.
+`FLOTILLA_TEST_CORPUS` names dataset roots: every task in them is read both ways
+and the resulting `Project`s must be equal field by field, findings included.
+That covers what generated tasks actually use and says nothing about a field no
+generator writes yet, so written cases cover what a corpus does not contain at
+all — interpolation forms, `env_file`, `.env`, multi-file merge, short volume
+syntax, null argv reset — and the strictness rules above are pinned by a test
+asserting Compose reads what flotilla refuses.
 
-Agreement over a corpus is evidence about that corpus. A field form no
-generator writes today is unverified until someone writes it, which is the
-standing cost of maintaining the dialect rather than shelling out.
-
+Agreement over a corpus is evidence about that corpus. A field form no generator
+writes today is unverified until someone writes it, which is the standing cost
+of maintaining the dialect rather than shelling out. This normalization-only
+check uses no Docker daemon or workloads, and translation is not proof of Docker
+equivalence.

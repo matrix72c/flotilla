@@ -123,7 +123,7 @@ def metadata_store(concurrency: int = 4) -> tuple[WorkspaceStore, Mock, list[dic
             {
                 key: (
                     {"main": {"main": {"cpu": "2", "memory": "3Gi"}}}
-                    if "compose_command" in request
+                    if "runtime_params" in request
                     else {"instruction": key, "task_config": {"metadata": {"key": key}}}
                 )
                 for key in request["task_keys"]

@@ -11,7 +11,6 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from flotilla.compose.adapter import ComposeConfigAdapter
 from flotilla.compose.paths import confined
 from flotilla.compose.task import HarborTask
 from flotilla.integrations.harbor_source import task_environments
@@ -71,7 +70,6 @@ def import_task(
     row: SelectedTask,
     *,
     caps: Capabilities,
-    compose_adapter: ComposeConfigAdapter,
 ) -> ImportedTask:
     """Resolve every role through Harbor's inheritance and the official Compose adapter."""
     from harbor.models.task.config import TaskConfig
@@ -98,7 +96,7 @@ def import_task(
         or config.verifier.allowed_hosts
     ):
         raise UnsupportedTask("native importer does not yet encode per-phase network policy")
-    environments = task_environments(path, compose_adapter=compose_adapter, compose_environment=row.parameters)
+    environments = task_environments(path, compose_environment=row.parameters)
     roles = {}
     warnings: list[str] = []
     for index, environment in enumerate(environments):

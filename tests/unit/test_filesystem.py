@@ -11,6 +11,7 @@ import pytest
 from flotilla.build.driver import build_task
 from flotilla.compose.layout import classify
 from flotilla.compose.normalize import normalize
+from flotilla.compose.task import load_task
 from flotilla.config import FlotillaConfig
 from flotilla.manifest import SCHEMA_VERSION, Manifest
 from flotilla.platform.base import Capabilities, Resources, TmpfsMount
@@ -19,7 +20,6 @@ from flotilla.platform.opensandbox.filesystem import INTERNAL_LIMITS, parse_effe
 from flotilla.runtime.planning import _resolve_tmpfs, to_plan
 from flotilla.scan import scan
 from flotilla.testing.build import _ctx, _task
-from flotilla.testing.compose import offline_task as load_task
 from flotilla.testing.config import config_data
 from flotilla.testing.reports import ok, report
 

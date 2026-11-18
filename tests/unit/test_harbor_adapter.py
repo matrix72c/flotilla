@@ -19,11 +19,9 @@ from flotilla.compose.task import TaskError
 from flotilla.config import FlotillaConfig
 from flotilla.core import labels
 from flotilla.integrations.harbor import FlotillaEnvironment
+from flotilla.integrations.harbor_source import task_environments
 from flotilla.platform.base import ExecResult, FlotillaError, ProcessSpec
-from flotilla.prepare import inspect as inspect_module
 from flotilla.testing.build import prepared_task
-from flotilla.testing.compose import OfflineComposeAdapter
-from flotilla.testing.compose import offline_environments as task_environments
 from flotilla.testing.platform import FakePlatform, SharedTree
 from flotilla.testing.reports import report
 from flotilla.testing.runtime import deployment as runtime_deployment
@@ -34,7 +32,6 @@ deployment = runtime_deployment
 def test_scan_checks_verifier_context_and_continues_after_invalid_harbor_input(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(inspect_module, "ComposeConfigAdapter", OfflineComposeAdapter)
     tasks = tmp_path / "tasks"
     for name in ("valid", "bad-verifier", "bad-config"):
         root = tasks / name
@@ -78,24 +75,24 @@ def source(tmp_path: Path, toml_text: str = '[environment]\ndocker_image="r.io/m
     return path
 
 
-def test_harbor_resolves_compose_once_per_role(tmp_path: Path) -> None:
-    from unittest.mock import Mock
-
-    from flotilla.compose.task import load_environment
+def test_harbor_resolves_each_role_from_its_own_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A separate verifier context is a second project, read once, from `tests/`."""
+    from flotilla.compose import parse as parse_module
 
     path = source(tmp_path, '[environment]\ndocker_image="r.io/main:1"\n[verifier]\nenvironment_mode="separate"\n')
     (path / "tests/docker-compose.yaml").write_text("services:\n  main:\n    image: r.io/verifier:1\n")
-    adapter = Mock()
-    adapter.load.return_value = load_environment(
-        path,
-        path / "environment",
-        {"docker_image": "r.io/main:1"},
-        name=path.name,
-        compose_adapter=OfflineComposeAdapter(),
-    ).project
-    definitions = task_environments(path, compose_adapter=adapter)
-    assert len(definitions) == adapter.load.call_count == 2
-    assert [call.args[0] for call in adapter.load.call_args_list] == [path / "environment", path / "tests"]
+    read: list[Path] = []
+    original = parse_module.load_project
+
+    def record(project_dir: Path, **kwargs: object) -> object:
+        read.append(project_dir)
+        return original(project_dir, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(parse_module, "load_project", record)
+    definitions = task_environments(path)
+    assert read == [path / "environment", path / "tests"]
+    assert len(definitions) == 2
+    assert definitions[1].project.services["main"].image == "r.io/verifier:1"
     assert all(definition.name == path.name for definition in definitions)
 
 
