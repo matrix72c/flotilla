@@ -134,8 +134,8 @@ def test_volumes_long_syntax() -> None:
         ({"image": "a", "depends_on": {"ghost": {"condition": "service_started"}}}, "services.app.depends_on.ghost"),
         # inheriting the image's healthcheck test is not implemented
         ({"image": "a", "healthcheck": {"interval": "5s"}}, "services.app.healthcheck"),
-        ({"build": {"context": ".", "ssh": ["default"]}}, "services.app.build.ssh"),
-        ({}, "services.app"),  # neither image nor build
+        ({"build": {"context": "."}}, "services.app.build"),
+        ({}, "services.app"),  # no image
     ],
 )
 def test_rejections_report_field_path(svc: dict[str, Any], path: str) -> None:

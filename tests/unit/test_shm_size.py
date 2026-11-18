@@ -16,7 +16,7 @@ from flotilla.platform.base import Capabilities, TmpfsMount
 from flotilla.platform.opensandbox.filesystem import INTERNAL_LIMITS
 from flotilla.runtime.planning import to_plan
 from flotilla.scan import scan
-from flotilla.testing.build import FakeBuilder, _ctx, _task
+from flotilla.testing.build import _ctx, _task
 from flotilla.testing.compose import offline_task as load_task
 from flotilla.testing.config import config_data
 from flotilla.testing.reports import ok, report
@@ -41,23 +41,19 @@ def test_invalid_shm_size_is_rejected(value: object) -> None:
 def test_shm_size_roundtrips_to_runtime(tmp_path: Path) -> None:
     compose = "services:\n  main:\n    image: r.io/app\n    shm_size: 1gb\n    mem_limit: 2g\n    cpus: 1\n"
     task = load_task(_task(tmp_path, "shm", compose=compose))
-    builder = FakeBuilder()
-    ctx = _ctx(builder=builder)
+    ctx = _ctx()
     ctx = replace(ctx, caps=replace(ctx.caps, shm_size=True, filesystem_limits=INTERNAL_LIMITS))
     outcome = build_task(task, tmp_path / "out", ctx)
     assert outcome.manifest_path, outcome.reason
     manifest = Manifest.load_json(outcome.manifest_path.read_bytes())
     assert manifest.units["main"].shm_size_bytes == 1024**3
     assert to_plan(manifest).units["main"].shm_size_bytes == 1024**3
-    assert not builder.requests  # /dev/shm needs no derived image
 
 
 def test_unsupported_shm_size_is_rejected_before_building(tmp_path: Path) -> None:
     task = load_task(_task(tmp_path, "shm", compose="services:\n  main:\n    image: r.io/app\n    shm_size: 1g\n"))
-    builder = FakeBuilder()
-    outcome = build_task(task, tmp_path / "out", _ctx(builder=builder))
+    outcome = build_task(task, tmp_path / "out", _ctx())
     assert outcome.status == "rejected" and "shm_size" in (outcome.reason or "")
-    assert not builder.requests
 
 
 def test_shm_size_admission_shares_the_tmpfs_memory_budget(caps: Capabilities) -> None:

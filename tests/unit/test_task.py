@@ -21,7 +21,7 @@ from flotilla.testing.reports import report
 COMPOSE = """
 services:
   main:
-    build: .
+    image: r.io/ns/app:1
   db:
     image: postgres:14
     environment:
@@ -29,11 +29,25 @@ services:
 """
 
 
-def _task(root: Path, name: str, toml: str = "", compose: str | None = None, **files: str) -> Path:
+def _task(
+    root: Path,
+    name: str,
+    toml: str = "",
+    compose: str | None = None,
+    *,
+    image: str | None = "r.io/ns/app:1",
+    **files: str,
+) -> Path:
     path = root / name
     (path / "environment").mkdir(parents=True)
+    if image is not None:  # every task names a published image; building one is out of scope
+        declaration = f'docker_image = "{image}"\n'
+        toml = (
+            toml.replace("[environment]\n", f"[environment]\n{declaration}", 1)
+            if "[environment]\n" in toml
+            else f"[environment]\n{declaration}{toml}"
+        )
     (path / "task.toml").write_text(f'[task]\nname = "ds/{name}"\n{toml}')
-    (path / "environment" / "Dockerfile").write_text("FROM scratch\n")
     if compose is not None:
         (path / "environment" / "docker-compose.yaml").write_text(compose)
     for rel, text in files.items():
@@ -48,18 +62,20 @@ def _rejects(path: Path) -> list[str]:
 # ───────────────────────────── Reading ─────────────────────────────
 
 
-def test_single_service_dockerfile(tmp_path: Path) -> None:
+def test_single_service_from_the_task_toml_image(tmp_path: Path) -> None:
     task = load_task(_task(tmp_path, "solo"))
     assert task.name == "ds/solo"
     assert set(task.project.services) == {"main"}
-    assert task.project.services["main"].build is not None  # environment/Dockerfile
+    assert task.project.services["main"].image == "r.io/ns/app:1"
     assert not task.findings
 
 
-def test_docker_image_from_task_toml(tmp_path: Path) -> None:
-    task = load_task(_task(tmp_path, "img", '[environment]\ndocker_image = "reg/x:1"\n'))
-    assert task.project.services["main"].image == "reg/x:1"
-    assert task.project.services["main"].build is None
+def test_dockerfile_without_a_declared_image_is_rejected(tmp_path: Path) -> None:
+    """Producing the image is a separate job: the task must name one that is already published."""
+    path = _task(tmp_path, "src", image=None)
+    (path / "environment" / "Dockerfile").write_text("FROM scratch\n")
+    rejected = [f.path for f in load_task(path).project.findings if f.kind == "reject"]
+    assert "services.main.build" in rejected
 
 
 def test_unreadable_task(tmp_path: Path) -> None:

@@ -384,9 +384,8 @@ def test_batch_entrypoint_limits_and_failures_publish_no_partial_result(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("compose", [False, True])
 @pytest.mark.parametrize("mode", ["shared", "separate", "bundled"])
-@pytest.mark.parametrize("image", [False, True])
 async def test_resource_reader_matches_compiled_reservations(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, compose: bool, mode: str, image: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, compose: bool, mode: str
 ) -> None:
     from unittest.mock import AsyncMock
 
@@ -404,10 +403,6 @@ async def test_resource_reader_matches_compiled_reservations(
     if mode == "bundled":
         toml += '[verifier.environment]\ndocker_image="r.io/verifier:1"\ncpus=4\n'
     _, source = task_copy(tmp_path, toml=toml)
-    if not image:
-        text = (source / "task.toml").read_text().replace('docker_image="r.io/main:1"\n', "")
-        (source / "task.toml").write_text(text)
-        (source / "environment/Dockerfile").write_text("FROM r.io/main:1\n")
     if compose:
         (source / "environment/docker-compose.yaml").write_text(
             'services:\n  main:\n    cpus: "${CPU}"\n    mem_limit: 1Gi\n'
@@ -476,7 +471,7 @@ async def test_resource_reader_matches_compiled_reservations(
         assert raw[key]["main"]["db"] == {"cpu": "2", "memory": "5Gi"}
         assert calls and all(not path.is_relative_to(source) and not path.exists() for path in calls)
     else:
-        assert calls == []  # No Compose subprocess, even for Dockerfile/separate verifier.
+        assert calls == []  # No Compose subprocess, even for a separate verifier.
     assert source_snapshot(source) == before
     forbidden.assert_not_called()
     manager = SimpleNamespace(workspaces=SimpleNamespace(describe_task_resources=AsyncMock(return_value=raw)))

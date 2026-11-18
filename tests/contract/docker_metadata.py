@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 import argparse
-import json
 import subprocess
 import tempfile
 import uuid
 from pathlib import Path
 
 from flotilla.build.docker import DockerImageExport
-from flotilla.build.keys import entries
 
 
 def run(command: list[str]) -> None:
@@ -36,9 +34,7 @@ def run(command: list[str]) -> None:
             files.mkdir()
             identities: dict[str, tuple[int, int, int]] = {}
             assert DockerImageExport(docker_cmd=command).extract(image, "/data", files, identities=identities)
-            (root / "file-identities.json").write_text(json.dumps(identities))
-            record = next(item for item in entries(files) if item["path"] == "payload")
-            assert (record["uid"], record["gid"], record["mode"]) == (12345, 23456, "6751"), record
+            assert identities["payload"] == (12345, 23456, 0o6751), identities
             assert (files / "payload").read_bytes() == (root / "payload").read_bytes()
             assert (files / "payload").stat().st_uid != 12345
             print("Docker numeric uid/gid/mode and byte-content acceptance: PASS")

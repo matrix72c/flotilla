@@ -25,13 +25,6 @@ class Finding:
 
 
 @dataclass(frozen=True)
-class Build:
-    context: str  # relative to the task environment directory
-    dockerfile: str | None = None
-    args: Mapping[str, str] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
 class Healthcheck:
     """`test` normalized to argv: `CMD` as-is, `CMD-SHELL` as `["/bin/sh","-c",...]`. Durations in seconds."""
 
@@ -70,7 +63,6 @@ class VolumeMount:
 class Service:
     name: str
     image: str | None = None
-    build: Build | None = None
     command: tuple[str, ...] | None = None
     entrypoint: tuple[str, ...] | None = None
     environment: Mapping[str, str] = field(default_factory=dict)

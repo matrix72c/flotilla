@@ -16,13 +16,11 @@ from pathlib import Path
 from tempfile import mkdtemp
 from typing import Any, TypeVar
 
-from flotilla.build.builder import Builder, BuildRequest
-from flotilla.build.dockerfile import config_only
-from flotilla.build.driver import BuildContext, build_task, preflight_images
-from flotilla.build.images import _DIGEST, ImageRef, pin_images, plan_images
+from flotilla.build.driver import BuildContext, build_task
+from flotilla.build.images import _DIGEST, pin_images, pinned_images, plan_images
 from flotilla.build.meta import ImageAccounts
 from flotilla.compose.adapter import ComposeConfigAdapter
-from flotilla.compose.task import HarborTask, TaskError
+from flotilla.compose.task import TaskError
 from flotilla.integrations.native_import import ImportedTask, SelectedTask, UnsupportedTask, discover, import_task
 from flotilla.manifest import Manifest
 from flotilla.platform.base import Capabilities
@@ -63,14 +61,9 @@ class _Metrics:
             name: {"calls": 0, "failed": 0, "seconds": 0.0}
             for name in (
                 "import_normalize",
-                "image_preflight",
                 "registry_digest",
-                "registry_lookup",
                 "image_config",
                 "image_accounts",
-                "registry_copy",
-                "user0_build_push",
-                "application_build_push",
                 "image_extract",
                 "seed_cache_copy",
                 "role_prepare",
@@ -80,8 +73,6 @@ class _Metrics:
         self.counts = {
             "registry_cache_hits": 0,
             "seed_cache_hits": 0,
-            "build_cache_hits": 0,
-            "config_only": 0,
             "stored_hits": 0,
         }
 
@@ -164,21 +155,6 @@ def _store_write(path: Path, value: Any) -> None:
     temporary.replace(path)
 
 
-class _MeasuredBuilder:
-    """Times builds and builds each tag once: concurrent tasks may ask for the same adaptation or cache tag."""
-
-    def __init__(self, builder: Builder, metrics: _Metrics) -> None:
-        self.builder, self.metrics = builder, metrics
-        self._built: _Once[str, str] = _Once()
-
-    def build(self, request: BuildRequest) -> str:
-        # The driver supplies inline Dockerfile text only for its USER0 adapter;
-        # source application builds refer to their on-disk Dockerfile instead.
-        phase = "user0_build_push" if request.dockerfile_text is not None else "application_build_push"
-        digest, _ = self._built.get(request.tag, lambda: self.metrics.call(phase, self.builder.build, request))
-        return digest
-
-
 class _Accounts:
     """Image account databases by image, kept in the store by digest: they never change for one digest."""
 
@@ -227,7 +203,6 @@ def select(
     out: str | Path | None = None,
     report: str | Path | None = None,
     compose_adapter: ComposeConfigAdapter | None = None,
-    require_prebuilt_images: bool = False,
     runtime_params: Mapping[str, str] | None = None,
 ) -> SelectionResult:
     """Select supported host tasks without Docker image access or platform credentials.
@@ -250,7 +225,6 @@ def select(
                 row,
                 caps=caps,
                 compose_adapter=adapter,
-                require_prebuilt_images=require_prebuilt_images,
             )
             rows.append(row)
             reports.append(
@@ -260,7 +234,6 @@ def select(
                     "stage": "select",
                     "code": "supported",
                     "roles": list(imported.roles),
-                    "images": {role: _image_sources(task) for role, task in imported.roles.items()},
                     "warnings": list(imported.warnings),
                     "validation": "metadata/official-compose; images not inspected",
                 }
@@ -308,18 +281,6 @@ def select(
     return SelectionResult(tuple(rows), tuple(reports))
 
 
-def _image_sources(task: HarborTask) -> dict[str, str]:
-    """Per service: `image`, `build`, or `config-only` (a build that may reuse its base digest)."""
-    out: dict[str, str] = {}
-    for name, svc in sorted(task.project.services.items()):
-        if svc.build is None:
-            out[name] = "image"
-            continue
-        dockerfile = task.env_dir / svc.build.context / (svc.build.dockerfile or "Dockerfile")
-        out[name] = "config-only" if config_only(dockerfile.read_text()) else "build"
-    return out
-
-
 def _rows(selected: str | Path | Sequence[SelectedTask | Mapping[str, Any]]) -> list[SelectedTask]:
     if isinstance(selected, (str, Path)):
         source = Path(selected)
@@ -341,7 +302,6 @@ class _RegistryCache:
         self.registry, self.metrics, self.store = registry, metrics, store
         self.digests: _Once[tuple[str, str], str] = _Once()
         self.configs: _Once[str, Any] = _Once()
-        self.copies: _Once[tuple[str, str], None] = _Once()
 
     def digest(self, name: str, reference: str) -> str:
         value, hit = self.digests.get(
@@ -350,12 +310,6 @@ class _RegistryCache:
         if hit:
             self.metrics.count("registry_cache_hits")
         return value
-
-    def find(self, name: str, reference: str) -> str | None:
-        found: str | None = self.metrics.call("registry_lookup", self.registry.find, name, reference)
-        if found is not None:
-            self.digests.put((name, reference), found)
-        return found
 
     def image_config(self, pinned: str) -> Any:
         def load() -> Any:
@@ -372,15 +326,6 @@ class _RegistryCache:
         if hit:
             self.metrics.count("registry_cache_hits")
         return value
-
-    def copy(self, source: str, target: str) -> None:
-        def run() -> None:
-            self.metrics.call("registry_copy", self.registry.copy, source, target)
-            name, _, tag = target.rpartition(":")
-            self.digests.forget((name, tag))
-
-        if self.copies.get((source, target), run)[1]:
-            self.metrics.count("registry_cache_hits")
 
 
 class _Exports:
@@ -436,22 +381,13 @@ class _Exports:
         return populated
 
 
-def _repo(value: str) -> str:
-    ref = ImageRef.parse(value)
-    if ref.tag is not None or ref.digest is not None or ref.name != value or any(c.isspace() for c in value):
-        raise ValueError("image_repo must be a full registry/repository without tag or digest")
-    return value
-
-
 def prepare(
     selected: str | Path | Sequence[SelectedTask | Mapping[str, Any]],
     *,
     out: str | Path,
     name: str,
     deployment: Any = None,
-    image_repo: str | None = None,
     report: str | Path | None = None,
-    require_prebuilt_images: bool = False,
     context: BuildContext | None = None,
     compose_adapter: ComposeConfigAdapter | None = None,
     cache: str | Path | None = None,
@@ -460,10 +396,10 @@ def prepare(
     """Import selected rows into one native release named `name`.
 
     A row that fails is reported and left out; the release holds every row that
-    prepared, and nothing is published only when no row did. Building/pushing
-    necessary images is authorized by invoking this operation. It never uploads
-    files, creates remote sandboxes, or requires Anchor. Work files live in a
-    sibling directory that is removed afterwards.
+    prepared, and nothing is published only when no row did. Preparation reads
+    published images; it never builds or pushes one, uploads files, creates
+    remote sandboxes, or requires Anchor. Work files live in a sibling directory
+    that is removed afterwards.
 
     `cache` keeps what depends only on an image digest (image configs, account
     databases, volume seeds) across invocations, so a later run does not pull an
@@ -472,8 +408,7 @@ def prepare(
     into the release stays in row order.
 
     Phase times are inclusive and may overlap (role_prepare includes image
-    extraction, and concurrent tasks overlap). Tool call counts exclude cache
-    hits; build and push share one backend call/timer.
+    extraction, and concurrent tasks overlap). Tool call counts exclude cache hits.
     """
     metrics = _Metrics()
     output = Path(out).expanduser().absolute()
@@ -495,9 +430,7 @@ def prepare(
             store=store,
             concurrency=concurrency,
             deployment=deployment,
-            image_repo=image_repo,
             report=report,
-            require_prebuilt_images=require_prebuilt_images,
             context=context,
             compose_adapter=compose_adapter,
             metrics=metrics,
@@ -521,7 +454,6 @@ class _Prepared:
     publishes: dict[str, bool]
     files: dict[str, Path]
     sources: dict[str, dict[str, str]]
-    images: dict[str, dict[str, Any]]
 
 
 def _prepare_task(
@@ -529,26 +461,13 @@ def _prepare_task(
     *,
     context: BuildContext,
     adapter: ComposeConfigAdapter,
-    require_prebuilt_images: bool,
     work: Path,
     published: set[str],
     metrics: _Metrics,
 ) -> _Prepared:
     settings, registry = context.settings, context.registry
     try:
-        imported = metrics.call(
-            "import_normalize",
-            import_task,
-            row,
-            caps=context.caps,
-            compose_adapter=adapter,
-            require_prebuilt_images=require_prebuilt_images,
-        )
-        # Preflight every role of the task before its first image publication.
-        for task in imported.roles.values():
-            metrics.call(
-                "image_preflight", preflight_images, pin_images(plan_images(task.project, settings), registry), context
-            )
+        imported = metrics.call("import_normalize", import_task, row, caps=context.caps, compose_adapter=adapter)
     except (OSError, ValueError, RuntimeError) as exc:
         raise _TaskFailure("import", "input_or_image_error", str(exc)) from exc
     try:
@@ -556,22 +475,11 @@ def _prepare_task(
         publishes: dict[str, bool] = {}
         files: dict[str, Path] = {}
         sources: dict[str, dict[str, str]] = {}
-        images: dict[str, dict[str, Any]] = {}
         for role, task in imported.roles.items():
-            sources[role] = {
-                p.service: p.ref.pinned(p.ref.digest or "")
-                for p in pin_images(plan_images(task.project, settings), registry)
-                if p.ref
-            }
+            sources[role] = pinned_images(pin_images(plan_images(task.project, settings), registry))
             outcome = metrics.call("role_prepare", build_task, task, work / "builds", context)
             if outcome.status != "built" or outcome.manifest_path is None:
                 raise ValueError(f"{role}: {outcome.reason}")
-            images[role] = {"dispositions": dict(outcome.dispositions), "adapted": list(outcome.adapted)}
-            for disposition in outcome.dispositions.values():
-                if disposition == "cache-hit":
-                    metrics.count("build_cache_hits")
-                elif disposition == "config-only":
-                    metrics.count("config_only")
             manifest = Manifest.load_json(outcome.manifest_path.read_text())
             published.update(unit.image for unit in manifest.units.values())
             if outcome.needs_publish:
@@ -584,7 +492,7 @@ def _prepare_task(
             files["tests"] = imported.tests
     except (OSError, ValueError, RuntimeError) as exc:
         raise _TaskFailure("prepare", "prepare_error", str(exc)) from exc
-    return _Prepared(imported, roles, publishes, files, sources, images)
+    return _Prepared(imported, roles, publishes, files, sources)
 
 
 def _native_task(key: str, prepared: _Prepared, directory: str) -> Any:
@@ -617,7 +525,6 @@ def _native_task(key: str, prepared: _Prepared, directory: str) -> Any:
         "importer": "harbor-v1",
         "harbor": {"config": imported.config.model_dump(mode="json")},
         "source_images": prepared.sources,
-        "adaptation": "user0-v1",
         "parameters": imported.selection.parameters,
     }
     return Task(key=key, roles=roles, verification=verification, artifacts=artifacts, provenance=provenance)
@@ -632,9 +539,7 @@ def _prepare(
     store: Path | None,
     concurrency: int | None,
     deployment: Any,
-    image_repo: str | None,
     report: str | Path | None,
-    require_prebuilt_images: bool,
     context: BuildContext | None,
     compose_adapter: ComposeConfigAdapter | None,
     metrics: _Metrics,
@@ -656,16 +561,10 @@ def _prepare(
     workers = concurrency or 1
     if workers < 1:
         raise ValueError("prepare concurrency must be at least 1")
-    settings = replace(context.settings, target=_repo(image_repo)) if image_repo is not None else context.settings
-    if settings.target:
-        _repo(settings.target)
     registry = _RegistryCache(context.registry, metrics, store)
     context = replace(
         context,
-        settings=settings,
         registry=registry,
-        adaptations={},
-        builder=_MeasuredBuilder(context.builder, metrics) if context.builder is not None else None,
         image_accounts=_Accounts(context.image_accounts, metrics, store)
         if context.image_accounts is not None
         else None,
@@ -705,7 +604,6 @@ def _prepare(
                         row,
                         context=context,
                         adapter=adapter,
-                        require_prebuilt_images=require_prebuilt_images,
                         work=work,
                         published=published,
                         metrics=metrics,
@@ -742,7 +640,7 @@ def _prepare(
                         )
                         continue
                     dataset.append({"task": key, "annotations": row.annotations, "parameters": row.parameters})
-                    reports[i].update(status="prepared", stage="package", code="complete", images=packaged[key].images)
+                    reports[i].update(status="prepared", stage="package", code="complete", images=packaged[key].sources)
             finally:
                 for future in futures.values():
                     future.cancel()
@@ -751,7 +649,7 @@ def _prepare(
             metrics.call("package", writer.publish, dataset)
     finally:
         measurements = metrics.snapshot()
-        images = sorted(published | set(context.adaptations.values()))
+        images = sorted(published)
         _write(report, {"rows": reports, "images": images, "metrics": measurements})
     return PrepareResult(
         output,

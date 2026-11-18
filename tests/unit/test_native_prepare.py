@@ -1,4 +1,4 @@
-"""Host select/prepare: atomic all-row releases, USER0 dedup, explicit mirror, failure cleanup."""
+"""Host select/prepare: atomic all-row releases, source-image rules, failure cleanup."""
 
 from __future__ import annotations
 
@@ -13,17 +13,12 @@ import pytest
 pytest.importorskip("harbor")
 from harbor.models.task.config import TaskConfig
 
-from flotilla.build.builder import BuildRequest
-from flotilla.build.images import BuildSettings, ImageError
 from flotilla.integrations.native_import import SelectedTask
 from flotilla.native import ReleaseReader, read_dataset
 from flotilla.platform.base import Capabilities
 from flotilla.prepare import PreparationError, prepare, select
-from flotilla.testing.build import DIGEST, FakeBuilder, FakeExport, FakeRegistry, _caps, _ctx
+from flotilla.testing.build import DIGEST, FakeExport, FakeRegistry, _caps, _ctx
 from flotilla.testing.compose import OfflineComposeAdapter
-
-RUNTIME_A = "sha256:" + "ef" * 32
-RUNTIME_B = "sha256:" + "9a" * 32
 
 
 def harbor_task(
@@ -103,22 +98,16 @@ def test_select_zero_selection_and_input_failures_are_fatal(tmp_path: Path) -> N
     assert next(r for r in reports if r["task_key"] == "broken")["code"] == "input_or_tool_error"
 
 
-def test_select_require_prebuilt_images_rejects_dockerfile_services(tmp_path: Path) -> None:
+def test_select_rejects_dockerfile_tasks_as_out_of_scope(tmp_path: Path) -> None:
+    """Building an image is a separate job: preparation only consumes published ones."""
     root = tmp_path / "harbor"
     harbor_task(root, "src", image=None, Dockerfile="FROM r.io/base:1\n")
     report = tmp_path / "r.json"
     with pytest.raises(PreparationError, match="zero tasks"):
-        select(
-            root,
-            caps=_caps(),
-            report=report,
-            compose_adapter=ADAPTER(),
-            require_prebuilt_images=True,
-        )
-    reason = json.loads(report.read_text())[0]["reason"]
-    assert "must be published first" in reason and "main" in reason
-    result = select(root, caps=_caps(), compose_adapter=ADAPTER())  # generic Flotilla may build
-    assert [row.task_key for row in result.rows] == ["src"]
+        select(root, caps=_caps(), report=report, compose_adapter=ADAPTER())
+    entry = json.loads(report.read_text())[0]
+    assert entry["status"] == "rejected"
+    assert "building an image is a different job" in entry["reason"]
 
 
 def test_select_rejects_multi_step_tasks_as_a_protocol_constraint(tmp_path: Path) -> None:
@@ -152,17 +141,12 @@ volumes:
 """,
     )
     out, report = tmp_path / "release", tmp_path / "report.json"
-    builder = FakeBuilder()
     result = prepare(
         _selection(tmp_path),
         out=out,
         name="rel",
-        image_repo="r.io/ns/out",
         report=report,
-        context=_ctx(
-            builder=builder,
-            image_export=FakeExport({"/var/lib/data": {"seed.txt": "from-image"}}),
-        ),
+        context=_ctx(image_export=FakeExport({"/var/lib/data": {"seed.txt": "from-image"}})),
         compose_adapter=ADAPTER(),
     )
     # Complete release layout published by a single rename; staging is gone.
@@ -179,8 +163,6 @@ volumes:
     assert phases["import_normalize"]["calls"] == 2
     assert phases["image_config"]["calls"] == 2  # two distinct images, not three services
     assert phases["image_extract"]["calls"] == 1
-    assert phases["user0_build_push"]["calls"] == phases["application_build_push"]["calls"] == 0
-    assert phases["registry_copy"]["calls"] == 0
     assert phases["package"]["calls"] == 3  # two tasks, final publication
     assert all(phase["seconds"] >= 0 and phase["failed"] == 0 for phase in phases.values())
     assert result.metrics["elapsed_s"] >= phases["package"]["seconds"]
@@ -189,8 +171,6 @@ volumes:
     tasks = {task.key: task for task in (reader.read_task(row.task) for row in rows)}
     assert set(tasks) == {"plain", "seeded"}
     assert sorted(reader.instruction(row.task) for row in rows) == ["Do it.\n", "Solve the task.\n"]
-    # Root-user images are linked by digest; nothing was built or copied.
-    assert builder.requests == []
     plain_task = tasks["plain"]
     assert set(plain_task.roles) == {"main"}  # no verifier environment was declared
     assert plain_task.verification is None and plain_task.artifacts == ()
@@ -220,7 +200,6 @@ volumes:
     assert provenance["source_images"] == {
         "main": {"main": f"r.io/ns/app@{DIGEST}", "db": f"r.io/b@{DIGEST}"},
     }
-    assert provenance["adaptation"] == "user0-v1"
     assert str(tmp_path) not in json.dumps(provenance)
 
 
@@ -237,7 +216,6 @@ def test_prepare_leaves_out_failed_rows_and_reports_every_row(tmp_path: Path) ->
         _selection(tmp_path),
         out=out,
         name="rel",
-        image_repo="r.io/ns/out",
         report=report,
         context=_ctx(),
         compose_adapter=ADAPTER(),
@@ -281,145 +259,32 @@ def test_prepare_output_collision_and_identical_row_dedup(tmp_path: Path) -> Non
         prepare([row], out=out, name="rel", context=_ctx(), compose_adapter=ADAPTER())
 
 
-# ───────────────────────────── USER0 adaptation ─────────────────────────────
+# ───────────────────────────── non-root source images ─────────────────────────────
 
 
-def test_prepare_adapts_nonroot_images_once_per_digest(tmp_path: Path) -> None:
-    root = tmp_path / "harbor"
-    harbor_task(
-        root,
-        "alpha",
-        tests=True,
-        extra_toml='[verifier]\n[verifier.environment]\ndocker_image = "r.io/ns/app:1"\n',
-    )
-    harbor_task(root, "beta")  # shares the source digest with alpha
-    harbor_task(root, "gamma", image="r.io/other:1")
-    builder = FakeBuilder(digests=[RUNTIME_A, RUNTIME_B])
-    out = tmp_path / "release"
-    result = prepare(
-        _selection(tmp_path),
-        out=out,
-        name="rel",
-        image_repo="r.io/ns/out",
-        context=_ctx(builder=builder, registry=FakeRegistry(user="1000:1001", published=builder.published)),
-        compose_adapter=ADAPTER(),
-    )
-    assert len(builder.requests) == 2  # one per distinct (target, image) pair
-    assert result.metrics["phases"]["user0_build_push"]["calls"] == 2
-    assert result.metrics["phases"]["role_prepare"]["calls"] == 4  # three main, one verifier
-    assert all(r.tag.startswith("r.io/ns/out:user0-") for r in builder.requests)
-    assert len({r.tag for r in builder.requests}) == 2
-    reader = ReleaseReader(out)
-    tasks = {t.key: t for t in (reader.read_task(row.task) for row in read_dataset(out / "dataset.jsonl"))}
-    shared = f"r.io/ns/out@{RUNTIME_A}"
-    alpha = tasks["alpha"]
-    assert set(alpha.roles) == {"main", "verifier"}  # verifier role declared via task.toml
-    for role in ("main", "verifier"):
-        assert alpha.roles[role].units["main"].image == shared  # cross-role dedup
-        assert alpha.roles[role].units["main"].context.uid == 1000  # app identity preserved
-        assert alpha.roles[role].units["main"].context.gid == 1001
-    assert alpha.verification is not None and alpha.verification.role == "verifier"
-    assert tasks["beta"].roles["main"].units["main"].image == shared  # cross-task dedup
-    assert tasks["gamma"].roles["main"].units["main"].image == f"r.io/ns/out@{RUNTIME_B}"
-    for task in tasks.values():
-        assert task.provenance["adaptation"] == "user0-v1"
-        assert task.provenance["source_images"]["main"]["main"] == (
-            f"r.io/other@{DIGEST}" if task.key == "gamma" else f"r.io/ns/app@{DIGEST}"
-        )
-    assert set(result.images) == {shared, f"r.io/ns/out@{RUNTIME_B}"}
-
-
-def test_prepare_requires_image_repo_before_any_publication(tmp_path: Path) -> None:
-    root = tmp_path / "harbor"
-    harbor_task(root, "plain")
-    builder, registry = FakeBuilder(), FakeRegistry(user="1000:1001")
+def test_prepare_rejects_a_nonroot_image_instead_of_adapting_it(tmp_path: Path) -> None:
+    """flotilla no longer rewrites and republishes images; a non-root source is the publisher's to fix."""
+    harbor_task(tmp_path / "harbor", "plain")
     out, report = tmp_path / "release", tmp_path / "report.json"
-    with pytest.raises(PreparationError, match="no selected row prepared"):
+    with pytest.raises(PreparationError, match="no release published"):
         prepare(
             _selection(tmp_path),
             out=out,
             name="rel",
             report=report,
-            context=_ctx(
-                builder=builder,
-                registry=registry,
-                settings=BuildSettings(pullable_registries=("r.io",)),
-            ),
+            context=_ctx(registry=FakeRegistry(user="1000:1001")),
             compose_adapter=ADAPTER(),
         )
-    assert builder.requests == [] and registry.copied == [] and not out.exists()
+    assert not out.exists()
     reason = next(r for r in json.loads(report.read_text())["rows"] if r["status"] == "failed")["reason"]
-    assert "--image-repo" in reason
-    phases = json.loads(report.read_text())["metrics"]["phases"]
-    assert phases["image_preflight"]["failed"] == 1
-    assert phases["user0_build_push"]["calls"] == phases["package"]["calls"] == 0
-
-
-def test_prepare_image_repo_overrides_context_target(tmp_path: Path) -> None:
-    root = tmp_path / "harbor"
-    harbor_task(root, "plain")
-    builder = FakeBuilder(digests=[RUNTIME_A])
-    prepare(
-        _selection(tmp_path),
-        out=tmp_path / "release",
-        name="rel",
-        image_repo="r.io/x/y",
-        context=_ctx(builder=builder, registry=FakeRegistry(user="1000:1001", published=builder.published)),
-        compose_adapter=ADAPTER(),
-    )
-    assert [r.tag.split(":")[0] for r in builder.requests] == ["r.io/x/y"]
-
-
-# ───────────────────────────── explicit mirror ─────────────────────────────
-
-
-def test_prepare_mirrors_only_when_explicitly_configured(tmp_path: Path) -> None:
-    root = tmp_path / "harbor"
-    harbor_task(root, "public", image="docker.io/library/redis:7")
-    builder, registry = FakeBuilder(), FakeRegistry()
-    out, report = tmp_path / "release", tmp_path / "report.json"
-    with pytest.raises(PreparationError, match="no selected row prepared"):
-        prepare(
-            _selection(tmp_path),
-            out=out,
-            name="rel",
-            report=report,
-            context=_ctx(builder=builder, registry=registry),
-            compose_adapter=ADAPTER(),
-        )
-    failure = next(r for r in json.loads(report.read_text())["rows"] if r["status"] == "failed")
-    assert "mirror_images" in failure["reason"]
-    assert registry.copied == [] and builder.requests == [] and not out.exists()
-
-    mirror, mirror_builder = FakeRegistry(), FakeBuilder()
-    ctx = _ctx(
-        builder=mirror_builder,
-        registry=mirror,
-        settings=BuildSettings(pullable_registries=("r.io",), mirror_images=True, target="r.io/ns/out"),
-    )
-    result = prepare(
-        _selection(tmp_path),
-        out=tmp_path / "mirrored",
-        name="rel",
-        context=ctx,
-        compose_adapter=ADAPTER(),
-    )
-    assert mirror_builder.requests == []  # mirroring is a registry copy, not a build
-    assert len(mirror.copied) == 1
-    assert result.metrics["phases"]["registry_copy"]["calls"] == 1
-    assert result.metrics["phases"]["user0_build_push"]["calls"] == 0
-    source, target = mirror.copied[0]
-    assert source == f"docker.io/library/redis@{DIGEST}" and target.startswith("r.io/ns/out:mirror-")
-    reader = ReleaseReader(result.output)
-    task = reader.read_task(read_dataset(result.output / "dataset.jsonl")[0].task)
-    assert task.roles["main"].units["main"].image == f"r.io/ns/out@{DIGEST}"  # remote digest read-back
-    assert result.images == (f"r.io/ns/out@{DIGEST}",)
+    assert "USER '1000:1001'" in reason and "USER 0:0" in reason
+    assert json.loads(report.read_text())["metrics"]["phases"]["package"]["calls"] == 0
 
 
 # ───────────────────────────── tmpfs mount targets ─────────────────────────────
 
 
-def test_prepare_keeps_tmpfs_paths_without_building(tmp_path: Path) -> None:
+def test_prepare_keeps_tmpfs_mount_paths(tmp_path: Path) -> None:
     root = tmp_path / "harbor"
     harbor_task(
         root,
@@ -433,54 +298,18 @@ def test_prepare_keeps_tmpfs_paths_without_building(tmp_path: Path) -> None:
       - {type: tmpfs, target: /scratch}
 """,
     )
-    builder, export = FakeBuilder(), FakeExport()
     enhanced = replace(_caps(), native_tmpfs=True, readonly_rootfs=True)
     result = prepare(
         _selection(tmp_path, caps=enhanced),
         out=tmp_path / "release",
         name="rel",
-        context=_ctx(builder=builder, image_export=export, caps=enhanced),
+        context=_ctx(image_export=FakeExport(), caps=enhanced),
         compose_adapter=ADAPTER(),
     )
-    assert builder.requests == []  # mount directories are runtime responsibilities
     reader = ReleaseReader(result.output)
     task = reader.read_task(read_dataset(result.output / "dataset.jsonl")[0].task)
     unit = task.roles["main"].units["main"]
     assert [m.mount_path for m in unit.tmpfs_mounts] == ["/cache", "/scratch"]
-
-
-# ───────────────────────────── failure cleanup ─────────────────────────────
-
-
-class PushOutageBuilder(FakeBuilder):
-    """Serves the first build, then simulates a registry outage mid-prepare."""
-
-    def build(self, request: BuildRequest) -> str:
-        if self.requests:
-            raise ImageError("registry unavailable during push")
-        return super().build(request)
-
-
-def test_prepare_failure_reports_pushed_images_and_removes_work_files(tmp_path: Path) -> None:
-    root = tmp_path / "harbor"
-    harbor_task(root, "alpha")
-    harbor_task(root, "beta", image="r.io/other:1")
-    builder = PushOutageBuilder(digests=[RUNTIME_A])
-    out, report = tmp_path / "release", tmp_path / "report.json"
-    result = prepare(
-        _selection(tmp_path),
-        out=out,
-        name="rel",
-        image_repo="r.io/ns/out",
-        report=report,
-        context=_ctx(builder=builder, registry=FakeRegistry(user="1000:1001", published=builder.published)),
-        compose_adapter=ADAPTER(),
-    )
-    assert [row.task for row in read_dataset(out / "dataset.jsonl")] == ["alpha"] and result.failed == 1
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["harbor", "release", "report.json", "selected.jsonl"]
-    assert json.loads(report.read_text())["images"] == [f"r.io/ns/out@{RUNTIME_A}"]
-    interrupted = json.loads(report.read_text())["metrics"]["phases"]["user0_build_push"]
-    assert interrupted["calls"] == 2 and interrupted["failed"] == 1
 
 
 def test_prepare_metrics_measure_real_calls_not_seed_cache_hits(
@@ -528,21 +357,6 @@ volumes:
     assert phases["role_prepare"]["seconds"] == 3.5  # inclusive, not a second 3.5 s cost
     assert result.metrics["elapsed_s"] == 3.5
     assert "metrics" not in (result.output / "dataset.jsonl").read_text()
-
-
-def test_prepare_metrics_separate_application_build_from_user0(tmp_path: Path) -> None:
-    harbor_task(tmp_path / "harbor", "application", image=None, Dockerfile="FROM r.io/base:1\nRUN true\n")
-    builder = FakeBuilder()
-    result = prepare(
-        _selection(tmp_path),
-        out=tmp_path / "release",
-        name="rel",
-        context=_ctx(builder=builder),
-        compose_adapter=ADAPTER(),
-    )
-    assert len(builder.requests) == 1
-    assert result.metrics["phases"]["application_build_push"]["calls"] == 1
-    assert result.metrics["phases"]["user0_build_push"]["calls"] == 0
 
 
 class _RefusingAdapter(OfflineComposeAdapter):
@@ -691,33 +505,21 @@ def test_seed_cache_does_not_reuse_an_entry_without_its_record(tmp_path: Path) -
 # ───────────────────────────── concurrency ─────────────────────────────
 
 
-def test_concurrent_tasks_build_a_shared_adaptation_once_and_keep_row_order(tmp_path: Path) -> None:
-    import threading
-
+def test_concurrent_tasks_read_a_shared_image_once_and_keep_row_order(tmp_path: Path) -> None:
     root = tmp_path / "harbor"
     names = ("alpha", "beta", "gamma")
     for name in names:
-        harbor_task(root, name)  # one non-root source digest: one shared USER0 adaptation
-    builder = FakeBuilder(digests=[RUNTIME_A])
-    barrier = threading.Barrier(len(names), timeout=10)
-
-    class RacingRegistry(FakeRegistry):
-        def find(self, name: str, reference: str) -> str | None:
-            found = super().find(name, reference)
-            barrier.wait()  # every task looks the adaptation up before any of them builds it
-            return found
-
+        harbor_task(root, name)  # one source image shared by every task
+    registry = FakeRegistry()
     result = prepare(
         _selection(tmp_path),
         out=tmp_path / "release",
         name="rel",
-        image_repo="r.io/ns/out",
         concurrency=len(names),
-        context=_ctx(builder=builder, registry=RacingRegistry(user="1000:1001", published=builder.published)),
+        context=_ctx(registry=registry),
         compose_adapter=ADAPTER(),
     )
-    assert len(builder.requests) == 1
     assert [row.task for row in read_dataset(tmp_path / "release" / "dataset.jsonl")] == list(names)
     reader = ReleaseReader(tmp_path / "release")
-    assert {reader.read_task(n).roles["main"].units["main"].image for n in names} == {f"r.io/ns/out@{RUNTIME_A}"}
-    assert result.metrics["phases"]["user0_build_push"]["calls"] == 1
+    assert {reader.read_task(n).roles["main"].units["main"].image for n in names} == {f"r.io/ns/app@{DIGEST}"}
+    assert result.metrics["counts"]["registry_cache_hits"] >= len(names) - 1  # read once, reused

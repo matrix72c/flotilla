@@ -1,7 +1,7 @@
-"""Task file export and the offline build driver used by `flotilla prepare`.
+"""Task file export and the offline preparation driver used by `flotilla prepare`.
 
-Fake registry / builder / image exporter for driver tests; no network or docker. They verify ordering, dispositions,
-skips and error attribution.
+Fake registry and image exporter for driver tests; no network or docker. They verify ordering, skips and
+error attribution.
 """
 
 from __future__ import annotations
@@ -11,7 +11,6 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
-from flotilla.build.builder import BuildRequest
 from flotilla.build.driver import BuildContext, build_task
 from flotilla.build.images import BuildSettings
 from flotilla.compose.adapter import ComposeConfigAdapter
@@ -29,11 +28,7 @@ PULLABLE = ("r.io",)
 
 
 class FakeRegistry:
-    """Registry double with a publication ledger shared with :class:`FakeBuilder`.
-
-    Copies and pushes record the digest a real registry would serve afterwards, so
-    digest reads after a publication resolve to the published manifest.
-    """
+    """Registry double: digest resolution and image configs, read-only like the real protocol."""
 
     def __init__(
         self,
@@ -41,23 +36,16 @@ class FakeRegistry:
         missing: Sequence[str] = (),
         digests: Mapping[str, str] | None = None,
         user: str = "0:0",
-        published: dict[str, str] | None = None,
     ) -> None:
         self._missing = set(missing)
         self.configs = 0
         self.digests = dict(digests or {})
         self.user = user
-        self.published = published if published is not None else {}
         self.resolved: list[tuple[str, str]] = []
-        self.copied: list[tuple[str, str]] = []
 
     def digest(self, name: str, reference: str) -> str:
         from flotilla.build.images import ImageError
 
-        key = f"{name}@{reference}" if reference.startswith("sha256:") else f"{name}:{reference}"
-        pushed = self.published.get(key)
-        if pushed is not None:
-            return pushed
         if reference.startswith("sha256:"):
             return reference  # digest references are self-describing
         if any(m in f"{name}:{reference}" for m in self._missing):
@@ -65,30 +53,9 @@ class FakeRegistry:
         self.resolved.append((name, reference))
         return self.digests.get(f"{name}:{reference}", DIGEST)
 
-    def find(self, name: str, reference: str) -> str | None:
-        return self.published.get(f"{name}:{reference}")
-
     def image_config(self, pinned: str) -> Mapping[str, Any]:
         self.configs += 1
         return {"Cmd": ["/bin/bash"], "WorkingDir": "/app", "User": self.user}
-
-    def copy(self, source: str, target: str) -> None:
-        self.copied.append((source, target))
-        self.published[target] = source.rpartition("@")[2]
-
-
-class FakeBuilder:
-    def __init__(self, *, digests: Sequence[str] = (), published: dict[str, str] | None = None) -> None:
-        self.requests: list[BuildRequest] = []
-        self._digests = iter(digests)
-        #: tag -> manifest digest, shared with the registry when wired by `_ctx`.
-        self.published = published if published is not None else {}
-
-    def build(self, request: BuildRequest) -> str:
-        self.requests.append(request)
-        digest = next(self._digests, DIGEST)
-        self.published[request.tag] = digest
-        return digest
 
 
 class FakeExport:
@@ -145,18 +112,11 @@ def _task(root: Path, name: str, *, toml: str = "", compose: str | None = None, 
 
 
 def _ctx(**kw: Any) -> BuildContext:
-    builder = kw.get("builder", FakeBuilder())
-    registry = kw.get("registry", FakeRegistry())
-    export = kw.get("image_export", FakeExport())
-    if isinstance(builder, FakeBuilder) and isinstance(registry, FakeRegistry):
-        # One publication ledger per context: builder pushes are visible to digest reads.
-        registry.published = builder.published
     defaults: dict[str, Any] = {
-        "settings": BuildSettings(pullable_registries=PULLABLE, target="r.io/ns/out"),
+        "settings": BuildSettings(pullable_registries=PULLABLE),
         "caps": _caps(),
-        "registry": registry,
-        "builder": builder,
-        "image_export": export,
+        "registry": kw.get("registry", FakeRegistry()),
+        "image_export": kw.get("image_export", FakeExport()),
     }
     return BuildContext(**{**defaults, **kw})
 

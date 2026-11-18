@@ -18,7 +18,7 @@ from flotilla.platform.filesystem import memory_bytes
 from flotilla.platform.opensandbox.filesystem import INTERNAL_LIMITS, parse_effective
 from flotilla.runtime.planning import _resolve_tmpfs, to_plan
 from flotilla.scan import scan
-from flotilla.testing.build import FakeBuilder, FakeExport, _ctx, _task
+from flotilla.testing.build import FakeExport, _ctx, _task
 from flotilla.testing.compose import offline_task as load_task
 from flotilla.testing.config import config_data
 from flotilla.testing.reports import ok, report
@@ -46,9 +46,8 @@ def test_compose_filesystem_fields_roundtrip_to_runtime(tmp_path: Path) -> None:
 """,
         )
     )
-    builder = FakeBuilder()
     export = FakeExport()
-    ctx = _ctx(builder=builder, image_export=export)
+    ctx = _ctx(image_export=export)
     ctx = replace(
         ctx, caps=replace(ctx.caps, readonly_rootfs=True, native_tmpfs=True, filesystem_limits=INTERNAL_LIMITS)
     )
@@ -62,7 +61,6 @@ def test_compose_filesystem_fields_roundtrip_to_runtime(tmp_path: Path) -> None:
         TmpfsMount("/cache", 8 * 1024**2, 0o700),
     )
     # Mount points and the readonly runtime dir are runtime responsibilities: no derived image build.
-    assert builder.requests == []
     assert not any(f.kind == "equivalent" and "tmpfs" in f.path for f in manifest.findings)
     with pytest.raises(ValueError, match="schema"):
         Manifest.load_json(manifest.dump_json().replace(f'"schema": {SCHEMA_VERSION}', '"schema": 5'))
@@ -151,10 +149,8 @@ def test_readonly_rootfs_promotes_single_writer_mounts_to_real_storage() -> None
 
 def test_unsupported_tmpfs_is_rejected_before_building(tmp_path: Path) -> None:
     task = load_task(_task(tmp_path, "fs", compose="services:\n  main:\n    image: r.io/app\n    tmpfs: /tmp\n"))
-    builder = FakeBuilder()
-    outcome = build_task(task, tmp_path / "out", _ctx(builder=builder))
+    outcome = build_task(task, tmp_path / "out", _ctx())
     assert outcome.status == "rejected" and "native_tmpfs" in (outcome.reason or "")
-    assert not builder.requests
 
 
 def test_report_requires_probed_evidence_and_the_internal_dialect() -> None:

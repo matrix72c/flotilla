@@ -31,23 +31,20 @@ def _build_parser() -> argparse.ArgumentParser:
     command.add_argument("tasks", nargs="+", type=Path)
     command.add_argument("--deployment", required=True, type=Path)
     command.add_argument("--out", type=Path)
-    sel = sub.add_parser("select", help="select host-side Harbor tasks without building or creating sandboxes")
+    sel = sub.add_parser("select", help="select host-side Harbor tasks without creating sandboxes")
     sel.add_argument("--host-root", required=True, type=Path)
     sel.add_argument("--deployment", required=True, type=Path)
     sel.add_argument("--out", required=True, type=Path)
     sel.add_argument("--report", required=True, type=Path)
-    sel.add_argument("--require-prebuilt-images", action="store_true")
-    pr = sub.add_parser("prepare", help="prepare a native task release; build and publish necessary USER0 images")
+    pr = sub.add_parser("prepare", help="prepare a native task release from published images")
     pr.add_argument(
         "selected", type=Path, help="host-side selected.jsonl; old warmup task-key arguments are unsupported"
     )
     pr.add_argument("--deployment", required=True, type=Path)
     pr.add_argument("--env", type=Path, help="explicit preparation credentials; platform credentials are not needed")
-    pr.add_argument("--image-repo", help="output repository without tag/digest; overrides deployment build.target")
     pr.add_argument("--out", required=True, type=Path, help="new native release directory (not uploaded automatically)")
     pr.add_argument("--name", required=True, help="release name; rows carry it and [task_releases.<name>] binds it")
     pr.add_argument("--report", required=True, type=Path)
-    pr.add_argument("--require-prebuilt-images", action="store_true")
     pr.add_argument(
         "--cache",
         type=Path,
@@ -154,8 +151,6 @@ def _prepare(args: argparse.Namespace) -> int:
         out=args.out,
         name=args.name,
         report=args.report,
-        image_repo=args.image_repo,
-        require_prebuilt_images=args.require_prebuilt_images,
         cache=args.cache,
     )
     print(f"native release prepared: {args.out} ({result.prepared} rows); publish it using your storage tools")
@@ -173,7 +168,6 @@ def _select(args: argparse.Namespace) -> int:
         caps=cfg.platform_capabilities(),
         out=args.out,
         report=args.report,
-        require_prebuilt_images=args.require_prebuilt_images,
     )
     print(f"selected tasks: {args.out}")
     return 0

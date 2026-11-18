@@ -17,10 +17,8 @@ import pytest
 
 from flotilla import Flotilla, FlotillaError
 from flotilla._io import owned_io
-from flotilla.build.builder import base_images
 from flotilla.build.docker import DockerRegistry, extract_archive
 from flotilla.build.images import ImageError
-from flotilla.build.keys import entries
 from flotilla.compose.normalize import normalize
 from flotilla.config import FlotillaConfig
 from flotilla.platform.base import ExecAttempt, InstanceHandle, ProcessSpec
@@ -49,12 +47,6 @@ def test_binary_multipart_reselects_colliding_boundary(monkeypatch: pytest.Monke
     assert parts[1].get_payload(decode=True) == content
 
 
-def test_from_options_continuations_aliases_and_arg() -> None:
-    assert base_images(
-        "FROM --platform=linux/amd64 \\\n ubuntu:24.04 AS build\nFROM BUILD AS later\nFROM ${BASE}\nFROM scratch"
-    ) == ["ubuntu:24.04", "${BASE}"]
-
-
 def test_missing_amd64_never_selects_arm(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(DockerRegistry, "_run", lambda *_: json.dumps({"linux/arm64": {"config": {}}}))
     with pytest.raises(ImageError, match="linux/amd64"):
@@ -72,9 +64,7 @@ def test_archive_metadata_is_independent_of_local_owner(tmp_path: Path) -> None:
     root.mkdir()
     owners: dict[str, tuple[int, int, int]] = {}
     assert extract_archive(data, root, owners)
-    (tmp_path / "file-identities.json").write_text(json.dumps(owners))
-    record = entries(root)[0]
-    assert (record["uid"], record["gid"], record["mode"]) == (45678, 45679, "6751")
+    assert owners["payload"] == (45678, 45679, 0o6751)
     assert (root / "payload").read_bytes() == b"data"
 
 

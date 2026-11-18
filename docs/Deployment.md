@@ -4,7 +4,7 @@ A deployment provides a sandbox endpoint, an image registry, shared storage, nat
 
 ## Separate preparation from execution
 
-Host preparation needs the optional Harbor importer, pinned official Compose and Docker/registry tools. These tools run in an operator-controlled CPU environment, not in business sandboxes. They resolve source images, capture original application identity, publish required USER0 adaptations and produce immutable native releases.
+Host preparation needs the optional Harbor importer, pinned official Compose and Docker/registry tools. These tools run in an operator-controlled CPU environment, not in business sandboxes. They read source images — digests, execution identity and image volume contents — and produce immutable native releases. Preparation never builds or publishes an image, so it needs no registry write access.
 
 The platform Anchor needs the matching installed Flotilla runtime and filesystem tools. It does **not** need Harbor, Compose, Docker/BuildKit, registry-push credentials or source task directories. Never expose a host Docker socket or unauthenticated build endpoint to task/verifier sandboxes. Normal pulls of the final fixed images remain a platform responsibility.
 
@@ -62,10 +62,9 @@ concurrency = 4
 
 [build]
 pullable_registries = ["registry.example.org"]
-target = "registry.example.org/team/task-runtime"
 ```
 
-`--image-repo` overrides `build.target`. A target does not request mirroring all images: mirroring remains explicit. Keep registry credentials outside build contexts/releases. A read-only Docker auth directory may need a separate writable `BUILDX_CONFIG` directory for tool state; do not make the credential mount writable to accommodate it.
+Every service image must already be published somewhere the platform can pull from; a task naming anything else is rejected during selection. Preparation reads registries and never writes to them, so the Docker configuration it uses needs pull credentials only. Keep those credentials outside releases.
 
 Use [Native tasks](Native_Tasks.md) for `select` and `prepare`. Users publish the resulting complete release with existing storage tools. Bind its local and platform locations explicitly:
 
