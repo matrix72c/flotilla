@@ -26,7 +26,7 @@ Filesystem checks run when the explicitly selected protocol can express them; un
 
 The report records `runtime.readonly_rootfs`, `storage.native_tmpfs`, and `storage.shm_size`. Only `passed` ordinary-runtime evidence enables these capabilities. The deployment must still select `sandbox-system-v1`; with `upstream` these capabilities are off. A configuration that differs from the probed `evidence_profile` only logs a warning. Legacy reports are rejected and must be reprobed.
 
-Checks include EROFS root writes, writable-volume transfer, `/etc/hosts`, actual tmpfs type, ownership/mode, non-root writes, capacity exhaustion, persistence across exec, output delivery while full, and separation between instances. The combined readonly/tmpfs behavior is also checked. Probe cleanup is bounded and recorded. Unit mocks are not real platform acceptance; no compatible release image has been validated for the current redesign.
+Checks include EROFS root writes, writable-volume transfer, `/etc/hosts`, actual tmpfs type, ownership/mode, non-root writes, capacity exhaustion, persistence across exec, output delivery while full, and separation between instances. The combined readonly/tmpfs behavior is also checked. Probe cleanup is bounded and recorded. Unit mocks are not real platform acceptance.
 
 ## Task configuration
 
@@ -79,7 +79,7 @@ With the selected `sandbox-system-v1` protocol the probe requests 96 MiB, then c
 
 ## Preparation and runtime storage
 
-The current measured internal container backend supports missing mount directories, including nested targets with readonly rootfs. The native probe profile checks this behavior rather than assuming it from protocol selection. Preparation does not inspect image paths, and it produces no image at all. A target that is a symlink in the image is resolved inside the container's root filesystem by the container runtime, as Docker does; a target that is a regular file fails at sandbox creation. The real tmpfs mount hides existing image content.
+The current measured internal container backend supports missing mount directories, including nested targets with readonly rootfs. The native probe profile checks this behavior rather than assuming it from protocol selection. Flotilla does not inspect image paths, and produces no image at all. A target that is a symlink in the image is resolved inside the container's root filesystem by the container runtime, as Docker does; a target that is a regular file fails at sandbox creation. The real tmpfs mount hides existing image content.
 
 For read-only services, single-service writable named volumes and bind mounts become real environment-owned storage mounts rather than writable image directories. Shared-reference relationships are retained; a named volume starts empty either way.
 
@@ -97,7 +97,7 @@ HTTP 400 and 501 are non-retryable configuration/capability failures. No filesys
 
 ## Verification
 
-A task that declares tmpfs requires native support; there is no disk-directory approximation. Native task releases preserve both requirements in their role manifests. The native release protocol is separately versioned; do not edit schema numbers to bypass its compatibility checks.
+A task that declares tmpfs requires native support; there is no disk-directory approximation. Both requirements are carried per unit in the trial plan, and a deployment without matching evidence refuses the task rather than relaxing it.
 
 After probing, run the opt-in public API contract to cover image preparation, service logs, directory transfers, actual mount behavior and confirmed cleanup:
 

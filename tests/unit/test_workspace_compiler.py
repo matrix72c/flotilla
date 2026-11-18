@@ -16,8 +16,6 @@ from unittest.mock import Mock
 
 import pytest
 
-pytest.importorskip("harbor")
-
 from flotilla.integrations import workspace as compiler
 from flotilla.testing.planning import plan as plan_environment
 

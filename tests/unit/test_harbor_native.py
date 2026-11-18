@@ -10,8 +10,6 @@ from typing import Any
 from unittest.mock import AsyncMock, Mock
 
 import pytest
-
-pytest.importorskip("harbor.models.extensions")
 import toml  # type: ignore[import-untyped]
 from harbor.models.job.config import JobConfig
 from harbor.models.task.config import TaskConfig

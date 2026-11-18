@@ -1,71 +1,85 @@
-# Portable native task releases
+# Running published tasks
 
-Flotilla owns the execution protocol. Harbor is an optional **host-side importer** and an optional evaluation consumer; it is not an execution dependency. Voyager uses the same reader and attempt lifecycle.
+Flotilla owns the execution protocol. A task is a published directory; running it is a local
+computation over that directory plus each image's config, so there is no build step, no
+intermediate artifact and nothing Flotilla writes and reads back. Harbor supplies the task
+format and is a required dependency; using Harbor as an evaluation consumer is optional.
 
-## Install and prepare tools
+## Install
 
-Use Linux x86_64 and Python 3.12. Install a wheel from this repository or a full Git commit from `https://github.com/matrix72c/flotilla.git`. The distribution, import and executable are `flotilla`. The public PyPI project with that name is unrelated: do not use bare `pip install flotilla`. Do not install `flotilla-compose` alongside the renamed package. Use a new environment rather than modifying an environment used by running jobs.
+Use Linux x86_64 and Python 3.12. Install a wheel from this repository or a full Git commit from
+`https://github.com/matrix72c/flotilla.git`. The distribution, import and executable are
+`flotilla`. The public PyPI project with that name is unrelated: do not use bare
+`pip install flotilla`. Do not install `flotilla-compose` alongside the renamed package. Use a new
+environment rather than modifying an environment used by running jobs.
 
-Install the `harbor` extra when importing Harbor tasks or using Harbor as a consumer. The normal native reader and execution path need neither Harbor nor Docker Compose. Host import uses the official pinned Compose normalizer; image preparation needs Docker and registry tools. Those tools do not belong in the execution Anchor. A CPU preparation environment does not require Torch, CUDA, XTuner or LMDeploy.
+Nothing needs Docker, a Compose executable or a GPU stack. Flotilla loads Compose itself and reads
+image configs from the registry over HTTP, by digest. A CPU environment does not require Torch,
+CUDA, XTuner or LMDeploy.
 
-## Four stages
-
-```sh
-flotilla probe --deployment deployment.toml --env sandbox.env
-flotilla select --host-root /data/harbor/tasks --deployment deployment.toml \
-  --out selected.jsonl --report selection-report.json
-flotilla prepare selected.jsonl --deployment deployment.toml --env prepare.env \
-  --out /data/releases/example --name example --report prepare-report.json
-```
-
-`probe` writes to the capability path declared in the deployment. An explicit `--out` must resolve to that same path. Probe applies the deployment's required capabilities and security policy and requires confirmed instance, Anchor and storage cleanup. Choosing a filesystem protocol is not proof of its behavior; measured evidence is bound to the deployment and includes missing mount targets.
-
-`select` discovers and normalizes tasks on the preparation host. It does not create sandboxes, export image contents, publish, tokenize or split train/eval data. It writes importer inputs, not runnable native tasks. Multi-step Harbor tasks are rejected by the native protocol itself — the consume-only lifecycle is one agent run plus one verification — not by any consumer option. The selection report lists each service's image and importer warnings. A task that declares `build:` instead of an image is rejected: producing images is a different job, and preparation consumes ones that are already published.
-
-`prepare` resolves application execution identity, commands, environment, healthchecks and image digests from the published images. It never builds, adapts or pushes one, so it needs no registry write access. Every image must be pullable from a registry in `build.pullable_registries`, and its `USER` must be root — the exec daemon is the sandbox entrypoint, and a non-root process is declared with Compose `user` rather than baked into the image. tmpfs and readonly rootfs remain real runtime features; directory creation is not an image concern. Unsupported image paths and identities are rejected, not approximated.
-
-A selected row that fails is left out of the release and its report row carries `status: failed` with the stage and reason; the release holds every row that prepared, and nothing is published only when no row did. The output directory must not exist. Work files live in a temporary sibling directory that is removed afterwards; after correcting a failure, prepare a new release. `prepare.concurrency` tasks are prepared at once; packaging into the release keeps row order.
-
-`--cache <dir>` keeps what depends only on an image digest across runs: image configs and image account databases (`/etc/passwd`, `/etc/group`). A run with the same cache reads these from it instead of reading the image. Entries are keyed by digest, so they never go stale; delete the directory to reclaim space. Never mutate a release used by running jobs.
-
-`--name` names the release. Every dataset row carries it, and the consumer's deployment binds it as `[task_releases.<name>]`. A task selected several times is packaged once; its rows repeat.
-
-The prepare report includes invocation-local `metrics`: total `elapsed_s`, per-phase `calls`/`failed`/`seconds`, and counts of registry cache hits and `stored_hits` (served from `--cache`). `import_normalize` combines importing and Compose normalization. Phase times are inclusive and overlap across concurrent tasks, so do not sum them. Tool calls exclude cache hits and failures remain counted.
-
-## Static publication belongs to the user
-
-Publish the complete output with your existing rsync, shared storage or object-storage tools. Flotilla does not upload a task dataset for you. Preserve bytes and modes. File owners are not part of the release: task inputs are mounted read-only, and `file-identities.json` records the numeric owner and mode each bind source had. A gateway PUT acknowledgement may precede visibility through a separate NFS client; wait for visibility before consuming.
-
-Publish shared-tools and the Agent runtime separately, and grant the platform read access to the fixed runtime images. Do not place credentials, source checkout paths or image archives inside the task release.
+## A task directory
 
 ```text
-release/
-  dataset.jsonl
-  tasks/<task-key>/task.json
-  tasks/<task-key>/instruction.md
-  tasks/<task-key>/files/...      # bind content
-  tasks/<task-key>/tests/...      # hidden tests, staged only for verification
+<task>/
+  task.toml                       # [environment] image and resources, [verifier] env and timeout
+  instruction.md                  # what the agent is asked to do
+  environment/
+    docker-compose.yaml           # the services, or omitted for a single-service task
+    ...                           # bind sources, referenced relative to this directory
+  tests/                          # hidden tests, staged only for verification
 ```
 
-There is no central manifest and nothing is content-addressed: a release is this directory tree. `task.json` (protocol version 2) is authoritative and carries role manifests, the verification interface, explicit artifact handoffs, resolved application identities and fixed images; its file references are relative to the release root. Original Harbor and Compose files are not consulted by consumers. Writable volumes and verification outputs belong to each attempt.
+Every `image:` must be `repo@sha256:...`. A tag is refused: it can move between two reads, so a run
+pinned to one would not be reproducible, and its provenance would not be in the task. Resolve tags
+to digests when the dataset is published.
 
-`dataset.jsonl` is a selection view: preserve or reorder rows, retain duplicates, filter it, or concatenate rows of several releases without rebuilding anything. Each row has `release` (the release name), `task` (the task key, which is its directory under `tasks/`), `annotations` and non-secret `parameters`. Version 1 releases (`manifest.json`, `release_id`/`task_digest` rows) are not readable; prepare them again.
+A task declaring `build:` is refused. Publish the image first and name it; producing images is a
+different job from running them.
 
-## Bind local and platform roots
+Multi-step Harbor tasks are refused by the protocol itself — the lifecycle is one agent run plus one
+verification — not by a consumer option.
+
+## A dataset
+
+A dataset is a directory of task directories. Both sides are declared because neither can infer the
+other: a client path says nothing about how the platform mounts the storage.
 
 ```toml
-[task_releases.example]
-local_root = "./releases/example"
-platform_root = "/shared/releases/example"
+[datasets.example]
+local_root = "./datasets/example"
+platform_root = "/shared/datasets/example"
+# input = "datasets"     # the [inputs.<name>] root it lives on; omitted means the work root
 ```
 
-Local relative paths resolve against the deployment TOML, not the caller's working directory. For host storage, `platform_root` must be confined beneath the configured host root. For PVC storage use the explicit `pvc:<claim>/<configured-root-subpath>/<release-key>` location; bare relative roots are rejected. An arbitrary absolute host path is not treated as a PVC key by stripping its prefix.
+Local relative paths resolve against the deployment file, not the caller's working directory. For
+host storage, `platform_root` is a key relative to the shared root or an absolute path under it. For
+PVC storage use the explicit `pvc:<claim>/<configured-root-subpath>/<key>` form; a bare relative key
+is refused, and an arbitrary absolute host path is not turned into a PVC key by stripping a prefix.
 
-Loading configuration for probe/select/prepare does not open release paths. Consumption reads only `task.json` and `instruction.md` of each selected task from the local root; nothing is hashed or re-verified locally or on the platform. A row's `release` must name a binding. Releases must be maintained by a trusted publisher and read-only to workloads.
+`launches/` and `share/` are refused as dataset roots: those are Flotilla's own state, not task data.
 
-An optional typed `[agent_runtime]` section binds a consumer's runtime layers (arbitrary names, each with local/platform roots); Flotilla validates shape and roots but not which layers exist — that contract belongs to the consumer. Flotilla does not interpret Agent types, GPU resources, reward or training configuration.
+Loading a deployment opens no dataset. Resolving one checks that the root is a directory on declared
+storage; reading a task happens when it is planned.
 
-## Public native consumption API
+## Publishing is yours
+
+Publish the task directories with your existing rsync, shared storage or object-storage tools.
+Flotilla does not upload a dataset for you, and it never writes to one: task files are mounted
+read-only from where they are published. Preserve bytes and modes. A gateway PUT acknowledgement may
+precede visibility through a separate NFS client; wait for visibility before consuming.
+
+Publish shared tools and the agent runtime separately, and grant the platform read access to the
+fixed runtime images. Do not place credentials, source checkout paths or image archives in a dataset.
+
+A dataset must be maintained by a trusted publisher and read-only to workloads. Do not mutate one
+that running jobs are reading.
+
+An optional typed `[agent_runtime]` section binds a consumer's runtime layers (arbitrary names, each
+with local/platform roots); Flotilla validates shape and roots but not which layers exist — that
+contract belongs to the consumer. Flotilla does not interpret agent types, GPU resources, reward or
+training configuration.
+
+## Running one
 
 ```python
 from flotilla import Flotilla
@@ -73,22 +87,36 @@ from flotilla.config import FlotillaConfig
 from flotilla.native import NativeAttempt
 
 config = FlotillaConfig.load("deployment.toml")
-bindings = config.release_bindings()
-rows = bindings.read_dataset("selected-native.jsonl")
+dataset = config.resolve_datasets()["example"]
 
 async with Flotilla(deployment=config) as fleet:
-    for row in rows:
-        bound = bindings.resolve(row)
-        async with await NativeAttempt.create(fleet, bound) as attempt:
+    for key in dataset.tasks():
+        async with await NativeAttempt.create(fleet, dataset.source(key)) as attempt:
             environment = await attempt.open("main")
             # Run the agent through the existing environment/service API.
             # Verification stages hidden tests and explicit role handoffs.
             result = await attempt.verify()
 ```
 
-Import models/readers from `flotilla.native`; they do not load the importer or GPU libraries. `ReleaseWriter` is the library interface for creating native releases without Harbor. `ReleaseReader` reads one release; `ReleaseBindings` joins explicit deployment locations to dataset rows. The native lifecycle reuses the existing scheduler and prepared-environment executor, rather than implementing another scheduler.
+`dataset.tasks()` lists the keys below the root in a stable order; `dataset.source(key)` names one on
+both sides. Which keys to run, and how often, is your selection: duplicates stay duplicate attempts.
 
-Consumers may pull the fixed runtime images normally. They may not parse Harbor/Compose or resolve source tags. Missing assets and incompatible packages fail explicitly; they never trigger preparation fallback. Infrastructure/cleanup failures are errors, not task scores. Reward interpretation belongs to the consumer.
+## Checking a dataset before spending GPU time
+
+Resolving a task is pure and synchronous, so a whole dataset can be checked first:
+
+```python
+for key in dataset.tasks():
+    task = NativeAttempt.resolve(fleet, dataset.source(key))   # raises on a task that cannot run
+```
+
+`Flotilla.plan(source)` returns the same trial for a single-role task without the grading contract.
+Both read image configs through the client's cache, so checking a dataset also warms it: a digest
+names one config forever, and a second task naming the same image costs a dict lookup.
+
+A task that cannot run fails here rather than mid-run. Making that a gate — refusing to submit a job
+whose dataset does not fully resolve — belongs to whatever submits your jobs; Flotilla provides the
+check and the exit code, not the policy.
 
 ## Installed Anchor builder
 
@@ -98,15 +126,23 @@ flotilla anchor build --image registry.example.org/team/anchor:VERSION \
 # Add --push and optionally --authfile to publish explicitly.
 ```
 
-The builder uses packaged assets and the exact installed non-editable Flotilla distribution plus its runtime dependencies. It validates installed RECORD contents and copies no source checkout, credentials or optional Harbor/compiler stack. It requires a pinned Python 3.12 linux/amd64 base and a verified pinned BusyBox asset. The base must support the installed runtime's ABI. Build context and downloaded archives are isolated temporary directories.
+The builder uses packaged assets and the exact installed non-editable Flotilla distribution plus its
+runtime dependencies. It validates installed RECORD contents and copies no source checkout,
+credentials or compiler stack. It requires a pinned Python 3.12 linux/amd64 base and a verified
+pinned BusyBox asset. The base must support the installed runtime's ABI. Build context and downloaded
+archives are isolated temporary directories.
 
-A new container verifies helpers and tools without network or source/credential mounts. Publication uses configurable Docker/Skopeo argv and manifest format (`v2s2` by default for the current internal registry). A deployment snippet is printed only after obtaining the remote digest. Local image IDs are not deployment pins. Platform behavior is still measured by probe; self-containment does not replace platform or GPU acceptance.
+A new container verifies helpers and tools without network or source/credential mounts. Publication
+uses configurable Docker/Skopeo argv and manifest format (`v2s2` by default for the current internal
+registry). A deployment snippet is printed only after obtaining the remote digest. Local image IDs
+are not deployment pins. Platform behavior is still measured by probe; self-containment does not
+replace platform or GPU acceptance.
 
-## Migration
+## What a consumer may and may not do
 
-- Old task-key/Harbor lists and prepared `env`/`task_dir` rows must be reselected and prepared. They are not interpreted as native releases.
-- Old `flotilla prepare` meant platform warmup. The command now requires host selected inputs, an output release and a report.
-- Old capability evidence must be regenerated for the native execution profile and cleanup requirement.
-- Old jobs stay pinned to their old code and image. Do not rewrite snapshots, running worktrees, registry history or deployment evidence to change product names.
+Consumers may pull the fixed runtime images normally. Missing assets and incompatible packages fail
+explicitly. Infrastructure and cleanup failures are errors, not task scores. Reward interpretation
+belongs to the consumer.
 
-Installation, fake-platform tests, real platform behavior and GPU training are different verification scopes. Consult the release's recorded acceptance results rather than assuming one proves the others.
+Installation, fake-platform tests, real platform behavior and GPU training are different
+verification scopes. Consult recorded acceptance results rather than assuming one proves the others.

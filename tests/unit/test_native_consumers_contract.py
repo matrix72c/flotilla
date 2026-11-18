@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+# The agent runtime, not the task format: only the consumer contract needs it.
 pytest.importorskip("harbor.agents.nop")
 
 from flotilla.compose.model import ImageMeta

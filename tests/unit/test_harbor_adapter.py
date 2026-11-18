@@ -7,8 +7,6 @@ import json
 from pathlib import Path
 
 import pytest
-
-pytest.importorskip("harbor")
 import toml  # type: ignore[import-untyped]
 from harbor.models.task.config import EnvironmentConfig, NetworkPolicy
 from harbor.models.trial.paths import TrialPaths

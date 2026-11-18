@@ -5,8 +5,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-
-pytest.importorskip("harbor")
 from harbor.models.task.config import TaskConfig
 from harbor.models.task.task import strip_canary
 from pydantic import ValidationError

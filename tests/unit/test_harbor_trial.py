@@ -10,8 +10,6 @@ import json
 from pathlib import Path
 
 import pytest
-
-pytest.importorskip("harbor")
 import toml  # type: ignore[import-untyped]
 from harbor.models.trial.config import TrialConfig
 from harbor.trial.trial import Trial

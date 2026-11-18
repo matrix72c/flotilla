@@ -271,6 +271,7 @@ wheels = [
 name = "flotilla"
 source = { editable = "." }
 dependencies = [
+    { name = "harbor" },
     { name = "httpx" },
     { name = "packaging" },
     { name = "pydantic" },
@@ -278,9 +279,6 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
-harbor = [
-    { name = "harbor" },
-]
 testing = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -298,7 +296,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "harbor", marker = "extra == 'harbor'", git = "https://github.com/matrix72c/harbor.git?rev=d78eb9c262e7074944106d16bff0ba6426bb2d34" },
+    { name = "harbor", git = "https://github.com/matrix72c/harbor.git?rev=d78eb9c262e7074944106d16bff0ba6426bb2d34" },
     { name = "httpx", specifier = ">=0.27,<1" },
     { name = "packaging", specifier = ">=24,<27" },
     { name = "pydantic", specifier = ">=2.10,<3" },
@@ -306,7 +304,7 @@ requires-dist = [
     { name = "pytest-asyncio", marker = "extra == 'testing'", specifier = ">=0.25" },
     { name = "pyyaml", specifier = ">=6.0,<7" },
 ]
-provides-extras = ["harbor", "testing"]
+provides-extras = ["testing"]
 
 [package.metadata.requires-dev]
 dev = [

@@ -20,11 +20,14 @@ dependencies = [
   "pydantic>=2.10,<3",
   "packaging>=24,<27",
   "pyyaml>=6.0,<7",
+  # A task's own format. Flotilla reads the Compose project itself, but how a task declares a
+  # separate verifier environment -- the mode inheritance and the image precedence behind it --
+  # is Harbor's definition, not a subset Flotilla can usefully maintain its own copy of. Running
+  # a task needs it, so it is required rather than an extra.
+  "harbor @ git+https://github.com/matrix72c/harbor.git@d78eb9c262e7074944106d16bff0ba6426bb2d34",
 ]
 
 [project.optional-dependencies]
-# Native evaluation and training share explicit source/runtime extension support.
-harbor = ["harbor @ git+https://github.com/matrix72c/harbor.git@d78eb9c262e7074944106d16bff0ba6426bb2d34"]
 testing = ["pytest>=8.3", "pytest-asyncio>=0.25"]
 
 [project.scripts]

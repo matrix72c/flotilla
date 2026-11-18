@@ -6,7 +6,9 @@ import asyncio
 import tomllib
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
+
+from harbor.models.task.config import TaskConfig
 
 from flotilla.compose.task import TASK_FILE
 from flotilla.compose.verification import artifacts_of, verification_of
@@ -37,10 +39,8 @@ INSTRUCTION = "instruction.md"
 TESTS_DIR = "tests"
 
 
-def _task_config(path: Path) -> Any:
+def _task_config(path: Path) -> TaskConfig:
     """The task's own `task.toml`, as Harbor's model, for the `[verifier]` table."""
-    from harbor.models.task.config import TaskConfig
-
     return TaskConfig.model_validate(tomllib.loads((path / TASK_FILE).read_text()))
 
 

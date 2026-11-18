@@ -117,8 +117,8 @@ source/runtime interfaces.
 
 ## Get started
 
-Flotilla runs on **Linux x86_64 with Python 3.12**. Reading a task's `task.toml` the way Harbor does
-needs the optional `harbor` extra; nothing needs Docker, a Compose binary or a GPU stack. Build the
+Flotilla runs on **Linux x86_64 with Python 3.12**. A task's `task.toml` is Harbor's format, so
+`harbor` is a required dependency; nothing needs Docker, a Compose binary or a GPU stack. Build the
 Anchor from the installed package with `flotilla anchor build`, using a pinned Python base; publication
 requires explicit `--push`. Platform capabilities and cleanup must pass `flotilla probe` before
 consumption. See [Native tasks](docs/Native_Tasks.md) for the complete workflow.
@@ -126,7 +126,7 @@ consumption. See [Native tasks](docs/Native_Tasks.md) for the complete workflow.
 ```sh
 git clone https://github.com/matrix72c/flotilla.git
 cd flotilla
-python -m pip install .            # or: python -m pip install '.[harbor]'
+python -m pip install .
 ```
 
 The distribution, import name and CLI are `flotilla`. Install from this repository or a wheel built from a fixed commit; **do not run bare `pip install flotilla`**, which selects an unrelated public PyPI project. Use a fresh environment when migrating from `flotilla-compose`; the two distributions must not share an environment because they own the same Python module.
