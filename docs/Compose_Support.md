@@ -45,6 +45,23 @@ task/
 
 Top-level networks support `internal: true`. `driver` must be `bridge`, `ipam` must be empty or `{driver: default}` (the platform assigns addresses), and only the bridge name, MTU, and `gateway_mode_ipv4/ipv6` driver options are accepted. `external` networks and volumes are rejected because trials never share resources. Unused networks are dropped; a `default` network is created implicitly.
 
+## Why a field is rejected
+
+Every rejection carries one of six categories, which say what would have to change for the field to
+become supported. `normalize.py` holds the same category for every key and a test keeps the two in step.
+
+| Category | Meaning | What would change it |
+|---|---|---|
+| `unimplemented` | Flotilla's own work; nothing outside it is missing | Implementing it here |
+| `platform-gap` | The task semantics are real, but the sandbox API has no request surface for them | The platform growing that surface |
+| `no-model` | A sandbox is one container in one isolation domain, so the field has no subject | Nothing; the field would stay rejected on any platform |
+| `unsafe` | Honoring it would remove the isolation the sandbox exists to provide | Nothing |
+| `not-reproducible` | It shares state across trials, which training requires to stay independent | Nothing |
+| `docker-internal` | A Docker mechanism with no meaning here; emulating it would invent a semantics | Nothing |
+
+A field marked `mixed` spans categories: some of its values belong in one, some in another. The whole
+field is rejected and carries the strictest of them, which is coarse but never wrong.
+
 ## Service keys
 
 | Key | Status |
@@ -70,12 +87,17 @@ Top-level networks support `internal: true`. `driver` must be `bridge`, `ipam` m
 | `hostname`, `container_name` | Added as names other services can resolve. `hostname` is a warning: `gethostname()` inside the sandbox still returns the platform's name |
 | `cpus`, `mem_limit`, `deploy.resources.limits.{cpus,memory}` | Supported; if both forms are given they must agree. Memory units are binary (`g` = GiB) |
 | `init`, `labels`, `logging`, `stop_signal`, `stop_grace_period`, `pull_policy` | Equivalent (recorded only) |
-| `cap_drop`, `security_opt`, `ulimits`, `pids_limit`, `sysctls`, `group_add`, `memswap_limit`, `cgroup` | Rejected: a sandbox is created from one image with cpu/memory, volumes, ports, tmpfs, a network policy and a fixed set of extension keys; none of these has a counterpart there. `cap_drop` is the one to watch: silently ignoring it would let an exploit the task expects to fail succeed and grade as solved |
-| `dns`, `dns_search`, `dns_opt`, `extra_hosts` | Rejected: cluster DNS is fixed and always reachable, and the network policy can stop a name from resolving but cannot map one to an address |
-| `tty`, `stdin_open`, `pid`, `ipc`, `userns_mode`, `runtime`, `platform` | Rejected: not available in a sandbox. One sandbox runs exactly one container, so `pid`/`ipc` sharing has no peer; preparation pins every image by digest, which fixes `platform` |
-| `devices` | Only `/dev/fuse`, `/dev/kvm` and `/dev/net/tun`, at the same path with `rwm` (the default). The service runs on the privileged runtime with the matching platform extension, written per instance so one service can hold a device without every sandbox carrying it; requires that device verified in the capability report. The platform itself asks for no special runtime for FUSE, but the probe measures it only on a privileged instance, so admitting it elsewhere would claim a configuration nothing verified. Read-only rootfs, tmpfs and `shm_size` are not available on that runtime. Trial volumes such a service mounts writable are opened to every identity (`chmod -R a+rwX`), because its root does not own anchor-created storage. Other devices are rejected |
-| `cap_add` | Only `[NET_ADMIN]` together with `/dev/net/tun` (equivalent: root in the privileged runtime holds it in the sandbox network namespace). Other capabilities are rejected |
-| `domainname`, `links`, `profiles`, `secrets`, `configs`, `extends`, `volumes_from`, `scale` | Rejected: not implemented |
+| `cap_drop` | Rejected (platform-gap): the sandbox API exposes no capability control, and dropping is what the task relies on — silently ignoring it would let an exploit the task expects to fail succeed and grade as solved |
+| `group_add`, `ulimits`, `pids_limit` | Rejected (platform-gap): the sandbox API exposes no supplementary groups, per-process rlimits, or process-count limit |
+| `security_opt`, `sysctls` | Rejected (unsafe, mixed): each field spans both directions. `no-new-privileges` and namespaced sysctls (`net.*`, `kernel.shm*`, `fs.mqueue.*`) affect only this sandbox and belong with `cap_drop`; `seccomp=unconfined`, `apparmor=unconfined` and non-namespaced sysctls remove the sandbox's defenses or reach the host. The whole field is rejected, which is coarse but never wrong |
+| `extra_hosts` | Rejected (unimplemented, mixed): flotilla already writes each sandbox's `/etc/hosts` to publish service names, so an entry naming a literal address would join that block. The `host-gateway` form has no counterpart — a sandbox has no host to reach — and would stay rejected. A mapped address remains subject to the egress policy, which decides whether it is reachable at all |
+| `dns`, `dns_search`, `dns_opt` | Rejected (docker-internal): cluster DNS is fixed and always reachable; a task-supplied resolver would fight the egress policy |
+| `platform`, `memswap_limit`, `domainname` | Rejected (docker-internal): preparation pins every image by digest, which fixes `platform`; swap is not separately accountable; an NIS domain has no counterpart |
+| `pid`, `ipc`, `userns_mode`, `runtime`, `cgroup` | Rejected (no-model): one sandbox runs exactly one container, so `pid`/`ipc` sharing has no peer and the sandbox is already the isolation domain. The runtime and cgroup placement are deployment properties |
+| `tty`, `stdin_open` | Rejected (unimplemented): both require a pty |
+| `devices` | Only `/dev/fuse`, `/dev/kvm` and `/dev/net/tun`, at the same path with `rwm` (the default). The service runs on the privileged runtime with the matching platform extension, written per instance so one service can hold a device without every sandbox carrying it; requires that device verified in the capability report. The platform itself asks for no special runtime for FUSE, but the probe measures it only on a privileged instance, so admitting it elsewhere would claim a configuration nothing verified. Read-only rootfs, tmpfs and `shm_size` are not available on that runtime. Trial volumes such a service mounts writable are opened to every identity (`chmod -R a+rwX`), because its root does not own anchor-created storage. Other devices are rejected (unsafe) |
+| `cap_add` | Only `[NET_ADMIN]` together with `/dev/net/tun` (equivalent: root in the privileged runtime holds it in the sandbox network namespace). Other capabilities are rejected (unsafe) |
+| `links`, `volumes_from`, `extends`, `profiles`, `secrets`, `configs`, `scale` | Rejected (unimplemented): each would expand into something the model already has — hosts entries, the other service's mounts, merged documents, mounts, or several sandboxes. `extends` is stopped by the input gate before the Compose CLI, which would otherwise expand it |
 | Any other key, including `deploy` keys other than resource limits and `x-*` | Rejected |
 
 A service can have dependents requiring health and others requiring successful completion. Both conditions are tracked independently. A service required only for successful completion does not need to pass its healthcheck.
