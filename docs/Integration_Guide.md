@@ -73,7 +73,7 @@ main = PreparedEnvironment(bound.task.roles["main"])
 attempt = await NativeAttempt.create(fleet, bound)
 ```
 
-See [Native tasks](Native_Tasks.md) for the host preparation and static publication workflow. Both local and platform copies are verified. Execution needs the installed native helper, fixed runtime images and static release only; it must not import Harbor/Compose, build, push, mirror or export seed data from an image. Missing assets and unsupported protocols are explicit failures, not opportunities for fallback. The original source task directory is not an execution input.
+See [Native tasks](Native_Tasks.md) for the host preparation and static publication workflow. Both local and platform copies are verified. Execution needs the installed native helper, fixed runtime images and static release only; it must not import Harbor/Compose or read source images. Missing assets and unsupported protocols are explicit failures, not opportunities for fallback. The original source task directory is not an execution input.
 
 Keep published releases immutable. Volume initialization and artifact handoffs are attempt-private. Snapshot release/task/image digests and the complete selected rows. Reusing validation within one launch does not authorize a global cross-run cache.
 

@@ -139,7 +139,8 @@ class Task(Model):
                             raise ValueError("static mounts must be read-only")
                         refs.append(mount.key)
             for volume in manifest.trial_volumes:
-                refs.extend(p for p in (volume.seed, volume.copy_from) if p is not None)
+                if volume.copy_from is not None:
+                    refs.append(volume.copy_from)
         if self.verification:
             v = self.verification
             if v.role not in self.roles or (v.service and v.service not in self.roles[v.role].units):
@@ -153,7 +154,7 @@ class Task(Model):
                             if mount.scope == "task" and overlaps(mount.key, v.tests):
                                 raise ValueError("hidden tests cannot be mounted in task inputs")
                     for volume in manifest.trial_volumes:
-                        if any(overlaps(p, v.tests) for p in (volume.seed, volume.copy_from) if p):
+                        if volume.copy_from and overlaps(volume.copy_from, v.tests):
                             raise ValueError("hidden tests cannot initialize task inputs")
         for ref in refs:
             relative_path(ref)

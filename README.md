@@ -8,7 +8,7 @@
 
 **Prepare portable multi-service tasks once; execute isolated attempts on a sandbox platform.**
 
-Flotilla owns a native task protocol shared by evaluation and RL consumers. Its optional Harbor importer normalizes Compose on a preparation host, pins images and captures static assets. Users publish that immutable release to platform storage. Attempts then open one sandbox per service, connect them under an explicit network policy, and clean up their private state—without parsing Compose, building images or exporting image seeds again.
+Flotilla owns a native task protocol shared by evaluation and RL consumers. Its optional Harbor importer normalizes Compose on a preparation host, pins images and captures static assets. Users publish that immutable release to platform storage. Attempts then open one sandbox per service, connect them under an explicit network policy, and clean up their private state—without parsing Compose or reading source images again.
 
 ```mermaid
 flowchart LR

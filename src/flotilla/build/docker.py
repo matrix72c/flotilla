@@ -1,19 +1,16 @@
-"""Docker/buildx adapters with owned export containers and numeric archive metadata."""
+"""Docker adapters: registry reads and the image account databases, with owned containers."""
 
 from __future__ import annotations
 
 import json
-import posixpath
-import shutil
 import subprocess
 import sys
-import tarfile
 import tempfile
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 from flotilla.build.images import _DIGEST, ImageError
@@ -95,11 +92,11 @@ class DockerRegistry:
 
 
 @dataclass(frozen=True)
-class DockerImageExport:
-    """`ImageExport` implemented with `docker create` + `docker cp`.
+class DockerImageAccounts:
+    """Reads an image's `/etc/passwd` and `/etc/group` with `docker create` + `docker cp`.
 
-    Initial volume content comes from the image filesystem. `docker cp` copies from a container that is **never
-    started**, so no image code runs; the container is removed in finally. `docker cp` preserves owner and mode.
+    Named users in Compose `user:` resolve to numeric ids through them. `docker cp` copies from a
+    container that is **never started**, so no image code runs; the container is removed in finally.
     """
 
     docker_cmd: Sequence[str] = field(default_factory=lambda: ("docker",))
@@ -110,7 +107,7 @@ class DockerImageExport:
     def _container(self, image: str) -> Iterator[str]:
         # Register before create: an interrupted or lost create response still
         # leaves the parent an exact, operation-owned cleanup target.
-        name = "flotilla-export-" + uuid.uuid4().hex
+        name = "flotilla-accounts-" + uuid.uuid4().hex
         record = None
         if self.ownership_dir is not None:
             self.ownership_dir.mkdir(parents=True, exist_ok=True)
@@ -129,7 +126,7 @@ class DockerImageExport:
                 if "No such container" not in str(error):
                     if original is None:
                         raise
-                    original.add_note(f"export container {name} removal failed")
+                    original.add_note(f"container {name} removal failed")
                     removed = False
             if record is not None and removed:
                 record.unlink(missing_ok=True)
@@ -154,97 +151,3 @@ class DockerImageExport:
                     raise ImageError(f"image /etc/{name} must be a regular file")
                 values.append(target.read_text())
             return ImageAccounts(*values)
-
-    def extract(
-        self, image: str, path: str, dest: Path, *, identities: dict[str, tuple[int, int, int]] | None = None
-    ) -> bool:
-        with (
-            self._container(image) as container,
-            tempfile.TemporaryFile() as archive,
-            tempfile.TemporaryFile() as errors,
-        ):
-            try:
-                result = subprocess.run(
-                    [*self.docker_cmd, "cp", f"{container}:{path.rstrip('/')}/.", "-"],
-                    stdout=archive,
-                    stderr=errors,
-                    timeout=self.timeout_s,
-                    check=False,
-                )
-            except (OSError, subprocess.TimeoutExpired) as error:
-                raise ImageError(f"image export failed: {type(error).__name__}") from None
-            if result.returncode:
-                errors.seek(0)
-                diagnostic = errors.read(4096).decode(errors="replace")
-                if "Could not find the file" in diagnostic and "in container" in diagnostic:
-                    return False
-                detail = " ".join(diagnostic.split())[:300]
-                raise ImageError(f"image export failed with status {result.returncode}: {detail}")
-            archive.seek(0)
-            return extract_archive(archive, dest, identities if identities is not None else {})
-
-
-def extract_archive(archive: Any, dest: Path, identities: dict[str, tuple[int, int, int]]) -> bool:
-    """Keep numeric identities in metadata; extraction never needs host chown privileges.
-
-    Symlinks are kept when they stay inside the volume, because applications rely on them (shared
-    library version aliases, for example). A symlink pointing outside, and any member reached
-    through a symlinked directory, are rejected: the seed tar is later unpacked by `tar` on shared
-    storage, where writing through a link would escape the volume directory.
-    """
-    directories: list[tuple[Path, int]] = []
-    links: set[str] = set()
-    populated = False
-    with tarfile.open(fileobj=archive, mode="r|*") as tar:
-        for member in tar:
-            if not (member.isfile() or member.isdir() or member.issym()):
-                raise ImageError("image volume contains an unsupported link or special file")
-            if member.size > 512 * 1024 * 1024 or min(member.uid, member.gid, member.mode) < 0 or member.mode > 0o7777:
-                raise ImageError("image volume contains invalid metadata or an oversized file")
-            if Path(member.name).is_absolute() or ".." in Path(member.name).parts:
-                raise ImageError("image volume path escapes the export directory")
-            try:
-                safe = tarfile.data_filter(member, str(dest))
-            except tarfile.FilterError as exc:
-                raise ImageError(f"image volume entry {member.name} is unsafe to extract: {exc}") from exc
-            relative = posixpath.normpath(safe.name)
-            if any(parent in links for parent in _ancestors(relative)):
-                raise ImageError(f"image volume path {relative} is reached through a symlink")
-            target = dest / relative
-            if member.issym():
-                _check_link(relative, member.linkname)
-                links.add(relative)
-            elif not target.resolve().is_relative_to(dest.resolve()):
-                raise ImageError("image volume path escapes the export directory")
-            identities[relative] = (member.uid, member.gid, member.mode)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            if member.isdir():
-                target.mkdir(exist_ok=True)
-                directories.append((target, 0o700))
-            elif member.issym():
-                target.symlink_to(member.linkname)  # mode is not applied: chmod would follow the link
-            else:
-                source = tar.extractfile(member)
-                assert source is not None
-                with source, target.open("wb") as output:
-                    shutil.copyfileobj(source, output)
-                target.chmod(0o600)
-            populated |= relative != "."
-    for directory, mode in reversed(directories):
-        directory.chmod(mode)
-    return populated
-
-
-def _ancestors(relative: str) -> Iterator[str]:
-    parts = PurePosixPath(relative).parts
-    for index in range(1, len(parts)):
-        yield posixpath.join(*parts[:index])
-
-
-def _check_link(relative: str, linkname: str) -> None:
-    """A symlink must resolve inside the volume, lexically: `tar` follows it when unpacking."""
-    if not linkname or posixpath.isabs(linkname):
-        raise ImageError(f"image volume symlink {relative} points outside the volume: {linkname!r}")
-    resolved = posixpath.normpath(posixpath.join(posixpath.dirname(relative), linkname))
-    if resolved == ".." or resolved.startswith("../"):
-        raise ImageError(f"image volume symlink {relative} points outside the volume: {linkname!r}")

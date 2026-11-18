@@ -81,7 +81,7 @@ With the selected `sandbox-system-v1` protocol the probe requests 96 MiB, then c
 
 The current measured internal container backend supports missing mount directories, including nested targets with readonly rootfs. The native probe profile checks this behavior rather than assuming it from protocol selection. Preparation does not inspect image paths, and it produces no image at all. A target that is a symlink in the image is resolved inside the container's root filesystem by the container runtime, as Docker does; a target that is a regular file fails at sandbox creation. The real tmpfs mount hides existing image content.
 
-For read-only services, single-service writable named volumes and bind mounts become real environment-owned storage mounts rather than writable image directories. Seeding, `nocopy`, and shared-reference relationships are retained.
+For read-only services, single-service writable named volumes and bind mounts become real environment-owned storage mounts rather than writable image directories. Shared-reference relationships are retained; a named volume starts empty either way.
 
 Read-only services also receive an explicit framework mount at `/.flotilla-runtime`. It is backed by the configured shared storage, with a private subdirectory for each instance creation attempt under the environment's owned directory. It stores service logs and temporary transfer archives, is owned by the service UID/GID, and is removed after the environment's instances have been deleted. It does not consume a business tmpfs slot or its memory budget. The `/.flotilla` tools mount remains read-only. These paths and the `_runtime` trial-volume key are reserved.
 

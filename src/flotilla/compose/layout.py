@@ -22,15 +22,11 @@ class MountPlan:
 
 @dataclass(frozen=True)
 class VolumePlan:
-    """Only references without nocopy may provide initial content."""
+    """A named volume and the (unit, target, read_only) references that mount it."""
 
     name: str
     mode: Literal["trial"]
-    references: tuple[tuple[str, str, bool, bool], ...]
-
-    @property
-    def nocopy(self) -> bool:
-        return all(nocopy for *_, nocopy in self.references)
+    references: tuple[tuple[str, str, bool], ...]
 
 
 @dataclass(frozen=True)
@@ -51,13 +47,13 @@ class Layout:
 
 
 def classify(services: Mapping[str, Service]) -> Layout:
-    vol_refs: dict[str, list[tuple[str, str, bool, bool]]] = {}
+    vol_refs: dict[str, list[tuple[str, str, bool]]] = {}
     bind_refs: list[tuple[str, str, str, bool]] = []
     order: list[tuple[str, str]] = []
     for name, service in services.items():
         for mount in service.volumes:
             if mount.kind == "volume":
-                vol_refs.setdefault(mount.source, []).append((name, mount.target, mount.read_only, mount.nocopy))
+                vol_refs.setdefault(mount.source, []).append((name, mount.target, mount.read_only))
             else:
                 bind_refs.append((name, posixpath.normpath(mount.source), mount.target, mount.read_only))
             order.append((name, mount.target))
@@ -74,7 +70,7 @@ def classify(services: Mapping[str, Service]) -> Layout:
     )
     by_target: dict[tuple[str, str], MountPlan] = {}
     for volume in volumes:
-        for unit, target, read_only, _ in volume.references:
+        for unit, target, read_only in volume.references:
             by_target[(unit, target)] = MountPlan("trial", volume.name, target, read_only)
     for group in binds:
         for unit, source, target, read_only in group.references:

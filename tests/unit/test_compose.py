@@ -107,7 +107,7 @@ def test_volumes_long_syntax() -> None:
         volumes={"data": {}},
     )
     assert p.services["app"].volumes == (
-        VolumeMount("volume", "data", "/data", nocopy=True),
+        VolumeMount("volume", "data", "/data"),
         VolumeMount("bind", "./conf", "/etc/conf", read_only=True),
     )
 

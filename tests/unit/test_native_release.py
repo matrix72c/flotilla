@@ -192,7 +192,7 @@ def test_task_schema_guards() -> None:
         )
     with pytest.raises(ValueError, match="hidden tests cannot initialize"):
         task(
-            roles={"main": manifest(volumes=(TrialVolume(key="v", seed=hidden),))},
+            roles={"main": manifest(volumes=(TrialVolume(key="v", copy_from=hidden),))},
             verification=Verification(command=("true",), tests=hidden),
         )
     with pytest.raises(ValueError, match="canonical relative path"):

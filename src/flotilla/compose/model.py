@@ -56,7 +56,6 @@ class VolumeMount:
     source: str
     target: str
     read_only: bool = False
-    nocopy: bool = False
 
 
 @dataclass(frozen=True)

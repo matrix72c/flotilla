@@ -87,7 +87,7 @@ def test_image_replacements_apply_before_the_pullable_check() -> None:
 
 
 def test_mounts_never_change_a_service_image() -> None:
-    """Writable binds, nocopy volumes, tmpfs and readonly roots are runtime mounts, not image changes."""
+    """Writable binds, named volumes, tmpfs and readonly roots are runtime mounts, not image changes."""
     project = Project(
         services={
             "writes_bind": _svc(
@@ -95,10 +95,10 @@ def test_mounts_never_change_a_service_image() -> None:
                 image="r.io/a:1",
                 volumes=(VolumeMount(kind="bind", source="./seed", target="/app", read_only=False),),
             ),
-            "nocopy": _svc(
-                "nocopy",
+            "volume": _svc(
+                "volume",
                 image="r.io/b:1",
-                volumes=(VolumeMount(kind="volume", source="cache", target="/var/cache", nocopy=True),),
+                volumes=(VolumeMount(kind="volume", source="cache", target="/var/cache"),),
             ),
             "tmpfs": _svc(
                 "tmpfs",
@@ -114,7 +114,7 @@ def test_mounts_never_change_a_service_image() -> None:
     plans = plan_images(project, BuildSettings(pullable_registries=("r.io",)))
     assert {p.service: p.ref.repository for p in plans} == {
         "writes_bind": "a",
-        "nocopy": "b",
+        "volume": "b",
         "tmpfs": "c",
         "plain": "d",
     }

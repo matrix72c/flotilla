@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import shutil
 import threading
@@ -11,7 +10,6 @@ import uuid
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
-from functools import partial
 from pathlib import Path
 from tempfile import mkdtemp
 from typing import Any, TypeVar
@@ -64,15 +62,12 @@ class _Metrics:
                 "registry_digest",
                 "image_config",
                 "image_accounts",
-                "image_extract",
-                "seed_cache_copy",
                 "role_prepare",
                 "package",
             )
         }
         self.counts = {
             "registry_cache_hits": 0,
-            "seed_cache_hits": 0,
             "stored_hits": 0,
         }
 
@@ -328,59 +323,6 @@ class _RegistryCache:
         return value
 
 
-class _Exports:
-    """Volume seed extraction by (image, path) under `root`.
-
-    Each entry is a content directory plus a `.json` record written after it, so
-    an interrupted extraction is never reused. Entries of digest-pinned images
-    are reused from `root` across invocations when `root` is the store.
-    """
-
-    def __init__(self, exporter: Any, root: Path, metrics: _Metrics) -> None:
-        self.exporter, self.root, self.metrics = exporter, root, metrics
-        self.cached: _Once[tuple[str, str], tuple[Path, bool, dict[str, Any]]] = _Once()
-
-    def _load(self, image: str, path: str) -> tuple[Path, bool, dict[str, Any]]:
-        name = hashlib.sha256(_json((image.rpartition("@")[2], path)).encode()).hexdigest()
-        directory, record = self.root / name, self.root / f"{name}.json"
-        if _digest_of(image) is not None and record.is_file() and directory.is_dir():
-            self.metrics.count("stored_hits")
-            value = json.loads(record.read_text(encoding="utf-8"))
-            return directory, value["populated"], {k: tuple(v) for k, v in value["owners"].items()}
-        self.root.mkdir(parents=True, exist_ok=True)
-        # A failed extraction records nothing, so a later task with the same image and
-        # path retries it from a clean directory instead of the partial attempt.
-        staged = Path(mkdtemp(prefix=f".{name}.", dir=self.root))
-        try:
-            owners: dict[str, Any] = {}
-            populated = self.metrics.call(
-                "image_extract", self.exporter.extract, image, path, staged, identities=owners
-            )
-            record.unlink(missing_ok=True)
-            if directory.exists():
-                shutil.rmtree(directory)
-            staged.replace(directory)
-        except BaseException:
-            shutil.rmtree(staged, ignore_errors=True)
-            raise
-        _store_write(record, {"populated": populated, "owners": owners})
-        return directory, populated, owners
-
-    def extract(self, image: str, path: str, dest: Path, *, identities: dict[str, Any] | None = None) -> bool:
-        (directory, populated, owners), hit = self.cached.get(
-            (image.rpartition("@")[2], path), lambda: self._load(image, path)
-        )
-        if hit:
-            self.metrics.count("seed_cache_hits")
-        # symlinks=True: a seed's links must stay links, not become copies of their targets.
-        self.metrics.call(
-            "seed_cache_copy", partial(shutil.copytree, symlinks=True), directory, dest, dirs_exist_ok=True
-        )
-        if identities is not None:
-            identities.update(owners)
-        return populated
-
-
 def prepare(
     selected: str | Path | Sequence[SelectedTask | Mapping[str, Any]],
     *,
@@ -401,14 +343,14 @@ def prepare(
     remote sandboxes, or requires Anchor. Work files live in a sibling directory
     that is removed afterwards.
 
-    `cache` keeps what depends only on an image digest (image configs, account
-    databases, volume seeds) across invocations, so a later run does not pull an
-    image again. `concurrency` tasks are prepared at once (deployment
-    `prepare.concurrency` by default, 1 with an explicit `context`); packaging
-    into the release stays in row order.
+    `cache` keeps what depends only on an image digest (image configs and account
+    databases) across invocations, so a later run does not read an image again.
+    `concurrency` tasks are prepared at once (deployment `prepare.concurrency` by
+    default, 1 with an explicit `context`); packaging into the release stays in
+    row order.
 
-    Phase times are inclusive and may overlap (role_prepare includes image
-    extraction, and concurrent tasks overlap). Tool call counts exclude cache hits.
+    Phase times are inclusive and may overlap across concurrent tasks. Tool call
+    counts exclude cache hits.
     """
     metrics = _Metrics()
     output = Path(out).expanduser().absolute()
@@ -569,9 +511,6 @@ def _prepare(
         if context.image_accounts is not None
         else None,
     )
-    if context.image_export is not None:
-        seeds = store / "seeds" if store is not None else work / "seeds"
-        context = replace(context, image_export=_Exports(context.image_export, seeds, metrics))
     adapter = compose_adapter or ComposeConfigAdapter()
     if not rows:
         raise PreparationError("cannot prepare an empty selection", [])
@@ -676,12 +615,7 @@ def _file_paths(manifest: Manifest, prefix: str) -> Manifest:
         for name, unit in manifest.units.items()
     }
     volumes = [
-        volume.model_copy(
-            update={
-                "seed": f"{prefix}/{volume.seed}" if volume.seed else None,
-                "copy_from": f"{prefix}/{volume.copy_from}" if volume.copy_from else None,
-            }
-        )
+        volume.model_copy(update={"copy_from": f"{prefix}/{volume.copy_from}" if volume.copy_from else None})
         for volume in manifest.trial_volumes
     ]
     return manifest.model_copy(update={"units": units, "trial_volumes": volumes, "task_files": None})

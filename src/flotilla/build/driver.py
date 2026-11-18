@@ -8,7 +8,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from flotilla.build.files import ImageExport, export_task_files
+from flotilla.build.files import export_task_files
 from flotilla.build.images import (
     BuildSettings,
     ImageError,
@@ -64,12 +64,11 @@ class BuildOutcome:
 
 @dataclass(frozen=True)
 class BuildContext:
-    """External dependencies for preparing a task. Without `image_export`, tasks needing it report `failed`."""
+    """External dependencies for preparing a task. Without `image_accounts`, named users cannot resolve."""
 
     settings: BuildSettings
     caps: Capabilities
     registry: Registry
-    image_export: ImageExport | None = None
     image_accounts: Callable[[str], ImageAccounts] | None = None
 
 
@@ -97,17 +96,10 @@ def _build(task: HarborTask, out_dir: Path, ctx: BuildContext, result: ScanResul
     _require_root_images(images, ctx)
 
     files_dir = target_dir / FILES_DIR
-    exported = export_task_files(project, task.env_dir, files_dir, images=images, image_export=ctx.image_export)
+    exported = export_task_files(project, task.env_dir, files_dir)
 
     meta = _metadata(project, images, ctx)
-    manifest = build_manifest(
-        task=task.name,
-        project=project,
-        images=images,
-        meta=meta,
-        resources=resources,
-        seeds=exported.seeds,
-    )
+    manifest = build_manifest(task=task.name, project=project, images=images, meta=meta, resources=resources)
     target_dir.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(manifest.dump_json())
     return BuildOutcome(task.name, "built", key, manifest_path, needs_publish=not exported.empty, scan=result)

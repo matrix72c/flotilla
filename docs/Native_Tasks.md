@@ -26,15 +26,15 @@ flotilla prepare selected.jsonl --deployment deployment.toml --env prepare.env \
 
 A selected row that fails is left out of the release and its report row carries `status: failed` with the stage and reason; the release holds every row that prepared, and nothing is published only when no row did. The output directory must not exist. Work files live in a temporary sibling directory that is removed afterwards; after correcting a failure, prepare a new release. `prepare.concurrency` tasks are prepared at once; packaging into the release keeps row order.
 
-`--cache <dir>` keeps what depends only on an image digest across runs: image configs, image account databases (`/etc/passwd`, `/etc/group`) and extracted volume seeds. A run with the same cache reads these from it instead of pulling the image. Entries are keyed by digest, so they never go stale; delete the directory to reclaim space. A seed entry is used only once its record is written, so an interrupted extraction is extracted again. Never mutate a release used by running jobs.
+`--cache <dir>` keeps what depends only on an image digest across runs: image configs and image account databases (`/etc/passwd`, `/etc/group`). A run with the same cache reads these from it instead of reading the image. Entries are keyed by digest, so they never go stale; delete the directory to reclaim space. Never mutate a release used by running jobs.
 
 `--name` names the release. Every dataset row carries it, and the consumer's deployment binds it as `[task_releases.<name>]`. A task selected several times is packaged once; its rows repeat.
 
-The prepare report includes invocation-local `metrics`: total `elapsed_s`, per-phase `calls`/`failed`/`seconds`, and counts of registry/seed cache hits and `stored_hits` (served from `--cache`). `import_normalize` combines importing and official Compose normalization. Phase times are inclusive and overlap across concurrent tasks, so do not sum them. Tool calls exclude cache hits and failures remain counted. The Compose executable's version is checked once per process.
+The prepare report includes invocation-local `metrics`: total `elapsed_s`, per-phase `calls`/`failed`/`seconds`, and counts of registry cache hits and `stored_hits` (served from `--cache`). `import_normalize` combines importing and official Compose normalization. Phase times are inclusive and overlap across concurrent tasks, so do not sum them. Tool calls exclude cache hits and failures remain counted. The Compose executable's version is checked once per process.
 
 ## Static publication belongs to the user
 
-Publish the complete output with your existing rsync, shared storage or object-storage tools. Flotilla does not upload a task dataset for you. Preserve bytes and modes. File owners are not part of the release: task inputs are mounted read-only, and volume seeds are tar archives that carry their own numeric owners. A gateway PUT acknowledgement may precede visibility through a separate NFS client; wait for visibility before consuming.
+Publish the complete output with your existing rsync, shared storage or object-storage tools. Flotilla does not upload a task dataset for you. Preserve bytes and modes. File owners are not part of the release: task inputs are mounted read-only, and `file-identities.json` records the numeric owner and mode each bind source had. A gateway PUT acknowledgement may precede visibility through a separate NFS client; wait for visibility before consuming.
 
 Publish shared-tools and the Agent runtime separately, and grant the platform read access to the fixed runtime images. Do not place credentials, source checkout paths or image archives inside the task release.
 
@@ -43,7 +43,7 @@ release/
   dataset.jsonl
   tasks/<task-key>/task.json
   tasks/<task-key>/instruction.md
-  tasks/<task-key>/files/...      # bind content and volume seed tars
+  tasks/<task-key>/files/...      # bind content
   tasks/<task-key>/tests/...      # hidden tests, staged only for verification
 ```
 
@@ -88,7 +88,7 @@ async with Flotilla(deployment=config) as fleet:
 
 Import models/readers from `flotilla.native`; they do not load the importer or GPU libraries. `ReleaseWriter` is the library interface for creating native releases without Harbor. `ReleaseReader` reads one release; `ReleaseBindings` joins explicit deployment locations to dataset rows. The native lifecycle reuses the existing scheduler and prepared-environment executor, rather than implementing another scheduler.
 
-Consumers may pull the fixed runtime images normally. They may not parse Harbor/Compose, resolve source tags, or export seed contents from images. Missing assets and incompatible packages fail explicitly; they never trigger preparation fallback. Infrastructure/cleanup failures are errors, not task scores. Reward interpretation belongs to the consumer.
+Consumers may pull the fixed runtime images normally. They may not parse Harbor/Compose or resolve source tags. Missing assets and incompatible packages fail explicitly; they never trigger preparation fallback. Infrastructure/cleanup failures are errors, not task scores. Reward interpretation belongs to the consumer.
 
 ## Installed Anchor builder
 

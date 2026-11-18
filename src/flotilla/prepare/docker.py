@@ -6,26 +6,25 @@ import subprocess
 from collections.abc import Sequence
 from pathlib import Path
 
-from flotilla.build.docker import DockerImageExport, DockerRegistry
+from flotilla.build.docker import DockerImageAccounts, DockerRegistry
 from flotilla.build.driver import BuildContext
 from flotilla.config import FlotillaConfig
 
 
 def docker_context(cfg: FlotillaConfig, journal: Path) -> BuildContext:
-    """Export containers are journaled under `journal` before creation, so a killed run can remove them."""
+    """Account containers are journaled under `journal` before creation, so a killed run can remove them."""
     command = cfg.prepare.docker_command
-    exporter = DockerImageExport(docker_cmd=command, timeout_s=cfg.prepare.export_timeout, ownership_dir=journal)
+    accounts = DockerImageAccounts(docker_cmd=command, timeout_s=cfg.prepare.export_timeout, ownership_dir=journal)
     return BuildContext(
         settings=cfg.build.settings(),
         caps=cfg.platform_capabilities(),
         registry=DockerRegistry(docker_cmd=command),
-        image_export=exporter,
-        image_accounts=exporter.accounts,
+        image_accounts=accounts.accounts,
     )
 
 
 def sweep_journal(docker_command: Sequence[str], journal: Path, *, timeout_s: float = 30) -> list[str]:
-    """Remove export containers left by an interrupted run; returns the names that could not be removed."""
+    """Remove containers left by an interrupted run; returns the names that could not be removed."""
     remaining: list[str] = []
     if not journal.is_dir():
         return remaining

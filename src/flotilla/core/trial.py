@@ -174,12 +174,7 @@ class Trial:
                 )
                 continue
             await self._anchor.mkdir(key, stage="prepare")
-            if vol.seed is not None:
-                assert self._plan.task_files is not None
-                await self._anchor.unpack(
-                    f"{self._plan.task_files}/{vol.seed}", key, stage="prepare", src_root=self._plan.task_files_root
-                )
-            elif vol.owner is not None:
+            if vol.owner is not None:
                 await self._anchor.chown(key, *vol.owner, stage="prepare")
         # Privileged-runtime root cannot write anchor-owned content; open what such units mount writable.
         writable = {

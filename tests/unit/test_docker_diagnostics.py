@@ -40,32 +40,25 @@ def test_build_timeout_does_not_leak_the_original_command_through_exception_chai
     assert "private-token" not in "".join(traceback.format_exception(error.value))
 
 
-@pytest.mark.parametrize("copy_fails", [False, True])
-def test_export_cleanup_failure_is_visible_without_hiding_copy_error(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, copy_fails: bool
+@pytest.mark.parametrize("read_fails", [False, True])
+def test_account_cleanup_failure_is_visible_without_hiding_the_read_error(
+    monkeypatch: pytest.MonkeyPatch, read_fails: bool
 ) -> None:
     def command(args: Sequence[str], **kwargs: Any) -> str:
         if args[0] == "create":
             return "owned-container"
+        if args[0] == "cp":
+            if read_fails:
+                raise ImageError("image read failed")
+            Path(args[2]).write_text("root:x:0:0:::\n")
+            return ""
         raise ImageError("cleanup failed")
 
-    def copy(cmd: Sequence[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        import io
-        import tarfile
-
-        if not copy_fails:
-            with tarfile.open(fileobj=kwargs["stdout"], mode="w") as archive:
-                info = tarfile.TarInfo("data")
-                info.size = 4
-                archive.addfile(info, io.BytesIO(b"seed"))
-        return subprocess.CompletedProcess(cmd, int(copy_fails), "", "")
-
-    monkeypatch.setattr(subprocess, "run", copy)
     monkeypatch.setattr(docker, "_docker", command)
-    with pytest.raises(ImageError, match="image export failed" if copy_fails else "cleanup failed") as error:
-        docker.DockerImageExport().extract("test-image", "/data", tmp_path)
-    if copy_fails:
-        assert "flotilla-export-" in " ".join(error.value.__notes__)
+    with pytest.raises(ImageError, match="image read failed" if read_fails else "cleanup failed") as error:
+        docker.DockerImageAccounts().accounts("test-image")
+    if read_fails:
+        assert "flotilla-accounts-" in " ".join(error.value.__notes__)
         assert "removal failed" in " ".join(error.value.__notes__)
 
 
@@ -91,12 +84,12 @@ def test_lost_create_response_uses_registered_name_for_cleanup(
 
     monkeypatch.setattr(docker, "_docker", command)
     with pytest.raises(ImageError, match="create response lost"):
-        docker.DockerImageExport(ownership_dir=journal).accounts("fixture")
+        docker.DockerImageAccounts(ownership_dir=journal).accounts("fixture")
     assert created == removed and len(created) == 1
     assert list(journal.iterdir()) == ([journal / created[0]] if cleanup_fails else [])
 
 
-def test_export_uses_the_configured_timeout_and_reports_docker_stderr(
+def test_account_reads_use_the_configured_timeout_and_report_docker_stderr(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     from flotilla.config import FlotillaConfig
@@ -108,19 +101,16 @@ def test_export_uses_the_configured_timeout_and_reports_docker_stderr(
     caps.write_text(report().dump_json())
     data = config_data(prepare={"export_timeout": 1234})
     data["opensandbox"]["capabilities"] = str(caps)
-    cfg = FlotillaConfig.from_mapping(data)
-    exporter = docker_context(cfg, tmp_path / "journal").image_export
-    assert isinstance(exporter, docker.DockerImageExport) and exporter.timeout_s == 1234
+    accounts = docker_context(FlotillaConfig.from_mapping(data), tmp_path / "journal").image_accounts
+    assert accounts is not None
 
     seen: list[float] = []
 
-    def copy(cmd: Sequence[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+    def run(cmd: Sequence[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         seen.append(kwargs["timeout"])
-        kwargs["stderr"].write(b"Error response from daemon: \n  disk quota exceeded\n")
-        return subprocess.CompletedProcess(cmd, 1, "", "")
+        return subprocess.CompletedProcess(cmd, 1, "", "Error response from daemon: disk quota exceeded")
 
-    monkeypatch.setattr(subprocess, "run", copy)
-    monkeypatch.setattr(docker, "_docker", lambda args, **kwargs: "owned-container")
-    with pytest.raises(ImageError, match="status 1: Error response from daemon: disk quota exceeded"):
-        exporter.extract("test-image", "/data", tmp_path / "out")
-    assert seen == [1234]
+    monkeypatch.setattr(subprocess, "run", run)
+    with pytest.raises(ImageError, match="disk quota exceeded"):
+        accounts("test-image")
+    assert seen == [1234, 1234]  # create, then the cleanup removal

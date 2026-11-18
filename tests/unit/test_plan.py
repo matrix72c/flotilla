@@ -157,7 +157,6 @@ def test_valid_plans_pass() -> None:
         lambda p: replace(p, units={**p.units, "x": _unit(mounts=(Mount("task", "binds/0", "/etc/a", True),))}),
         lambda p: replace(p, units={**p.units, "x": _unit(command=None, restart="always")}),
         lambda p: replace(p, volumes=(TrialVolume("v"), TrialVolume("v"))),
-        lambda p: replace(p, volumes=(TrialVolume("v", seed="seeds/v.tar"),)),
         lambda p: replace(p, units={**p.units, "db": _unit()}),
         lambda p: replace(
             p,
@@ -175,7 +174,6 @@ def test_valid_plans_pass() -> None:
         "task-mount-without-files",
         "restart-without-process",
         "dup-vol",
-        "seed-without-files",
         "healthy-dep-without-healthcheck",
         "completed-dep-without-process",
     ],

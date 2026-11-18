@@ -3,21 +3,18 @@
 from __future__ import annotations
 
 import asyncio
-import io
 import json
-import tarfile
 import threading
 from email import policy
 from email.message import EmailMessage
 from email.parser import BytesParser
-from pathlib import Path
 
 import httpx
 import pytest
 
 from flotilla import Flotilla, FlotillaError
 from flotilla._io import owned_io
-from flotilla.build.docker import DockerRegistry, extract_archive
+from flotilla.build.docker import DockerRegistry
 from flotilla.build.images import ImageError
 from flotilla.compose.normalize import normalize
 from flotilla.config import FlotillaConfig
@@ -51,21 +48,6 @@ def test_missing_amd64_never_selects_arm(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr(DockerRegistry, "_run", lambda *_: json.dumps({"linux/arm64": {"config": {}}}))
     with pytest.raises(ImageError, match="linux/amd64"):
         DockerRegistry().image_config("fixture")
-
-
-def test_archive_metadata_is_independent_of_local_owner(tmp_path: Path) -> None:
-    data = io.BytesIO()
-    with tarfile.open(fileobj=data, mode="w") as archive:
-        info = tarfile.TarInfo("payload")
-        info.uid, info.gid, info.mode, info.size = 45678, 45679, 0o6751, 4
-        archive.addfile(info, io.BytesIO(b"data"))
-    data.seek(0)
-    root = tmp_path / "files"
-    root.mkdir()
-    owners: dict[str, tuple[int, int, int]] = {}
-    assert extract_archive(data, root, owners)
-    assert owners["payload"] == (45678, 45679, 0o6751)
-    assert (root / "payload").read_bytes() == b"data"
 
 
 @pytest.mark.parametrize("port", [{"protocol": "udp"}, "bad/udp", {"target": False}, [80]])

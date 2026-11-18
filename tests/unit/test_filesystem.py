@@ -18,7 +18,7 @@ from flotilla.platform.filesystem import memory_bytes
 from flotilla.platform.opensandbox.filesystem import INTERNAL_LIMITS, parse_effective
 from flotilla.runtime.planning import _resolve_tmpfs, to_plan
 from flotilla.scan import scan
-from flotilla.testing.build import FakeExport, _ctx, _task
+from flotilla.testing.build import _ctx, _task
 from flotilla.testing.compose import offline_task as load_task
 from flotilla.testing.config import config_data
 from flotilla.testing.reports import ok, report
@@ -46,8 +46,7 @@ def test_compose_filesystem_fields_roundtrip_to_runtime(tmp_path: Path) -> None:
 """,
         )
     )
-    export = FakeExport()
-    ctx = _ctx(image_export=export)
+    ctx = _ctx()
     ctx = replace(
         ctx, caps=replace(ctx.caps, readonly_rootfs=True, native_tmpfs=True, filesystem_limits=INTERNAL_LIMITS)
     )

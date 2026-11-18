@@ -316,25 +316,11 @@ async def test_prepare_creates_trial_dirs_before_units(
     # Like real cp, the fake cp does not create intermediate directories: the parent launches/L1/t1/binds of binds/0
     # must be created by copy_tree first.
     tree.dirs.update({"tasks", "tasks/bk", "tasks/bk/binds", "tasks/bk/binds/0", "tasks/bk/binds/0/conf.d"})
-    import io
-    import tarfile
-
-    data = io.BytesIO()
-    with tarfile.open(fileobj=data, mode="w") as archive:
-        root = tarfile.TarInfo(".")
-        root.type = tarfile.DIRTYPE
-        root.uid, root.gid, root.mode = 1234, 2345, 0o2770
-        archive.addfile(root)
-        entry = tarfile.TarInfo("fixture.txt")
-        entry.size = 4
-        archive.addfile(entry, io.BytesIO(b"seed"))
-    tree.files.add("tasks/bk/seeds/static.tar")
-    platform.tree_contents["tasks/bk/seeds/static.tar"] = data.getvalue()
     plan = replace(
         _three(),
         task_files="tasks/bk",
         volumes=(
-            TrialVolume("static", seed="seeds/static.tar"),
+            TrialVolume("static", owner=(1234, 2345)),
             TrialVolume("data", owner=(999, 999)),
             TrialVolume("binds/0", copy_from="binds/0"),
         ),
@@ -352,10 +338,7 @@ async def test_prepare_creates_trial_dirs_before_units(
     ready = await clock.run(_new_trial(platform, clock, anchor, reaper, plan).start())
     assert {"launches/L1/t1/static", "launches/L1/t1/data", "launches/L1/t1/binds/0"} <= tree.dirs
     assert "launches/L1/t1/binds/0/conf.d" in tree.dirs  # subdirectory copied along, not as binds/0/0
-    assert "unpack tasks/bk/seeds/static.tar launches/L1/t1/static" in tree.events
-    assert tree.content("launches/L1/t1/static/fixture.txt") == b"seed"
-    assert tree.owners["launches/L1/t1/static"] == "1234:2345"
-    assert tree.modes["launches/L1/t1/static"] == "2770"
+    assert tree.owners["launches/L1/t1/static"] == "1234:2345"  # an empty named volume, chowned to its declared owner
     assert "cp tasks/bk/binds/0 launches/L1/t1/binds/0" in tree.events
     assert tree.owners["launches/L1/t1/data"] == "999:999"
     assert platform.calls["create"] - creates_before == 3
@@ -371,7 +354,7 @@ async def test_prepare_creates_trial_dirs_before_units(
 async def test_prepare_failure_creates_no_units(
     platform: FakePlatform, clock: ManualClock, anchor: Anchor, reaper: Reaper, tree: SharedTree, shell: Shell
 ) -> None:
-    plan = replace(_three(), task_files="tasks/bk", volumes=(TrialVolume("static", seed="seeds/missing.tar"),))
+    plan = replace(_three(), task_files="tasks/bk", volumes=(TrialVolume("static", copy_from="binds/missing"),))
     creates = platform.calls["create"]
     with pytest.raises(FlotillaError) as exc:
         await clock.run(_new_trial(platform, clock, anchor, reaper, plan).start())

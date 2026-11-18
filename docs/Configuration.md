@@ -64,7 +64,7 @@ Filesystem checks run when the explicitly selected backend protocol can express 
 
 ### `[inputs.<name>]` (optional)
 
-Same keys as `[storage]`. Each section declares a named read-only root for published task releases or external read-only payloads such as an Agent runtime, for example an owner's storage shared read-only with this deployment. Names match `[a-z][a-z0-9_-]{0,62}`, at most 63 characters; `work` is reserved for `[storage]`. A release selects its root with `input`; other consumers name the root on their mounts. Task instances mount files from an input root read-only; the Anchor mounts every input root read-only at `/flotilla-inputs/<name>` and only reads from it (release verification, seed/copy sources, hidden tests). Nothing is written, cleaned or garbage-collected there, and Flotilla checks at startup that each input root exists.
+Same keys as `[storage]`. Each section declares a named read-only root for published task releases or external read-only payloads such as an Agent runtime, for example an owner's storage shared read-only with this deployment. Names match `[a-z][a-z0-9_-]{0,62}`, at most 63 characters; `work` is reserved for `[storage]`. A release selects its root with `input`; other consumers name the root on their mounts. Task instances mount files from an input root read-only; the Anchor mounts every input root read-only at `/flotilla-inputs/<name>` and only reads from it (release verification, copy sources, hidden tests). Nothing is written, cleaned or garbage-collected there, and Flotilla checks at startup that each input root exists.
 
 Publishing tools (`share publish`) always write the work root of the deployment they are given; release and runtime upload is outside Flotilla. Changing these sections invalidates capability evidence.
 
@@ -208,7 +208,7 @@ Host `flotilla prepare` uses these settings to create immutable native releases.
 | `prepare.management_env` | `{}` | Nonsecret helper environment such as `DOCKER_HOST` and `DOCKER_CONFIG` paths; credential contents belong in mounted files |
 | `prepare.compose_command` | `["docker", "compose"]` | Official Compose argv used for normalization |
 | `prepare.compose_version` | `"2.39.4"` | Required official Compose version |
-| `prepare.export_timeout` | `600` | Seconds allowed for each `docker cp` that exports an image volume's initial content. Raise it for tasks with large volumes |
+| `prepare.export_timeout` | `600` | Seconds allowed for each Docker call that reads an image's `/etc/passwd` and `/etc/group` |
 | `build.pullable_registries` | `[]` | Registries or prefixes the platform can pull from directly; a service whose image comes from anywhere else is rejected |
 | `build.image_replacements` | `{}` | Map of image references to substitutes, e.g. to use an internal mirror. Applied before the `pullable_registries` check |
 

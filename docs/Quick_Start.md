@@ -23,9 +23,9 @@ flotilla prepare selected.jsonl --deployment deployment.toml \
   --out ./release --name example --report prepare-report.json
 ```
 
-This command reads registries and never writes to them: provide pull credentials via your tool configuration or `--env prepare.env`. Every image must be pullable from a registry in `build.pullable_registries` and must declare a root `USER`; anything else is rejected rather than rewritten. Images are fixed in the release by remote digest. Static bind files, hidden tests and volume seeds are captured there too.
+This command reads registries and never writes to them: provide pull credentials via your tool configuration or `--env prepare.env`. Every image must be pullable from a registry in `build.pullable_registries` and must declare a root `USER`; anything else is rejected rather than rewritten. Images are fixed in the release by remote digest. Static bind files and hidden tests are captured there too.
 
-A selected row that fails is left out of the release and reported with its reason; nothing is published only when no row prepared. Output must be a new directory. Pass `--cache <dir>` to keep image configs, account databases and volume seeds between runs, so a later run does not pull the same images again. Keep reports and the cache outside the release. No platform task instances or static uploads are created by this command.
+A selected row that fails is left out of the release and reported with its reason; nothing is published only when no row prepared. Output must be a new directory. Pass `--cache <dir>` to keep image configs and account databases between runs, so a later run does not read the same images again. Keep reports and the cache outside the release. No platform task instances or static uploads are created by this command.
 
 ## 3. Publish and bind
 

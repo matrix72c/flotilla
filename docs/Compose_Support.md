@@ -105,13 +105,13 @@ A service can have dependents requiring health and others requiring successful c
 
 ## Volumes and bind mounts
 
-Short syntax `source:target[:ro|rw]` is a bind mount when the source starts with `.`, `/`, or `~`, and a named volume otherwise. Long syntax supports `type` (`volume`, `bind`, `tmpfs`), `source`, `target`, `read_only`, `volume.nocopy`, and `bind.create_host_path`. Anonymous volumes are rejected, the target must be absolute (and not `/` or under `/.flotilla`), and bind sources must be relative paths inside `environment/`.
+Short syntax `source:target[:ro|rw]` is a bind mount when the source starts with `.`, `/`, or `~`, and a named volume otherwise. Long syntax supports `type` (`volume`, `bind`, `tmpfs`), `source`, `target`, `read_only`, `volume.nocopy` (equivalent, see below), and `bind.create_host_path`. Anonymous volumes are rejected, the target must be absolute (and not `/` or under `/.flotilla`), and bind sources must be relative paths inside `environment/`.
 
 Every file-backed mount uses attempt-owned storage and requires the deployment's `shared_volume` capability, including a single writable reference and an exclusively read-only one. Nothing is baked into an image. Equal bind sources, and a mounted source together with its mounted descendants, share one backing root while each mount keeps its own read-only flag.
 
 A missing bind source is rejected: the platform would mount an empty directory over the target, so a task whose files were never committed would run with empty tools and grade as unsolvable. `/tmp` must stay writable (framework file transfers and the platform exec daemon write there), so a read-only mount on it is rejected. Mounting a single file that is not copied into an image requires the `volume_file` capability.
 
-Shared named-volume seeds preserve the image directory's numeric owner and mode, including the root directory when it has no children. An absent image path produces no seed.
+A named volume always starts empty. Docker copies the image content under the mount target into a fresh volume; flotilla does not, because emulating that copy means reading every service image during preparation and shipping its content with the release. `volume.nocopy: true` is therefore recorded as equivalent — it asks for what already happens. A task that needs content in a volume should bind-mount it from the task directory, where it is visible and versioned.
 
 For read-only root filesystems, even single-service writable volumes/binds use real environment-owned mounts. Framework scratch space is mounted explicitly at `/.flotilla-runtime`; this path and `/.flotilla` are reserved. See [read-only rootfs and tmpfs](Readonly_Rootfs_and_Tmpfs.md) for deployment selection, supported syntax, limits, defaults and migration from directory emulation.
 
