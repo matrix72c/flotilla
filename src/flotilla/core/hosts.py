@@ -13,9 +13,10 @@ END = "# END flotilla"
 def entries(plan: TrialPlan, unit: str, addresses: Mapping[str, str]) -> list[tuple[str, tuple[str, ...]]]:
     """Hosts entries for a unit: (address, names...), sorted by address then name (deterministic).
 
-    Names come only from networks shared with this unit; services sharing no network are omitted (lookups fall
-    through to platform DNS and get NXDOMAIN, matching Compose). A name pointing to the same service on several
-    shared networks appears once; a name pointing to several services (replicas) gets one entry per address.
+    Peer names come only from networks shared with this unit; services sharing no network are omitted (lookups
+    fall through to platform DNS and get NXDOMAIN, matching Compose). A name pointing to the same service on several
+    shared networks appears once; a name pointing to several services (replicas) gets one entry per address. The
+    unit's Compose `extra_hosts` are added as declared, independent of network membership.
     """
     names: dict[str, set[str]] = {}  # address -> names
     for net in plan.networks.values():
@@ -24,6 +25,10 @@ def entries(plan: TrialPlan, unit: str, addresses: Mapping[str, str]) -> list[tu
         for host, services in net.names.items():
             for service in services:
                 names.setdefault(addresses[service], set()).add(host)
+    # Compose `extra_hosts`: literal addresses the task declared. They join the same block, are
+    # not filtered by network membership, and do not go through the platform's address lookup.
+    for host, address in plan.units[unit].extra_hosts.items():
+        names.setdefault(address, set()).add(host)
 
     return [(addr, tuple(sorted(hosts))) for addr, hosts in sorted(names.items())]
 

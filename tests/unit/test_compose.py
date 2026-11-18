@@ -256,3 +256,105 @@ def test_privileged_is_a_warning_on_the_privileged_runtime() -> None:
     assert not off.findings and not off.services["main"].privileged
     bad = normalize({"services": {"main": {"image": "r.io/app", "privileged": "yes"}}})
     assert [f.path for f in bad.findings if f.kind == "reject"] == ["services.main.privileged"]
+
+
+# ───────────────────────────── extra_hosts, links, volumes_from ─────────────────────────────
+
+
+def test_extra_hosts_accepts_literal_addresses_in_both_syntaxes() -> None:
+    mapping = _norm({"app": {"image": "a", "extra_hosts": {"license": "10.9.9.9", "v6": "2001:db8::1"}}})
+    listed = _norm({"app": {"image": "a", "extra_hosts": ["license:10.9.9.9", "v6:2001:db8::1"]}})
+    for p in (mapping, listed):
+        assert not p.rejected, p.findings
+        assert p.services["app"].extra_hosts == {"license": "10.9.9.9", "v6": "2001:db8::1"}
+        assert "services.app.extra_hosts" in _paths(p, "equivalent")
+
+
+@pytest.mark.parametrize(
+    ("value", "path"),
+    [
+        ({"gw": "host-gateway"}, "services.app.extra_hosts.gw"),
+        ({"api": "api.internal"}, "services.app.extra_hosts.api"),
+        ({"api": 10}, "services.app.extra_hosts.api"),
+        (["noseparator"], "services.app.extra_hosts[0]"),
+        ("api:1.2.3.4", "services.app.extra_hosts"),
+    ],
+)
+def test_extra_hosts_rejects_what_has_no_address(value: object, path: str) -> None:
+    p = _norm({"app": {"image": "a", "extra_hosts": value}})
+    assert path in _paths(p, "reject"), p.findings
+
+
+def test_links_publish_an_alias_on_a_shared_network() -> None:
+    p = _norm(
+        {
+            "app": {"image": "a", "networks": ["back"], "links": ["db:database"]},
+            "db": {"image": "d", "networks": ["back"]},
+        },
+        networks={"back": {}},
+    )
+    assert not p.rejected, p.findings
+    assert p.services["db"].networks["back"].aliases == ("database",)
+    assert p.services["app"].networks["back"].aliases == ()
+
+
+def test_links_without_a_shared_network_join_the_default_one() -> None:
+    p = _norm(
+        {
+            "app": {"image": "a", "networks": ["front"], "links": ["db"]},
+            "db": {"image": "d", "networks": ["back"]},
+        },
+        networks={"front": {}, "back": {}},
+    )
+    assert not p.rejected, p.findings
+    assert set(p.services["app"].networks) == {"front", "default"}
+    assert set(p.services["db"].networks) == {"back", "default"}
+    assert p.services["db"].networks["default"].aliases == ("db",)
+
+
+@pytest.mark.parametrize("links", [["ghost"], ["app"], [{"service": "db"}], "db"])
+def test_links_reject_what_cannot_be_named(links: object) -> None:
+    p = _norm({"app": {"image": "a", "links": links}, "db": {"image": "d"}})
+    assert p.rejected, p.findings
+
+
+def test_volumes_from_copies_the_donor_mounts_folding_read_only() -> None:
+    p = _norm(
+        {
+            "app": {"image": "a", "volumes_from": ["db:ro"]},
+            "db": {"image": "d", "volumes": ["data:/var/lib/data", "./conf:/etc/conf:ro"]},
+        },
+        volumes={"data": {}},
+    )
+    assert not p.rejected, p.findings
+    assert p.services["app"].volumes == (
+        VolumeMount("volume", "data", "/var/lib/data", read_only=True),
+        VolumeMount("bind", "./conf", "/etc/conf", read_only=True),
+    )
+    assert "services.app.volumes_from" in _paths(p, "equivalent")
+
+
+def test_volumes_from_keeps_the_donor_flags_without_ro() -> None:
+    p = _norm(
+        {"app": {"image": "a", "volumes_from": ["db"]}, "db": {"image": "d", "volumes": ["data:/data"]}},
+        volumes={"data": {}},
+    )
+    assert p.services["app"].volumes == (VolumeMount("volume", "data", "/data"),)
+
+
+def test_volumes_from_rejects_a_target_this_service_already_mounts() -> None:
+    """The layout keys mounts by target: a silent replacement would hand one service the other's data."""
+    p = _norm(
+        {
+            "app": {"image": "a", "volumes": ["own:/data"], "volumes_from": ["db"]},
+            "db": {"image": "d", "volumes": ["data:/data"]},
+        },
+        volumes={"data": {}, "own": {}},
+    )
+    assert "services.app.volumes_from.db" in _paths(p, "reject"), p.findings
+
+
+@pytest.mark.parametrize("value", [["ghost"], ["app"], ["container:other"], ["db:rx"], "db"])
+def test_volumes_from_rejects_sources_outside_the_project(value: object) -> None:
+    p = _norm({"app": {"image": "a", "volumes_from": value}, "db": {"image": "d"}})
+    assert p.rejected, p.findings

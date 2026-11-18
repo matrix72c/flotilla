@@ -249,6 +249,21 @@ async def test_hosts_block_written_and_system_entries_kept(
 
 
 @pytest.mark.asyncio
+async def test_declared_extra_hosts_reach_the_sandbox_hosts_file(
+    platform: FakePlatform, clock: ManualClock, anchor: Anchor, reaper: Reaper, shell: Shell
+) -> None:
+    _seed_hosts(platform)
+    base = _three()
+    main = replace(base.units["main"], extra_hosts={"license": "10.9.9.9"})
+    plan = replace(base, units={**base.units, "main": main})
+    ready = await clock.run(_new_trial(platform, clock, anchor, reaper, plan).start())
+    content = (platform.file(ready.handles["main"].iid, "/etc/hosts") or b"").decode()
+    assert "10.9.9.9\tlicense\n" in content
+    peers = (platform.file(ready.handles["db"].iid, "/etc/hosts") or b"").decode()
+    assert "license" not in peers  # declared by main, written only for main
+
+
+@pytest.mark.asyncio
 async def test_business_starts_only_after_wire_and_hosts(
     platform: FakePlatform,
     clock: ManualClock,

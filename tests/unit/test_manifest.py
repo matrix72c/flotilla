@@ -188,6 +188,17 @@ def test_manifest_networks_names_and_external_units() -> None:
     assert m.external_units == ["proxy"]  # only proxy is on a non-internal network
 
 
+def test_schema_nine_loads_with_no_static_hosts_entries() -> None:
+    """Schema 10 only adds `units[].extra_hosts`; a schema-9 release keeps loading with none."""
+    data = _manifest(_project({"main": {"image": "m"}})).model_dump(by_alias=True)
+    data["schema"] = 9
+    for unit in data["units"].values():
+        unit.pop("extra_hosts")
+    manifest = Manifest.load(data)
+    assert manifest.schema_ == SCHEMA_VERSION
+    assert all(unit.extra_hosts == {} for unit in manifest.units.values())
+
+
 def test_schema_eight_drops_the_volume_seed_this_version_no_longer_writes() -> None:
     """A trial volume starts empty now; a release that seeded one from its image must be prepared again."""
     data = _manifest(

@@ -104,6 +104,7 @@ def _unit(
         tmpfs_mounts=list(svc.tmpfs),
         shm_size_bytes=svc.shm_size_bytes,
         devices=sorted(svc.devices),
+        extra_hosts=dict(svc.extra_hosts),
     )
 
 
