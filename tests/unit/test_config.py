@@ -357,7 +357,7 @@ def test_protocol_runtime_extension_binding() -> None:
     for changes in (
         {"execd": {"protocol": "legacy"}},
         {"extensions": {"project": "other"}},
-        {"privileged_extensions": {"runtimeClassName": "kata"}},
+        {"extensions": {"project": "p1", "runtimeClassName": "kata"}},
         {"filesystem_protocol": "sandbox-system-v1"},
     ):
         cfg = config(opensandbox={**config_data()["opensandbox"], **changes})

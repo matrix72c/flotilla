@@ -20,7 +20,6 @@ def configured() -> FlotillaConfig:
         opensandbox={
             **config_data()["opensandbox"],
             "management_extensions": {"runtimeClassName": "kata"},
-            "privileged_extensions": {"runtimeClassName": "task-privileged"},
         },
         prepare={
             "management_profile": "management",
@@ -83,14 +82,14 @@ async def test_runtime_anchor_receives_explicit_builder_mount_and_network(
         assert spec.volumes[0].key == ""  # trusted management storage root
         assert spec.volumes[1].key == "operator/build-credentials"
         assert spec.volumes[1].read_only
-        assert spec.profile == "management" and not spec.privileged
+        assert spec.profile == "management" and not spec.devices
         assert spec.resources == Resources(cpu="2", memory="4Gi")
         # Exercise config -> backend factory -> request assembly without contacting a platform.
         monkeypatch.setenv("FLOTILLA_CRED", "test")
         backend = cfg.build_platform(clock=clock, caps=cfg.management_capabilities())
         try:
             assert isinstance(backend, OpenSandboxPlatform)
-            assert not backend.caps.privileged_runtime  # Kata selection is not task privileged permission.
+            assert not backend.caps.privileged_runtime  # management capabilities grant nothing to tasks
             body = backend._create_body(spec, "test-token")
             assert body["extensions"]["runtimeClassName"] == "kata"
             assert body["resourceLimits"] == body["resourceRequests"] == {"cpu": "2", "memory": "4Gi"}

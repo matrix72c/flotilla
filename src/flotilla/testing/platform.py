@@ -400,7 +400,6 @@ class FakePlatform:
             self.caps.require_filesystem(
                 spec.readonly_rootfs,
                 spec.tmpfs_mounts,
-                privileged=spec.privileged,
                 memory=spec.resources.memory,
                 volume_paths=tuple(m.mount_path for m in spec.volumes),
                 shm_size_bytes=spec.shm_size_bytes,

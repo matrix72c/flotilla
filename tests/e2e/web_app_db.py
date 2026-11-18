@@ -228,7 +228,6 @@ async def run(args: argparse.Namespace) -> tuple[dict[str, object], list[Result]
         caps=report.to_capabilities(),
         execd=cfg.execd_settings(),
         extensions=cfg.opensandbox_settings().extensions,
-        privileged_extensions=cfg.opensandbox_settings().privileged_extensions,
         create_fields=cfg.opensandbox_settings().create_fields,
         group_extension=cfg.opensandbox_settings().group_extension,
     )

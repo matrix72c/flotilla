@@ -110,7 +110,6 @@ class OpenSandboxPlatform:
         workload_http: Callable[[str], Http] | None = None,
         command_gate: Callable[[], Awaitable[None]] | None = None,
         extensions: Mapping[str, Any] | None = None,
-        privileged_extensions: Mapping[str, Any] | None = None,
         management_extensions: Mapping[str, Any] | None = None,
         create_fields: Mapping[str, Any] | None = None,
         group_extension: str | None = None,
@@ -120,7 +119,7 @@ class OpenSandboxPlatform:
         clash = sorted(MANAGED_CREATE_FIELDS & set(create_fields or {}))
         if clash:
             raise ValueError(f"create_fields cannot override create fields managed by flotilla: {clash}")
-        extension_sets = (extensions or {}, privileged_extensions or {}, management_extensions or {})
+        extension_sets = (extensions or {}, management_extensions or {})
         if group_extension is not None and any(group_extension in values for values in extension_sets):
             raise ValueError(
                 f"extensions cannot set the placement group key {group_extension!r}: flotilla writes it per trial"
@@ -143,7 +142,6 @@ class OpenSandboxPlatform:
         self._execd = execd or ExecdSettings()
         self._create_fields = dict(create_fields or {})
         self._extensions = dict(extensions or {})
-        self._privileged_extensions = dict(privileged_extensions or {})
         self._management_extensions = dict(management_extensions or {})
         self._group_extension = group_extension
         self._create_timeout_s = create_timeout_s
@@ -157,7 +155,6 @@ class OpenSandboxPlatform:
             self.caps.require_filesystem(
                 spec.readonly_rootfs,
                 spec.tmpfs_mounts,
-                privileged=spec.privileged,
                 memory=spec.resources.memory,
                 volume_paths=tuple(v.mount_path for v in spec.volumes),
                 shm_size_bytes=spec.shm_size_bytes,
@@ -176,8 +173,8 @@ class OpenSandboxPlatform:
         if "flotilla/probe" not in spec.labels:
             raise ValueError("probe_create requires a probe run label")
         options = spec.readonly_rootfs or spec.tmpfs_mounts or spec.shm_size_bytes is not None
-        if options and (self._filesystem.protocol != "sandbox-system-v1" or spec.privileged):
-            raise ValueError("filesystem probe not applicable to this protocol/runtime combination")
+        if options and self._filesystem.protocol != "sandbox-system-v1":
+            raise ValueError("filesystem probe not applicable to this protocol")
         validate_mounts(
             spec.tmpfs_mounts,
             tuple(v.mount_path for v in spec.volumes),
@@ -353,8 +350,6 @@ class OpenSandboxPlatform:
                     retryable=False,
                 )
             extensions.update(self._management_extensions)
-        elif spec.privileged:
-            extensions.update(self._privileged_extensions)
         if spec.group is not None and self._group_extension is not None:
             extensions[self._group_extension] = spec.group
         extensions.update(self._filesystem.extensions(spec))
@@ -431,7 +426,6 @@ def build(
     filesystem: FilesystemSettings = UPSTREAM_FILESYSTEM,
     execd: ExecdSettings | None = None,
     extensions: Mapping[str, Any] | None = None,
-    privileged_extensions: Mapping[str, Any] | None = None,
     management_extensions: Mapping[str, Any] | None = None,
     create_fields: Mapping[str, Any] | None = None,
     group_extension: str | None = None,
@@ -485,7 +479,6 @@ def build(
         filesystem=filesystem,
         execd=execd,
         extensions=extensions,
-        privileged_extensions=privileged_extensions,
         management_extensions=management_extensions,
         create_fields=create_fields,
         group_extension=group_extension,

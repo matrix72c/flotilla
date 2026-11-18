@@ -200,7 +200,6 @@ class Manager:
                 caps.require_filesystem(
                     unit.readonly_rootfs,
                     unit.tmpfs_mounts,
-                    privileged=unit.privileged_runtime,
                     memory=unit.resources.memory,
                     volume_paths=tuple(m.target for m in unit.mounts)
                     + tuple(m.mount_path for m in plan.external_mounts.get(name, ()))
@@ -218,7 +217,7 @@ class Manager:
         if plan.volumes and not caps.shared_volume:
             raise invalid("deployment does not support shared trial volumes")
         if any(unit.privileged for unit in plan.units.values()) and not caps.privileged_runtime:
-            raise invalid("deployment does not support privileged services")
+            raise invalid("deployment does not run on a privileged runtime")
         for name, unit in plan.units.items():
             if missing := sorted(unit.devices - caps.devices):
                 raise invalid(f"{name}: deployment does not support devices {missing}")
@@ -273,6 +272,8 @@ class Manager:
             self.emit("admitted", eid, elapsed_s=time.monotonic() - queued)
             async with asyncio.timeout(startup_s):
                 settings = self.cfg.trial_settings()
+                # Opening writable trial volumes follows the deployment's measured storage behavior.
+                settings = replace(settings, open_writable_volumes=not self.platform.caps.anchor_writable)
                 # Startup is not renewed: an instance must outlive the whole startup budget, then the monitor renews.
                 startup_ttl = math.ceil(startup_s + self.cfg.reaper.renew_before_s)
                 settings = replace(settings, ttl_s=max(settings.ttl_s, startup_ttl))

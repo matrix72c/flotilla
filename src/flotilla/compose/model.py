@@ -77,7 +77,7 @@ class Service:
     readonly_rootfs: bool = False
     restart: RestartPolicy = "no"
     privileged: bool = False
-    devices: frozenset[TaskDevice] = frozenset()  # run on the privileged runtime
+    devices: frozenset[TaskDevice] = frozenset()
     container_name: str | None = None
     hostname: str | None = None
     extra_hosts: Mapping[str, str] = field(default_factory=dict)  # name -> literal address

@@ -93,7 +93,6 @@ def _deployment(project: Project, caps: Capabilities) -> Iterable[Finding]:
             caps.require_filesystem(
                 svc.readonly_rootfs,
                 svc.tmpfs,
-                privileged=svc.privileged or bool(svc.devices),
                 memory=svc.resources.get("memory"),
                 volume_paths=tuple(m.target for m in svc.volumes),
                 shm_size_bytes=svc.shm_size_bytes,
@@ -118,7 +117,7 @@ def _deployment(project: Project, caps: Capabilities) -> Iterable[Finding]:
             yield Finding(
                 f"services.{name}.devices",
                 "reject",
-                f"deployment has no privileged-runtime evidence for devices {missing}",
+                f"deployment has no evidence for devices {missing}",
             )
         if svc.udp_ports and not caps.link_udp:
             yield Finding(f"services.{name}.ports", "reject", "UDP ports declared, but this deployment lacks link_udp")
@@ -126,7 +125,7 @@ def _deployment(project: Project, caps: Capabilities) -> Iterable[Finding]:
             yield Finding(
                 f"services.{name}.privileged",
                 "reject",
-                "deployment has no privileged-runtime isolation evidence",
+                "this deployment does not run on a privileged runtime",
             )
 
 

@@ -16,7 +16,7 @@ from flotilla.platform.base import Capabilities
 from flotilla.platform.base import Device as Device
 from flotilla.platform.network import cluster_dns_address
 
-SCHEMA_VERSION: Literal[2] = 2
+SCHEMA_VERSION: Literal[3] = 3
 ExternalForm = Literal["none", "any", "allowlist"]
 SecurityProperty = Literal["inbound_isolation", "exec_auth", "no_auto_mount"]
 SECURITY_FIELDS: tuple[SecurityProperty, ...] = ("inbound_isolation", "exec_auth", "no_auto_mount")
@@ -51,7 +51,7 @@ class ProbeSettings:
     endpoint: str
     evidence_profile: str
     deployment: str = "deployment"
-    privileged_image: str = ""
+    runtime_image: str = ""
     inner_image: str = ""
     link_members: int = 9
     external_targets: tuple[ExternalTarget | tuple[str, int, str], ...] = ()
@@ -106,19 +106,19 @@ class _Model(BaseModel):
 
 
 class Item(_Model):
-    """One executed check. Only passed enables its recorded scope; no manual source."""
+    """One executed check. Only a passed check enables anything; no manual source.
+
+    Every check measures the one runtime the deployment is configured with, so there is no scope
+    to record: a report describes that runtime, whichever it is.
+    """
 
     status: Literal["passed", "failed", "skipped", "error"]
     evidence: str = ""
     measurements: dict[str, Any] = Field(default_factory=dict)
-    scope: str = "ordinary"
 
     @property
     def ok(self) -> bool:
         return self.status == "passed"
-
-    def passed_for(self, scope: str) -> bool:
-        return self.ok and self.scope == scope
 
 
 UNMEASURED = Item(status="skipped", evidence="not measured")
@@ -184,6 +184,9 @@ class Storage(_Model):
     volume_file: Item = UNMEASURED
     native_tmpfs: Item = UNMEASURED
     shm_size: Item = UNMEASURED
+    #: A unit's root can write a directory the Anchor created. When it cannot, every trial volume a
+    #: unit mounts writable has to be opened to all identities first.
+    anchor_writable: Item = UNMEASURED
 
 
 class Runtime(_Model):
@@ -191,12 +194,9 @@ class Runtime(_Model):
     memory_limit: Item = UNMEASURED
     cpu_limit: Item = UNMEASURED
     cpu_limit_ratio: Annotated[float, Field(gt=0)] | None = None
+    #: The deployment's runtime gives a sandbox's root enough privilege to host a nested container
+    #: daemon. It is a property of the deployment, not of an individual instance.
     privileged_runtime: Item = UNMEASURED
-    privileged_storage: Item = UNMEASURED
-    privileged_no_auto_mount: Item = UNMEASURED
-    privileged_exec_auth: Item = UNMEASURED
-    privileged_network: Item = UNMEASURED
-    privileged_inbound_isolation: Item = UNMEASURED
     fuse: Item = UNMEASURED
     kvm: Item = UNMEASURED
     tun: Item = UNMEASURED
@@ -205,7 +205,7 @@ class Runtime(_Model):
 
 
 class CapabilityReport(_Model):
-    schema_: Literal[2] = Field(default=SCHEMA_VERSION, alias="schema")
+    schema_: Literal[3] = Field(default=SCHEMA_VERSION, alias="schema")
     deployment: str
     endpoint: str
     probed_at: datetime
@@ -263,16 +263,6 @@ class CapabilityReport(_Model):
         forms = net.external_forms
         if not net.network_acceptance.ok:
             forms = forms - {"none"}
-        # Isolation of the privileged runtime admits `privileged` services; devices also need their own check.
-        # `runtime.privileged_runtime` (create, optional Docker measurement, deletion) is recorded, not required:
-        # every check above creates privileged instances and confirmed cleanup is required separately.
-        privileged = (
-            rt.privileged_storage.passed_for("privileged")
-            and rt.privileged_no_auto_mount.passed_for("privileged")
-            and rt.privileged_exec_auth.passed_for("privileged")
-            and rt.privileged_network.passed_for("privileged")
-            and rt.privileged_inbound_isolation.passed_for("privileged")
-        )
         return Capabilities(
             max_label_value_len=self.lifecycle.max_label_value_len,
             list_visibility_s=self.lifecycle.list_visibility_s,
@@ -290,12 +280,9 @@ class CapabilityReport(_Model):
             volume_file=st.volume_file.ok,
             no_auto_mount=st.no_auto_mount.ok,
             exec_auth=rt.exec_auth.ok,
-            privileged_runtime=privileged,
-            devices=frozenset(
-                name
-                for name, item in (("fuse", rt.fuse), ("kvm", rt.kvm), ("tun", rt.tun))
-                if privileged and item.ok and item.scope == "privileged"
-            ),
+            anchor_writable=st.anchor_writable.ok,
+            privileged_runtime=rt.privileged_runtime.ok,
+            devices=frozenset(name for name, item in (("fuse", rt.fuse), ("kvm", rt.kvm), ("tun", rt.tun)) if item.ok),
             readonly_rootfs=rt.readonly_rootfs.ok,
             native_tmpfs=st.native_tmpfs.ok,
             shm_size=st.shm_size.ok,

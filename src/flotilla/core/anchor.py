@@ -373,8 +373,10 @@ class Anchor:
     async def open_permissions(self, key: str, *, stage: Stage) -> None:
         """Make `key` and its contents readable and writable by every identity (`chmod -R a+rwX`).
 
-        Root of a privileged-runtime instance (sysbox user namespace) is not the storage owner of anchor-created
-        content, so default 755/644 content is read-only to it; the platform has no inheritable default ACL.
+        On a runtime that maps a sandbox's root to another identity (a sysbox user namespace, for
+        example), that root is not the storage owner of anchor-created content, so default 755/644
+        content is read-only to it and the platform has no inheritable default ACL. Whether a
+        deployment is in that position is measured as `storage.anchor_writable`, not assumed.
         """
         await self._run(("chmod", "-R", "a+rwX", "--", self._path(key)), stage)
 

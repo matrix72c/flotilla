@@ -23,9 +23,8 @@ A configuration contains exactly one backend table: `[opensandbox]` for the buil
 | `credential_env` | required | Name of the environment variable holding the API credential. Never put the credential itself here |
 | `capabilities` | `"capabilities.json"` | Path to the capability report written by `flotilla probe` |
 | `filesystem_protocol` | `"upstream"` | Lifecycle filesystem mapping: `"upstream"` omits extension fields; `"sandbox-system-v1"` enables the internal wire format, subject to matching probe evidence |
-| `extensions` | `{}` | Extra `extensions` sent with every create request |
-| `privileged_extensions` | `{}` | Extra `extensions` sent only for privileged services, including services declaring `/dev/fuse`, `/dev/kvm` or `/dev/net/tun`. The device keys `fuse`, `kvm` and `tun` are written per instance and cannot be set in any extensions table |
-| `management_extensions` | `{}` | Overrides of `extensions` sent only by workspace anchors explicitly selecting `prepare.management_profile = "management"`; never merged with `privileged_extensions` |
+| `extensions` | `{}` | Extra `extensions` sent with every task create request. They select the deployment's one runtime: there is no per-service second runtime. The device keys `fuse`, `kvm` and `tun` are written per instance and cannot be set here |
+| `management_extensions` | `{}` | Overrides of `extensions` sent only by workspace anchors explicitly selecting `prepare.management_profile = "management"`. They apply to that anchor alone and grant tasks nothing |
 | `create_fields` | `{}` | Extra top-level create-request fields. Fields managed by Flotilla (`image`, `entrypoint`, `metadata`, `timeout`, `resourceLimits`, `resourceRequests`, `volumes`, `networkPolicy`, `extensions`, `env`, `readOnlyRootFilesystem`, `tmpfsMounts`) are rejected |
 | `group_extension` | unset | Extension key used to place all sandboxes of one environment in one scheduling group. Set only if the deployment implements it |
 | `max_connections` | `100` | HTTP connections per pool. There are three pools: control plane, internal commands (health probes, address and hosts setup), and user commands. Requests beyond this wait in Flotilla; a command's timeout starts when it is sent, not while it waits |
@@ -223,7 +222,7 @@ management_resources = { cpu = "2", memory = "4Gi" }
 nodeSelector = { "example.com/pool" = "metadata" }
 ```
 
-These are operator-owned deployment settings, not Compose fields or task runtime parameters. The internal profile is closed (`default` or `management`); selecting it does not grant task privileged permission, and combining management with `privileged=True` is rejected. Ordinary task, probe, bootstrap and GC requests retain their existing extensions and resource allocations. Management extensions may override global deployment extensions but cannot set Flotilla-managed placement-group or shared-memory keys.
+These are operator-owned deployment settings, not Compose fields or task runtime parameters. The internal profile is closed (`default` or `management`); selecting it grants no extra permission, and a management instance may not request task devices. Ordinary task, probe, bootstrap and GC requests retain their existing extensions and resource allocations. Management extensions may override global deployment extensions but cannot set Flotilla-managed placement-group or shared-memory keys.
 
 The management image still comes from `reaper.anchor_image`, and the anchor retains its explicit entrypoint. Metadata and resource inspection run `compose config` only; they need no Docker daemon in the anchor.
 
@@ -245,8 +244,8 @@ All probe inputs live in the deployment file. Images must be pinned `repo@sha256
 |---|---|---|
 | `deployment` | `"deployment"` | Human-readable report name |
 | `image` | `""` | Required ordinary probe image |
-| `privileged_image` | `""` | Image for the configured privileged create path (e.g. Kata DinD). Enables the privileged phase: isolation, FUSE, KVM and TUN checks |
-| `inner_image` | `""` | Fixed lightweight image with `/bin/sh` for DinD execution/resource checks. Without it Docker is not measured; admission of `privileged: true` services and devices does not depend on it |
+| `runtime_image` | `""` | Image for the runtime measurements on the deployment's own runtime: the nested container daemon, and the FUSE/KVM/TUN device checks. It needs a Docker client, `fuse-overlayfs`, `fusermount3` and `python3`. Without it those checks are `skipped`, so `privileged: true` services and devices are not admitted |
+| `inner_image` | `""` | Fixed lightweight image with `/bin/sh` for the nested container's execution/resource check. Without it the nested daemon is not measured and `privileged_runtime` stays unproven |
 | `link_members` | `9` | Measured group size, bounded to 2–32; not a platform maximum |
 | `hosts_recheck_s` | `600` | Delay before verifying that `/etc/hosts` was not rewritten |
 | `list_visibility_s` | `30` | Configured listing budget, also used by management bootstrap and GC safety |
@@ -257,13 +256,13 @@ All probe inputs live in the deployment file. Images must be pinned `repo@sha256
 
 For external isolation acceptance, provide TCP and UDP service controls (for example HTTPS and NTP, without operating echo servers) and a DNS query name. HTTPS/NTP resolve once under an allowing policy and use the same pinned IP for allow/deny/restore; HTTPS retains certificate hostname verification and SNI. Missing positives, invalid responses, certificate errors or restore failures never prove isolation. Measured cluster DNS on TCP/UDP 53 is allowed; this is not complete network disconnection. Non-53 controls on each resolver IP are optional and reported separately as `resolver_non_dns`; missing controls are `skipped`, not an isolation failure or proof of IP-wide blocking. See [Network validation](Network_Validation.md). Probe targets do not extend `[network].external` for tasks.
 
-The probe image needs the configured execd interface, shell/file utilities and Python 3's standard socket/TLS libraries and a CA trust store for HTTPS. The Docker check of the privileged phase additionally needs a running Docker daemon; the fixed inner image must expose readable cgroup v2 limits. FUSE runs only when the actual configured extensions enable it and requires `fuse-overlayfs` and `fusermount3`; missing tools are errors, not evidence of unsupported platform behavior. KVM and TUN checks run `python3` as root in the privileged image.
+The probe image needs the configured execd interface, shell/file utilities and Python 3's standard socket/TLS libraries and a CA trust store for HTTPS. The nested-daemon check additionally needs a running Docker daemon in `runtime_image`; the fixed inner image must expose readable cgroup v2 limits. FUSE requires `fuse-overlayfs` and `fusermount3`; missing tools are errors, not evidence of unsupported platform behavior. KVM and TUN run `python3` as root. Each device check creates its own instance requesting only that device, so one failure leaves the others untouched.
 
 ## Generated capabilities.json
 
-Schema 2 stores one `status` per check: `passed`, `failed`, `skipped`, or `error`, plus concise evidence, measurements and runtime scope. Only `passed` enables a capability. `ok` is a derived internal property, not an accepted report field. Reports do not accept `source`, `declared`, `implicit_egress_declared`, `diagnostics`, or `multi_container`.
+Schema 3 stores one `status` per check: `passed`, `failed`, `skipped`, or `error`, plus concise evidence and measurements. Only `passed` enables a capability. A check carries no scope: every one of them measures the single runtime the deployment is configured with. `ok` is a derived internal property, not an accepted report field. Reports do not accept `scope`, `source`, `declared`, `implicit_egress_declared`, `diagnostics`, or `multi_container`.
 
-`evidence_profile` binds the backend name and its whole settings table except `capabilities`, `credential_env` and `max_connections` (and, for the built-in backend, `management_extensions`), together with storage and input roots, the shared-tool release, network policy, the Anchor image, and the anchor/trial TTL and list-visibility budgets. It records what the probe measured; a later configuration change only logs a warning, so rerun the probe when the platform behavior itself changed. Ordinary evidence does not enable privileged execution: its storage, auth, network and no-auto-mount checks are separate.
+`evidence_profile` binds the backend name and its whole settings table except `capabilities`, `credential_env` and `max_connections` (and, for the built-in backend, `management_extensions`), together with storage and input roots, the shared-tool release, network policy, the Anchor image, and the anchor/trial TTL and list-visibility budgets. It records what the probe measured; a later configuration change only logs a warning, so rerun the probe when the platform behavior itself changed. Because `extensions` is part of that profile, changing the runtime a deployment selects invalidates its report.
 
 The report records requested TTLs, observed expiries and measured group size, not maximum platform limits. The configured list budget remains subject to `reaper.grace + probe.list_visibility_s < reaper.gc_window`; a fast observation never shrinks the safety budget.
 

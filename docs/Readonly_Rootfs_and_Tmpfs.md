@@ -58,8 +58,8 @@ The internal dialect enforces:
 - Canonical absolute paths, with no duplicates, parent/child tmpfs overlaps, or overlap with a volume.
 - No tmpfs at or overlapping `/run`, `/var/run`, `/opt/opensandbox`, `/dev`, `/proc`, `/sys`, `/sandbox-data`, `/data`, or `/var/lib/docker`. Flotilla conservatively treats the reserved directories' subtrees as reserved too.
 - No overlap with Flotilla's own `/.flotilla` and `/.flotilla-runtime` paths.
-- No combination of `read_only: true` and `privileged: true`.
-- Native tmpfs with `privileged: true` is also rejected by Flotilla: the optional probes measure the normal runtime, so their evidence cannot authorize a different privileged runtime.
+
+A deployment runs one runtime for every service, so these controls rest on that runtime's own evidence. A runtime that hosts a nested container daemon — the one `privileged: true` asks for — typically fails the read-only rootfs and tmpfs checks, which is why a task set needing both kinds has to run on two deployments.
 
 MVM, sysbox, and kata are outside the internal feature contract. Probe the exact runtime settings; an unsupported response is an error, not a fallback. Server-side validation remains authoritative for runtime selection, template inheritance, and deployment-specific limits.
 
@@ -69,7 +69,7 @@ tmpfs consumption counts against sandbox memory; a process can hit OOM before fi
 
 Compose `shm_size` sets the capacity of the service's `/dev/shm`. Values use Compose byte quantities, converted like tmpfs sizes (`2gb` becomes 2147483648 bytes). A service without `shm_size` keeps the platform default: `min(8Gi, requested memory)` on the internal platform, the container runtime's default (usually 64 MiB) on upstream OpenSandbox.
 
-In internal mode an explicit size is sent per instance as `extensions["sandbox-system.io/shm-size"]`, in bytes. The size counts against the same requested-memory budget as tmpfs: declared tmpfs capacities plus `shm_size` may not exceed the sandbox memory. Deployment-wide `opensandbox.extensions` and `privileged_extensions` may not set this key. Privileged services with `shm_size` are rejected, as with tmpfs.
+In internal mode an explicit size is sent per instance as `extensions["sandbox-system.io/shm-size"]`, in bytes. The size counts against the same requested-memory budget as tmpfs: declared tmpfs capacities plus `shm_size` may not exceed the sandbox memory. Deployment-wide `opensandbox.extensions` may not set this key. A deployment whose runtime cannot provide an explicit `/dev/shm` size has no passed `storage.shm_size` evidence, so tasks declaring it are rejected there, as with tmpfs.
 
 The platform echoes an explicit size in the instance's `extensions` and omits the key for its default. Before business startup, an instance that requested `shm_size` must echo exactly that size (after quantity normalization); a missing, different, or malformed value fails readiness like a tmpfs mismatch. Instances without `shm_size` accept whatever default the platform reports.
 

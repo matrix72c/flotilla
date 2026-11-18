@@ -50,6 +50,6 @@ This is a bounded behavioral contract over recorded controls, not a proof about 
 
 ## Runtime scope and cleanup
 
-Ordinary and privileged paths are measured separately using their configured images/extensions; ordinary evidence does not cover Kata. No automatic runtime/protocol switching occurs. The probe bounds member count and total time, labels all instances, and reconciles possibly lost create responses during cleanup. Review every unconfirmed instance or directory. Finite TTL is a fallback, not deletion confirmation.
+Every measurement uses the deployment's one configured runtime and extensions; its evidence does not carry over to a deployment configured with a different runtime. No automatic runtime/protocol switching occurs. The probe bounds member count and total time, labels all instances, and reconciles possibly lost create responses during cleanup. Review every unconfirmed instance or directory. Finite TTL is a fallback, not deletion confirmation.
 
 `scripts/check_network.py` remains a standalone diagnostic; it cannot generate capability acceptance by declaration. Review its targets and ownership before using it. No real platform validation is implied by offline unit tests.

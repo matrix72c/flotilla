@@ -60,7 +60,7 @@ class Unit(_Model):
     readonly_rootfs: bool = False
     tmpfs_mounts: list[TmpfsMount] = []
     shm_size_bytes: Annotated[int, Field(gt=0)] | None = None
-    devices: list[TaskDevice] = []  # sorted, unique; run on the privileged runtime
+    devices: list[TaskDevice] = []  # sorted, unique; written as per-instance extensions
     extra_hosts: dict[str, str] = {}  # name -> literal address, merged into the generated hosts block
 
     @model_validator(mode="after")

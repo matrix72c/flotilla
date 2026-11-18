@@ -77,8 +77,11 @@ def test_privileged_needs_runtime(caps: Capabilities) -> None:
     r = scan("t", _project(svc), replace(caps, privileged_runtime=True))
     assert r.status == "accepted"
     assert [(f.path, f.kind) for f in r.findings] == [("services.k.privileged", "warn")]
+    # Read-only rootfs is its own capability now: a privileged deployment that measured it can do both.
     readonly = _project({"k": {"image": "k", "privileged": True, "read_only": True}})
-    assert scan("t", readonly, replace(caps, privileged_runtime=True, readonly_rootfs=True)).status == "rejected"
+    assert scan("t", readonly, replace(caps, privileged_runtime=True)).status == "rejected"
+    permissive = replace(caps, privileged_runtime=True, readonly_rootfs=True, shared_volume=True)
+    assert scan("t", readonly, permissive).status == "accepted"
 
 
 def test_share_mount_conflict(caps: Capabilities) -> None:

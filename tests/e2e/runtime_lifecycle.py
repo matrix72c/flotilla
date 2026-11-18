@@ -77,7 +77,6 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         extensions=cfg.opensandbox_settings().extensions,
         create_fields=cfg.opensandbox_settings().create_fields,
         group_extension=cfg.opensandbox_settings().group_extension,
-        privileged_extensions=cfg.opensandbox_settings().privileged_extensions,
     )
     # The observer shares the deliberately blocked caller loop, so its grace must
     # exceed that pause. The runtime under test retains the deployment's 90s grace.

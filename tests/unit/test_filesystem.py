@@ -104,10 +104,12 @@ def test_filesystem_admission_and_internal_limits(caps: Capabilities) -> None:
     supported.require_filesystem(False, (TmpfsMount("/tmp"),), memory="128Mi")
     with pytest.raises(ValueError, match="exceed"):
         supported.require_filesystem(False, (TmpfsMount("/tmp"),), memory="32Mi")
-    with pytest.raises(ValueError, match="privileged"):
-        supported.require_filesystem(True, (), privileged=True)
-    with pytest.raises(ValueError, match="privileged"):
-        supported.require_filesystem(False, (TmpfsMount("/tmp"),), privileged=True)
+    # One runtime per deployment: a runtime that cannot do these simply has no passed evidence for them.
+    plain = replace(caps, filesystem_limits=INTERNAL_LIMITS)
+    with pytest.raises(ValueError, match="readonly_rootfs"):
+        plain.require_filesystem(True, ())
+    with pytest.raises(ValueError, match="native_tmpfs"):
+        plain.require_filesystem(False, (TmpfsMount("/tmp"),))
 
 
 def test_unsized_tmpfs_resolves_to_half_service_memory_at_planning() -> None:

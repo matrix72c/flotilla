@@ -426,7 +426,7 @@ async def measure_network(run: _Run, handle: InstanceHandle) -> Network:
         tcp = udp = inbound = link_result
     else:
         tcp, udp, inbound = link_result
-    # Release the larger group before ordinary/privileged phases.
+    # Release the larger group before the remaining checks.
     for iid in list(run._created):
         if iid != handle.iid:
             await run._delete(iid)

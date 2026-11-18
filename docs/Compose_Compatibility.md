@@ -4,8 +4,9 @@ Flotilla translates a supported Compose subset into sandbox processes and mounts
 It does **not** run Docker Compose containers and does not promise full Docker,
 PID 1, signal-delivery, process-tree, or container-inspection equivalence.
 Unsupported declarations fail closed; there is no automatic Docker-in-Docker
-fallback. `privileged: true` runs on the privileged runtime with a warning;
-that sandbox is not treated as Docker privileged mode on the host.
+fallback. `privileged: true` is a declaration that the deployment's runtime must
+be a privileged one, admitted with a warning against measured evidence; that
+sandbox is not treated as Docker privileged mode on the host.
 
 ## Production normalization
 
@@ -87,8 +88,8 @@ policies other than `no` never restart a service; an exit Docker would restart
 voids the run. `hostname` and `container_name` become names peers resolve;
 `gethostname()` keeps the platform's value.
 
-The scanner/build boundary still rejects Docker privileged mode outside the
-privileged runtime, other bridge driver options, and the security, device and
+The scanner/build boundary still rejects `privileged: true` on a deployment
+without that evidence, other bridge driver options, and the security, device and
 namespace fields listed in [Compose support](Compose_Support.md).
 
 Filesystem mounts, networking, health checks, and resource limits also remain

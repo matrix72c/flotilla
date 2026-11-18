@@ -42,7 +42,7 @@ async def test_storage_checks_preserve_independent_results(
     await clock.run(anchor.start())
     run = _Run(platform, clock, anchor, SETTINGS, "p1")
     original_exec = platform.exec_handler
-    base = "launches/storage-test/p1/shared-ordinary/visible"
+    base = "launches/storage-test/p1/shared/visible"
     seen: list[str] = []
 
     def fail() -> None:
@@ -82,6 +82,7 @@ async def test_storage_checks_preserve_independent_results(
         assert results["read_only"].ok
         assert results["subdir_isolation"].status == ("error" if broken == "mountinfo" else "passed")
         assert results["missing_subpath"].status == "failed"  # fake accepts absent paths; never fabricate rejection
+        assert results["anchor_writable"].ok
         assert seen == ["no_auto_mount", "mountinfo"]
         assert all("secret output" not in result.model_dump_json() for result in results.values())
     finally:

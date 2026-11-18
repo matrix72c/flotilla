@@ -24,12 +24,11 @@ from flotilla.probe import _probed, _Run, _sh
 from flotilla.probe_opensandbox import authentication
 
 
-async def attempt[T](operation: Callable[[], Awaitable[T]], *, scope: str = "ordinary") -> T | Item:
+async def attempt[T](operation: Callable[[], Awaitable[T]]) -> T | Item:
     try:
-        result = await operation()
-        return result.model_copy(update={"scope": scope}) if isinstance(result, Item) else result
+        return await operation()
     except NotImplementedError:
-        return Item(status="skipped", evidence="configured backend cannot express this check", scope=scope)
+        return Item(status="skipped", evidence="configured backend cannot express this check")
     except Exception as exc:
         # Keep structured diagnostics, never remote messages that may contain credentials/output.
         measurements: dict[str, Any] = {
@@ -42,12 +41,7 @@ async def attempt[T](operation: Callable[[], Awaitable[T]], *, scope: str = "ord
             measurements.update(stage=exc.stage, category=exc.category.value, retryable=exc.retryable)
             if match := re.search(r"\bHTTP ([1-5][0-9]{2})\b", str(exc)):
                 measurements["http_status"] = int(match.group(1))
-        return Item(
-            status="error",
-            evidence=f"check incomplete ({type(exc).__name__})",
-            measurements=measurements,
-            scope=scope,
-        )
+        return Item(status="error", evidence=f"check incomplete ({type(exc).__name__})", measurements=measurements)
 
 
 async def prerequisites(run: _Run, unit: InstanceHandle) -> Item:
@@ -80,18 +74,11 @@ async def prerequisites(run: _Run, unit: InstanceHandle) -> Item:
     )
 
 
-async def storage_extra(run: _Run, *, privileged: bool = False) -> dict[str, Item]:
+async def storage_extra(run: _Run) -> dict[str, Item]:
     p = run.platform
-    scope = "privileged" if privileged else "ordinary"
-    base = f"launches/{run.anchor.launch_id}/{run.run_id}/shared-{scope}"
+    base = f"launches/{run.anchor.launch_id}/{run.run_id}/shared"
     await run.anchor.mkdir(base + "/visible", stage="prepare")
-    if privileged:  # the runtime path does the same for writable mounts of privileged-runtime units
-        await run.anchor.open_permissions(base + "/visible", stage="prepare")
-    spec = replace(
-        run._spec("shared-" + scope, (SharedVolume(base + "/visible", "/probe", False),)),
-        privileged=privileged,
-        image=run.settings.privileged_image if privileged else run.settings.image,
-    )
+    spec = run._spec("shared", (SharedVolume(base + "/visible", "/probe", False),))
     a, b = await run._create(spec), await run._create(spec)
     token = run.run_id.encode()
     # Establish fixtures first; failures of individual checks below must not erase other evidence.
@@ -141,7 +128,7 @@ async def storage_extra(run: _Run, *, privileged: bool = False) -> dict[str, Ite
                     isolated = _mounted_subdir(fields[fields.index("-") + 2] + "|" + fields[3], base + "/visible")
             return _probed(isolated, "mounted source/root identifies exactly the requested subdirectory")
 
-        return {"read_only": readonly, "subdir_isolation": await attempt(subdir, scope=scope)}
+        return {"read_only": readonly, "subdir_isolation": await attempt(subdir)}
 
     async def missing_subpath() -> Item:
         try:
@@ -156,12 +143,13 @@ async def storage_extra(run: _Run, *, privileged: bool = False) -> dict[str, Ite
         return _probed(False, "missing subPath was created/accepted; empty=" + str(listing.exit_code == 0))
 
     results = {
-        "shared_volume": await attempt(shared_contents, scope=scope),
-        "volume_file": await attempt(file_mount, scope=scope),
-        "missing_subpath": await attempt(missing_subpath, scope=scope),
-        "no_auto_mount": await attempt(lambda: no_auto_mount(run, a, privileged=privileged), scope=scope),
+        "shared_volume": await attempt(shared_contents),
+        "volume_file": await attempt(file_mount),
+        "missing_subpath": await attempt(missing_subpath),
+        "no_auto_mount": await attempt(lambda: no_auto_mount(run, a)),
+        "anchor_writable": await attempt(lambda: anchor_writable(run, a)),
     }
-    readonly = await attempt(readonly_mount, scope=scope)
+    readonly = await attempt(readonly_mount)
     results.update({"read_only": readonly, "subdir_isolation": readonly} if isinstance(readonly, Item) else readonly)
     # The run owns all allocations, including partially created checks, and cleans them in its finalizer.
     return results
@@ -175,7 +163,7 @@ async def _mountinfo(run: _Run, unit: InstanceHandle) -> str:
     return result.stdout.decode()
 
 
-async def no_auto_mount(run: _Run, mounted: InstanceHandle, *, privileged: bool) -> Item:
+async def no_auto_mount(run: _Run, mounted: InstanceHandle) -> Item:
     from flotilla.probe_opensandbox import unmounted_mountinfo
 
     p = run.platform
@@ -187,13 +175,7 @@ async def no_auto_mount(run: _Run, mounted: InstanceHandle, *, privileged: bool)
             backing.add(fields[fields.index("-") + 2])
     if not backing:
         return Item(status="error", evidence="shared mount backing could not be identified")
-    spec = replace(
-        run._spec("unmounted"),
-        volumes=(),
-        privileged=privileged,
-        image=run.settings.privileged_image if privileged else run.settings.image,
-        entrypoint=("/bin/sh", "-c", "sleep 3600"),
-    )
+    spec = replace(run._spec("unmounted"), volumes=(), entrypoint=("/bin/sh", "-c", "sleep 3600"))
     unit = await run._create(spec)
     data = await unmounted_mountinfo(p, unit)
     extras = []
@@ -212,93 +194,60 @@ async def no_auto_mount(run: _Run, mounted: InstanceHandle, *, privileged: bool)
         status="failed" if extras else "passed",
         evidence="no-mount create checked for shared backing and project data paths",
         measurements={"extra_mounts": extras},
-        scope="privileged" if privileged else "ordinary",
     )
 
 
-async def privileged(run: _Run) -> dict[str, Item]:
-    if not run.settings.privileged_image:
-        return {
-            "privileged_runtime": Item(
-                status="skipped", evidence="probe privileged_image not configured", scope="privileged"
-            )
-        }
-    p = run.platform
-    if not isinstance(p, OpenSandboxPlatform):
-        return {"privileged_runtime": Item(status="skipped", evidence="backend has no privileged runtime probe")}
-    unit = await run._create(replace(run._spec("privileged"), image=run.settings.privileged_image, privileged=True))
-    # Address readiness uses the exact configured protocol and real privileged create path.
-    await p.internal_address(unit)
-    # Optional Docker measurement (DinD daemon and inner container limits); recorded, never required for admission.
-    docker = await attempt(lambda: _docker(run, unit), scope="privileged")
-    auth = await attempt(lambda: authentication(p, unit, run_id=run.run_id, scope="privileged"), scope="privileged")
-    fuse_item = await attempt(lambda: fuse(run), scope="privileged")
-    storage = await attempt(lambda: storage_extra(run, privileged=True), scope="privileged")
-    if isinstance(storage, Item):
-        storage_item = no_mount = storage
-    else:
-        storage_item = _probed(
-            all(storage[name].ok for name in ("read_only", "shared_volume", "volume_file", "subdir_isolation")),
-            "privileged read-only, shared and single-file mount behavior",
-        ).model_copy(update={"scope": "privileged"})
-        no_mount = storage["no_auto_mount"]
-    from flotilla.probe_network import measure_network
+async def anchor_writable(run: _Run, unit: InstanceHandle) -> Item:
+    """Can a unit's root write a directory the Anchor created, without it being opened first?
 
-    run.privileged = True
-    try:
-        pre = await attempt(lambda: prerequisites(run, unit), scope="privileged")
-        net = await attempt(lambda: measure_network(run, unit), scope="privileged") if pre.ok else pre
-    finally:
-        run.privileged = False
-    if isinstance(net, Item):
-        network_item = ingress_item = net
-    else:
-        network_item = Item(
-            status="passed"
-            if (net.link.ok and net.link_udp.ok and net.network_acceptance.ok and net.external_allowlist.ok)
-            else "error",
-            evidence="privileged network controls (ordinary evidence is not reused)",
-            scope="privileged",
-            measurements=net.model_dump(mode="json"),
-        )
-        ingress_item = net.inbound_isolation.model_copy(update={"scope": "privileged"})
+    On a runtime that maps the sandbox's root to another identity, Anchor-created storage is
+    read-only to the workload, and every writable trial volume has to be opened to all identities
+    before the unit starts. That is a real loosening, so it is driven by this measurement rather
+    than inferred from which runtime the deployment selected.
+    """
+    probe = await run.platform.exec(unit, _sh("touch /probe/anchor-writable && rm -f /probe/anchor-writable"))
+    return Item(
+        status="passed" if probe.exit_code == 0 and not probe.timed_out else "failed",
+        evidence="unit root wrote an Anchor-created directory mounted read-write, without opening it",
+    )
+
+
+async def runtime_privilege(run: _Run) -> dict[str, Item]:
+    """What the deployment's one runtime offers beyond a plain sandbox: a nested daemon, and devices.
+
+    There is no second create path to measure: the extensions table in the deployment selects the
+    runtime for every task instance, so the checks above already ran on it. What is left is whether
+    that runtime hosts a container daemon, and which device nodes it will attach per instance.
+    """
+    if not run.settings.runtime_image:
+        skipped = Item(status="skipped", evidence="probe runtime_image not configured")
+        return {"privileged_runtime": skipped, "fuse": skipped, "kvm": skipped, "tun": skipped}
+    unit = await run._create(replace(run._spec("runtime"), image=run.settings.runtime_image))
+    docker = await attempt(lambda: _docker(run, unit))
     gone = await run._delete(unit.iid)
-    kvm_item = await attempt(lambda: device(run, "kvm"), scope="privileged")
-    tun_item = await attempt(lambda: device(run, "tun"), scope="privileged")
     return {
         "privileged_runtime": Item(
-            status="passed" if gone else "failed",
-            scope="privileged",
-            evidence="configured privileged create and address readiness; outer deletion; Docker in measurements",
-            measurements={
-                "docker": {"status": docker.status, "evidence": docker.evidence},
-                "extensions": sorted(p._privileged_extensions),
-                "inner_memory_bytes": 64 * 1024 * 1024,
-                "inner_cpu": 0.5,
-            },
+            status=docker.status if gone else "failed",
+            evidence="nested container daemon on the deployment's runtime; outer deletion confirmed",
+            measurements={"docker": {"status": docker.status, "evidence": docker.evidence}, "deleted": gone},
         ),
-        "privileged_storage": storage_item,
-        "privileged_no_auto_mount": no_mount,
-        "privileged_exec_auth": auth,
-        "fuse": fuse_item,
-        "kvm": kvm_item,
-        "tun": tun_item,
-        "privileged_network": network_item,
-        "privileged_inbound_isolation": ingress_item,
+        "fuse": await attempt(lambda: fuse(run)),
+        "kvm": await attempt(lambda: device(run, "kvm")),
+        "tun": await attempt(lambda: device(run, "tun")),
     }
 
 
 async def _docker(run: _Run, unit: InstanceHandle) -> Item:
     """Docker daemon positive control plus a digest-pinned inner container's output, exit and resource limits."""
     if not run.settings.inner_image:
-        return Item(status="skipped", evidence="probe inner_image not configured", scope="privileged")
+        return Item(status="skipped", evidence="probe inner_image not configured")
     p = run.platform
     tool = await p.exec(unit, _sh("command -v docker >/dev/null"))
     if tool.exit_code != 0:
-        return Item(status="error", evidence="privileged image lacks docker", scope="privileged")
+        return Item(status="error", evidence="probe runtime_image lacks docker")
     info = await p.exec(unit, _sh("docker info >/dev/null", timeout_s=60))
     if info.exit_code != 0:
-        return Item(status="error", evidence="Docker daemon positive control unavailable", scope="privileged")
+        return Item(status="error", evidence="Docker daemon positive control unavailable")
     image = shlex.quote(run.settings.inner_image)
     token = shlex.quote(run.run_id)
     command = f"docker run --rm --network none --memory 64m --cpus 0.5 {image} /bin/sh -c " + shlex.quote(
@@ -318,7 +267,6 @@ async def _docker(run: _Run, unit: InstanceHandle) -> Item:
     return Item(
         status="passed" if good else "failed",
         evidence="docker info; digest inner container output/exit/resource limits",
-        scope="privileged",
     )
 
 
@@ -349,38 +297,31 @@ _DEVICE_EVIDENCE: dict[TaskDevice, str] = {
 
 
 async def device(run: _Run, name: TaskDevice) -> Item:
-    """A privileged instance requesting exactly one device; the device must be usable by root, then deleted."""
-    spec = replace(
-        run._spec(f"device-{name}"), image=run.settings.privileged_image, privileged=True, devices=frozenset({name})
-    )
+    """An instance requesting exactly one device; the device must be usable by root, then deleted."""
+    spec = replace(run._spec(f"device-{name}"), image=run.settings.runtime_image, devices=frozenset({name}))
     unit = await run._create(spec)
     result = await run.platform.exec(unit, _sh("python3 -I -c " + shlex.quote(_DEVICE_SCRIPTS[name]), timeout_s=60))
     gone = await run._delete(unit.iid)
     return Item(
         status="passed" if result.exit_code == 0 and not result.timed_out and gone else "failed",
         evidence=_DEVICE_EVIDENCE[name],
-        scope="privileged",
     )
 
 
 async def fuse(run: _Run) -> Item:
-    """A privileged instance requesting only the FUSE device; root must complete a real mount cycle.
+    """An instance requesting only the FUSE device; root must complete a real mount cycle.
 
-    Scoped like the kvm and tun probes rather than reading the deployment's extension tables:
-    flotilla writes the device extension per instance, so a task can declare `/dev/fuse` on one
-    service without every privileged sandbox carrying FUSE.
+    Measured like kvm and tun rather than read off the deployment's extension table: flotilla
+    writes the device extension per instance, so a task can declare `/dev/fuse` on one service
+    without every sandbox in the deployment carrying FUSE.
     """
     p = run.platform
-    spec = replace(
-        run._spec("device-fuse"), image=run.settings.privileged_image, privileged=True, devices=frozenset({"fuse"})
-    )
+    spec = replace(run._spec("device-fuse"), image=run.settings.runtime_image, devices=frozenset({"fuse"}))
     unit = await run._create(spec)
     tools = await p.exec(unit, _sh("command -v fuse-overlayfs >/dev/null && command -v fusermount3 >/dev/null"))
     if tools.exit_code != 0:
         await run._delete(unit.iid)
-        return Item(
-            status="error", evidence="local FUSE probe needs fuse-overlayfs and fusermount3", scope="privileged"
-        )
+        return Item(status="error", evidence="local FUSE probe needs fuse-overlayfs and fusermount3")
     base = "/tmp/flotilla-fuse-" + run.run_id
     script = (
         f"set -e; test -r /dev/fuse; test -w /dev/fuse; mkdir -p {base}/lower {base}/upper {base}/work {base}/merged; "
@@ -396,7 +337,6 @@ async def fuse(run: _Run) -> Item:
     return Item(
         status="passed" if result.exit_code == 0 and not result.timed_out and gone else "failed",
         evidence="create with only the fuse extension; root mounts, reads, writes and unmounts; outer deletion",
-        scope="privileged",
     )
 
 
@@ -465,9 +405,11 @@ async def measure(run: _Run, results: dict[str, Any]) -> None:
     storage["native_tmpfs"] = tmpfs
     storage["shm_size"] = await attempt(lambda: run.shm_size(run.settings.filesystem_supported))
     results["storage"] = Storage(**storage)
-    # Finish ordinary phase before creating privileged instances.
+    # Release everything the checks above allocated before measuring the runtime's extras.
     for iid in list(run._created):
         await run._delete(iid)
-    optional = await attempt(lambda: privileged(run), scope="privileged")
-    runtime.update({"privileged_runtime": optional} if isinstance(optional, Item) else optional)
+    optional = await attempt(lambda: runtime_privilege(run))
+    if isinstance(optional, Item):
+        optional = {key: optional for key in ("privileged_runtime", "fuse", "kvm", "tun")}
+    runtime.update(optional)
     results["runtime"] = Runtime(**runtime)

@@ -73,8 +73,6 @@ async def test_probe_pending_filesystem_does_not_enable_normal_create(clock: Man
             await platform.create(requested)
         with pytest.raises(ValueError, match="probe run label"):
             await platform.probe_create(replace(requested, labels={}))
-        with pytest.raises(ValueError, match="combination"):
-            await platform.probe_create(replace(requested, privileged=True))
         assert len(bodies) == 1
     finally:
         await platform.aclose()

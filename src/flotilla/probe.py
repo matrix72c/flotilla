@@ -188,7 +188,6 @@ class _Run:
     anchor: Anchor
     settings: ProbeSettings
     run_id: str
-    privileged: bool = False
 
     def __post_init__(self) -> None:
         self._created: list[str] = []
@@ -206,8 +205,7 @@ class _Run:
             key=f"share/releases/{self.settings.share_release}", mount_path="/.flotilla", read_only=True
         )
         return InstanceSpec(
-            image=self.settings.privileged_image if self.privileged else self.settings.image,
-            privileged=self.privileged,
+            image=self.settings.image,
             entrypoint=("/.flotilla/bin/busybox", "sleep", "2147483647"),
             labels={labels.LAUNCH: self.anchor.launch_id, PROBE_LABEL: self.run_id, labels.UNIT: name},
             timeout_seconds=self.settings.ttl_s,

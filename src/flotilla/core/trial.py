@@ -48,6 +48,10 @@ class TrialSettings:
     start_slack_s: float = 120.0
     start_max_s: float = 1800.0
     process_poll_s: float = 2.0
+    #: The deployment's runtime does not let a unit's root write Anchor-created storage, so every
+    #: trial volume a unit mounts writable is opened to all identities first. Set from the
+    #: capability report's `storage.anchor_writable`, never assumed.
+    open_writable_volumes: bool = False
     extra_labels: Mapping[str, str] = field(default_factory=dict)  # client request.labels (merged with an x- prefix)
 
 
@@ -176,11 +180,14 @@ class Trial:
             await self._anchor.mkdir(key, stage="prepare")
             if vol.owner is not None:
                 await self._anchor.chown(key, *vol.owner, stage="prepare")
-        # Privileged-runtime root cannot write anchor-owned content; open what such units mount writable.
+        # On a runtime whose sandbox root cannot write Anchor-created storage, a writable trial
+        # volume is unusable until it is opened. Measured per deployment: when the probe shows the
+        # Anchor's directories are writable, nothing is opened.
+        if not self._settings.open_writable_volumes:
+            return
         writable = {
             f"{base}/{m.key}"
             for u in self._plan.units.values()
-            if u.privileged_runtime
             for m in u.mounts
             if m.scope == "trial" and not m.read_only
         }
@@ -237,7 +244,6 @@ class Trial:
                 trial_id=self._trial_id,
             ),
             external=network.external_policy(self._plan, unit, self._settings.external),
-            privileged=u.privileged_runtime,
             devices=u.devices,
             readonly_rootfs=u.readonly_rootfs,
             tmpfs_mounts=u.tmpfs_mounts,

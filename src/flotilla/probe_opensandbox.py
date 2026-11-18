@@ -59,9 +59,9 @@ async def unmounted_mountinfo(platform: Platform, handle: InstanceHandle) -> str
     return result.stdout.decode()
 
 
-async def authentication(platform: Platform, handle: InstanceHandle, *, run_id: str, scope: str = "ordinary") -> Item:
+async def authentication(platform: Platform, handle: InstanceHandle, *, run_id: str) -> Item:
     if not isinstance(platform, OpenSandboxPlatform):
-        return Item(status="skipped", evidence="backend has no authentication probe", scope=scope)
+        return Item(status="skipped", evidence="backend has no authentication probe")
     from flotilla.probe import _sh
 
     unit = await platform._unit_of(handle.iid, stage="run")
@@ -93,19 +93,17 @@ async def authentication(platform: Platform, handle: InstanceHandle, *, run_id: 
                     status="error",
                     evidence="valid-token positive control failed",
                     measurements={"requests": observed},
-                    scope=scope,
                 )
             if kind != "valid" and code not in (401, 403):
                 return Item(
                     status="failed" if 200 <= code < 300 else "error",
                     evidence="missing/wrong token was not explicitly rejected",
                     measurements={"requests": observed},
-                    scope=scope,
                 )
     lifecycle = platform._lifecycle
     leaked = lifecycle.probe_token_disclosure.get(handle.iid)
     if leaked is None:
-        return Item(status="error", evidence="create response disclosure observation unavailable", scope=scope)
+        return Item(status="error", evidence="create response disclosure observation unavailable")
     disclosure_routes: tuple[tuple[str, dict[str, str | int] | None], ...] = (
         (sandbox_path(handle.iid), None),
         ("/sandboxes", {"metadata": metadata_filter({"flotilla/probe": run_id}), "pageSize": 200}),
@@ -114,11 +112,10 @@ async def authentication(platform: Platform, handle: InstanceHandle, *, run_id: 
         response = await lifecycle._http.request("GET", path, params=params, stage="run", idempotent=True)
         items = response.get("items", []) if path == "/sandboxes" else [response]
         if not any(item.get("id") == handle.iid for item in items):
-            return Item(status="error", evidence="disclosure check did not observe the probed instance", scope=scope)
+            return Item(status="error", evidence="disclosure check did not observe the probed instance")
         leaked = leaked or unit.token in json.dumps(response)
     return Item(
         status="failed" if leaked else "passed",
         evidence="exec/file valid, missing and wrong token checks; create/get/list token disclosure",
         measurements={"requests": observed, "token_disclosed": leaked},
-        scope=scope,
     )

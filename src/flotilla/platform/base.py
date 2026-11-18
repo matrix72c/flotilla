@@ -131,7 +131,7 @@ class Capabilities:
     no_auto_mount: bool  # security
     # Exec channel authentication
     exec_auth: bool  # security
-    # Optional runtimes
+    # The deployment's runtime hosts a nested container daemon (one runtime per deployment).
     privileged_runtime: bool
     devices: frozenset[str]  # subset of `Device`
     cluster_dns: tuple[str, ...] = ()  # explicitly declared resolver IPs; only TCP/UDP 53 may be implicit
@@ -139,6 +139,9 @@ class Capabilities:
     readonly_rootfs: bool = False
     native_tmpfs: bool = False
     shm_size: bool = False  # explicit `/dev/shm` size per instance
+    #: A unit's root can write Anchor-created storage. Without it, trial volumes a unit mounts
+    #: writable must be opened to every identity before the unit starts.
+    anchor_writable: bool = False
     filesystem_limits: FilesystemLimits = NO_FILESYSTEM_LIMITS
 
     def require_filesystem(
@@ -146,7 +149,6 @@ class Capabilities:
         readonly_rootfs: bool,
         tmpfs_mounts: tuple[TmpfsMount, ...],
         *,
-        privileged: bool = False,
         memory: str | None = None,
         volume_paths: tuple[str, ...] = (),
         shm_size_bytes: int | None = None,
@@ -157,12 +159,6 @@ class Capabilities:
             raise ValueError("deployment does not support native_tmpfs; directory emulation is not supported")
         if shm_size_bytes is not None and not self.shm_size:
             raise ValueError("deployment does not support shm_size")
-        if readonly_rootfs and privileged:
-            raise ValueError("readonly_rootfs cannot be combined with privileged")
-        if tmpfs_mounts and privileged:
-            raise ValueError("native_tmpfs has not been verified for privileged runtimes")
-        if shm_size_bytes is not None and privileged:
-            raise ValueError("shm_size has not been verified for privileged runtimes")
         validate_mounts(
             tmpfs_mounts,
             volume_paths,
@@ -232,9 +228,9 @@ class ExternalPolicy:
 InstanceProfile = Literal["default", "management"]
 #: Host devices a capability report can record.
 Device = Literal["fuse", "kvm", "tun"]
-#: Devices a task may request, by the device node it declares. They need the privileged runtime.
-#: The platform does not require a special runtime for FUSE, but the probe only measures it on a
-#: privileged instance, so admitting it elsewhere would claim a configuration nothing verified.
+#: Devices a task may request, by the device node it declares. Each is written as a per-instance
+#: extension and admitted only on its own measured evidence, so one service can hold a device
+#: without every sandbox in the deployment carrying it.
 TaskDevice = Literal["fuse", "kvm", "tun"]
 TASK_DEVICE_PATHS: Mapping[str, TaskDevice] = {
     "/dev/fuse": "fuse",
@@ -258,7 +254,6 @@ class InstanceSpec:
     resources: Resources
     volumes: tuple[SharedVolume, ...]
     external: ExternalPolicy
-    privileged: bool = False
     #: Placement group: the deployment places instances with equal values where they can link to each other.
     #: flotilla only expresses "same group", not where; deployments that don't need it ignore it. A trial gives
     #: units that must link the same value, one per trial.
@@ -266,19 +261,17 @@ class InstanceSpec:
     readonly_rootfs: bool = False
     tmpfs_mounts: tuple[TmpfsMount, ...] = ()
     shm_size_bytes: int | None = None  # None keeps the platform's default `/dev/shm`
-    devices: frozenset[TaskDevice] = frozenset()  # requires `privileged`
-    # Independent of task privileged permission; only workspace anchors select management.
+    devices: frozenset[TaskDevice] = frozenset()  # written as per-instance extensions
+    # Only workspace anchors select management.
     profile: InstanceProfile = "default"
 
     def __post_init__(self) -> None:
         if self.profile not in ("default", "management"):
             raise ValueError("instance profile must be default or management")
-        if self.profile == "management" and self.privileged:
-            raise ValueError("management profile cannot be combined with task privileged permission")
+        if self.profile == "management" and self.devices:
+            raise ValueError("management profile cannot request devices")
         if not self.devices <= set(TASK_DEVICE_PATHS.values()):
             raise ValueError(f"unknown devices: {sorted(self.devices - set(TASK_DEVICE_PATHS.values()))}")
-        if self.devices and not self.privileged:
-            raise ValueError("devices require the privileged runtime")
 
 
 @dataclass(frozen=True)

@@ -613,9 +613,17 @@ def test_sanitize_keeps_distinct_values_distinct() -> None:
 
 
 @pytest.mark.asyncio
-async def test_prepare_opens_writable_mounts_of_privileged_runtime_units(
-    platform: FakePlatform, clock: ManualClock, anchor: Anchor, reaper: Reaper, tree: SharedTree, shell: Shell
+@pytest.mark.parametrize("writable", [True, False])
+async def test_writable_trial_volumes_are_opened_when_the_anchor_is_not_writable(
+    platform: FakePlatform,
+    clock: ManualClock,
+    anchor: Anchor,
+    reaper: Reaper,
+    tree: SharedTree,
+    shell: Shell,
+    writable: bool,
 ) -> None:
+    """Driven by the measured `storage.anchor_writable`, not by which services declared `privileged`."""
     _seed_hosts(platform)
     platform.caps = replace(platform.caps, privileged_runtime=True, devices=frozenset({"kvm"}))
     plan = replace(
@@ -631,11 +639,13 @@ async def test_prepare_opens_writable_mounts_of_privileged_runtime_units(
         },
     )
     tree.events.clear()
-    ready = await clock.run(_new_trial(platform, clock, anchor, reaper, plan).start())
-    assert [e for e in tree.events if e.startswith("open ")] == ["open launches/L1/t1/cache"]
-    assert tree.modes["launches/L1/t1/cache"] == "0777" and tree.owners["launches/L1/t1/cache"] == "999:999"
-    assert "launches/L1/t1/shared" not in tree.modes and "launches/L1/t1/ro" not in tree.modes
+    settings = replace(SETTINGS, open_writable_volumes=not writable)
+    ready = await clock.run(_new_trial(platform, clock, anchor, reaper, plan, settings).start())
+    opened = sorted(e for e in tree.events if e.startswith("open "))
+    assert opened == ([] if writable else ["open launches/L1/t1/cache", "open launches/L1/t1/shared"])
+    assert tree.owners["launches/L1/t1/cache"] == "999:999"  # the declared owner is applied either way
+    assert "launches/L1/t1/ro" not in tree.modes  # a read-only mount is never opened
     spec = platform.spec_of(ready.handles["main"].iid)
-    assert spec.privileged and spec.devices == {"kvm"}
+    assert spec.devices == {"kvm"}
     reaper.release("t1")
     await clock.run(reaper.close())

@@ -213,7 +213,8 @@ def _service(
     if raw.get("privileged") is True:
         c.warn(
             f"{path}.privileged",
-            "runs on the privileged runtime: root holds all capabilities in its own user namespace, not on the host",
+            "requires the deployment to run on a privileged runtime, where root holds all capabilities in its "
+            "own user namespace, not on the host",
         )
     devices = _devices(raw.get("devices"), f"{path}.devices", c)
     _cap_add(raw.get("cap_add"), f"{path}.cap_add", devices, c)

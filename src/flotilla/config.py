@@ -89,8 +89,8 @@ class OpenSandboxExecd(_Model):
 class OpenSandbox(BackendSettings):
     """`[opensandbox]`: the built-in backend's table."""
 
+    #: Create-request extensions every task instance carries; they select the deployment's runtime.
     extensions: dict[str, Any] = Field(default_factory=dict)
-    privileged_extensions: dict[str, Any] = Field(default_factory=dict)
     management_extensions: dict[str, Any] = Field(default_factory=dict)
     network: OpenSandboxNetwork = OpenSandboxNetwork()
     execd: OpenSandboxExecd = OpenSandboxExecd()
@@ -383,7 +383,9 @@ class ProbeTarget(_Model):
 class Probe(_Model):
     deployment: str = "deployment"
     image: str = ""
-    privileged_image: str = ""
+    #: Image for the runtime measurements (nested container daemon, device probes). It needs a
+    #: Docker client and the FUSE tools; without it those checks are recorded as skipped.
+    runtime_image: str = ""
     inner_image: str = ""
     link_members: Annotated[int, Field(ge=2, le=32)] = 9
     hosts_recheck_s: Annotated[float, Field(ge=0)] = 600.0
@@ -393,7 +395,7 @@ class Probe(_Model):
     external_targets: tuple[ProbeTarget, ...] = ()
     dns_name: str = ""
 
-    @field_validator("image", "privileged_image", "inner_image")
+    @field_validator("image", "runtime_image", "inner_image")
     @classmethod
     def _image(cls, value: str) -> str:
         if value and not re.fullmatch(r"[^\s]+@sha256:[0-9a-f]{64}", value):
@@ -601,28 +603,6 @@ class FlotillaConfig(_Model):
         """Capabilities measured by the probe, adjusted for what this deployment enforces."""
         report = report or self.load_report()
         caps = report.to_capabilities()
-        rt = report.runtime
-        isolated = (
-            rt.privileged_storage.passed_for("privileged")
-            and rt.privileged_network.passed_for("privileged")
-            and (
-                rt.privileged_no_auto_mount.passed_for("privileged") or "no_auto_mount" in self.security.accept_insecure
-            )
-            and (rt.privileged_exec_auth.passed_for("privileged") or "exec_auth" in self.security.accept_insecure)
-            and (
-                rt.privileged_inbound_isolation.passed_for("privileged")
-                or "inbound_isolation" in self.security.accept_insecure
-            )
-        )
-        caps = replace(
-            caps,
-            privileged_runtime=isolated,
-            devices=frozenset(
-                name
-                for name, item in (("fuse", rt.fuse), ("kvm", rt.kvm), ("tun", rt.tun))
-                if isolated and item.ok and item.scope == "privileged"
-            ),
-        )
         return load_backend(self.backend).capabilities(self.backend_settings, self, caps)
 
     def evidence_profile(self) -> str:
@@ -669,6 +649,7 @@ class FlotillaConfig(_Model):
             volume_file=False,
             no_auto_mount=False,
             exec_auth=False,
+            anchor_writable=False,
             privileged_runtime=False,
             devices=frozenset(),
         )
@@ -913,7 +894,6 @@ class OpenSandboxBackend(Backend[OpenSandbox]):
             extensions=settings.extensions,
             create_fields=settings.create_fields,
             group_extension=settings.group_extension,
-            privileged_extensions=settings.privileged_extensions,
             management_extensions=settings.management_extensions,
             create_timeout_s=cfg.timeouts.create_request,
             max_connections=settings.max_connections,

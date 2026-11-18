@@ -88,11 +88,6 @@ class Unit:
     devices: frozenset[TaskDevice] = frozenset()
     extra_hosts: Mapping[str, str] = field(default_factory=dict)  # name -> literal address
 
-    @property
-    def privileged_runtime(self) -> bool:
-        """Devices are only offered on the privileged runtime."""
-        return self.privileged or bool(self.devices)
-
 
 @dataclass(frozen=True)
 class Network:
@@ -210,8 +205,6 @@ class TrialPlan:
                     raise ValueError(f"{name}: external mount {path} conflicts with another or reserved mount")
                 occupied.append(path)
             validate_mounts(unit.tmpfs_mounts, (m.target for m in unit.mounts), shm_size_bytes=unit.shm_size_bytes)
-            if unit.readonly_rootfs and unit.privileged_runtime:
-                raise ValueError(f"{name}: readonly_rootfs cannot be combined with privileged")
             for m in unit.mounts:
                 if any(overlaps(m.target, reserved) for reserved in RESERVED_MOUNTS):
                     raise ValueError(f"{name}: mount {m.target} conflicts with a reserved mount")

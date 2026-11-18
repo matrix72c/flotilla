@@ -67,8 +67,8 @@ def test_shm_size_admission_shares_the_tmpfs_memory_budget(caps: Capabilities) -
         supported.require_filesystem(False, (TmpfsMount("/tmp", 1024**3),), memory="2Gi", shm_size_bytes=1024**3 + 1)
     with pytest.raises(ValueError, match="exceed"):
         supported.require_filesystem(False, (), memory="1Gi", shm_size_bytes=2 * 1024**3)
-    with pytest.raises(ValueError, match="privileged"):
-        supported.require_filesystem(False, (), privileged=True, shm_size_bytes=1024**2)
+    with pytest.raises(ValueError, match="shm_size"):
+        replace(caps, filesystem_limits=INTERNAL_LIMITS).require_filesystem(False, (), shm_size_bytes=1024**2)
 
 
 def test_report_requires_probed_shm_evidence_and_the_internal_dialect() -> None:

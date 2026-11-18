@@ -1,4 +1,4 @@
-"""Compose `/dev/kvm` and `/dev/net/tun` survive parsing, preparation and admission on the privileged runtime."""
+"""Compose `/dev/kvm` and `/dev/net/tun` survive parsing, preparation and admission."""
 
 from __future__ import annotations
 
@@ -118,8 +118,11 @@ def test_scan_requires_device_evidence(caps: Capabilities) -> None:
     assert [f.path for f in result.findings if f.kind == "reject"] == ["services.main.devices"]
     assert scan("osworld", project, replace(_device_caps(caps), devices=frozenset({"kvm"}))).status == "rejected"
     assert scan("osworld", project, _device_caps(caps)).status == "accepted"
+    # Read-only rootfs and devices are independent capabilities now: each is admitted on its own evidence.
     readonly = normalize({"services": {"main": {**OSWORLD, "read_only": True}}})
-    assert scan("osworld", readonly, replace(_device_caps(caps), readonly_rootfs=True)).status == "rejected"
+    assert scan("osworld", readonly, _device_caps(caps)).status == "rejected"
+    permissive = replace(_device_caps(caps), readonly_rootfs=True, shared_volume=True)
+    assert scan("osworld", readonly, permissive).status == "accepted"
 
 
 def test_devices_roundtrip_to_runtime_plan(tmp_path: Path) -> None:
@@ -136,7 +139,7 @@ def test_devices_roundtrip_to_runtime_plan(tmp_path: Path) -> None:
     manifest = Manifest.load_json(outcome.manifest_path.read_bytes())
     assert manifest.units["main"].devices == ["kvm", "tun"] and not manifest.units["main"].privileged
     unit = to_plan(manifest).units["main"]
-    assert unit.devices == {"kvm", "tun"} and unit.privileged_runtime and not unit.privileged
+    assert unit.devices == {"kvm", "tun"} and not unit.privileged
 
 
 def test_manifest_devices_are_sorted_and_known() -> None:
@@ -148,7 +151,7 @@ def test_manifest_devices_are_sorted_and_known() -> None:
         type(unit).model_validate({**data, "devices": ["sda"]})
 
 
-def test_instance_spec_devices_need_the_privileged_runtime() -> None:
+def test_instance_spec_devices_must_be_known() -> None:
     spec = InstanceSpec(
         image="r.io/app@sha256:" + "0" * 64,
         entrypoint=("sleep",),
@@ -157,17 +160,16 @@ def test_instance_spec_devices_need_the_privileged_runtime() -> None:
         resources=Resources(cpu="1", memory="1Gi"),
         volumes=(),
         external=ExternalPolicy(mode="none"),
-        privileged=True,
         devices=frozenset({"kvm", "tun"}),
     )
-    with pytest.raises(ValueError, match="privileged runtime"):
-        replace(spec, privileged=False)
     with pytest.raises(ValueError, match="unknown devices"):
         replace(spec, devices=frozenset({"sda"}))  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="management profile"):
+        replace(spec, profile="management")
 
 
 @pytest.mark.asyncio
-async def test_device_units_open_on_the_privileged_runtime(
+async def test_device_units_need_measured_device_evidence(
     deployment: tuple[FlotillaConfig, FakePlatform, SharedTree],
 ) -> None:
     cfg, platform, _ = deployment
@@ -184,35 +186,34 @@ async def test_device_units_open_on_the_privileged_runtime(
     async with Flotilla(deployment=cfg) as fleet:
         async with fleet.environment(prepared) as env:
             spec = platform.spec_of((await env.info()).services[0].instance_id)
-            assert spec.privileged and spec.devices == {"kvm", "tun"}
+            assert spec.devices == {"kvm", "tun"}
         assert (await fleet.drain(2)).clean
 
 
-def test_report_devices_need_privileged_scoped_evidence() -> None:
-    measured = {"runtime.kvm": {**ok(), "scope": "privileged"}, "runtime.tun": {**ok(), "scope": "privileged"}}
+def test_report_devices_rest_on_their_own_evidence() -> None:
+    """Each device is a per-instance extension, so each is admitted on its own measurement."""
+    measured = {"runtime.kvm": ok(), "runtime.tun": ok()}
     assert report(**measured).to_capabilities().devices == {"fuse", "kvm", "tun"}
-    ordinary = {"runtime.kvm": ok(), "runtime.tun": ok()}
-    assert report(**ordinary).to_capabilities().devices == {"fuse"}
-    unprivileged = {**measured, "runtime.privileged_network": {"status": "failed", "scope": "privileged"}}
-    assert not report(**unprivileged).to_capabilities().devices
-    no_docker = {**measured, "runtime.privileged_runtime": {"status": "skipped", "scope": "privileged"}}
+    partial = {"runtime.kvm": {"status": "failed"}, "runtime.tun": ok()}
+    assert report(**partial).to_capabilities().devices == {"fuse", "tun"}
+    # The nested-daemon measurement is what `privileged_runtime` means; it does not gate devices.
+    no_docker = {**measured, "runtime.privileged_runtime": {"status": "skipped"}}
     caps = report(**no_docker).to_capabilities()
-    assert caps.devices == {"fuse", "kvm", "tun"} and caps.privileged_runtime
+    assert caps.devices == {"fuse", "kvm", "tun"} and not caps.privileged_runtime
     cfg = FlotillaConfig.from_mapping(config_data())
-    caps = cfg.platform_capabilities(report(**no_docker))
-    assert caps.devices == {"fuse", "kvm", "tun"} and caps.privileged_runtime
+    assert cfg.platform_capabilities(report(**no_docker)).devices == {"fuse", "kvm", "tun"}
 
 
 SETTINGS = ProbeSettings(
     image="probe",
-    privileged_image="dind",
+    runtime_image="dind",
     share_release="r1",
     endpoint="http://os.test",
     evidence_profile="test",
 )
 
 
-def test_fuse_is_normalized_and_needs_the_privileged_runtime() -> None:
+def test_fuse_is_normalized() -> None:
     project = normalize(_service(devices=["/dev/fuse"]))
     assert not project.rejected, project.findings
     assert project.services["main"].devices == {"fuse"}
@@ -247,10 +248,9 @@ async def test_fuse_probe_requests_only_the_fuse_device(
 
     platform.set_exec_handler(execute)
     result = await clock.run(fuse(run))
-    assert isinstance(result, Item) and result.scope == "privileged"
-    assert result.status == status
+    assert isinstance(result, Item) and result.status == status
     (spec,) = specs.values()
-    assert spec.privileged and spec.devices == {"fuse"}
+    assert spec.devices == {"fuse"} and spec.image == "dind"
     # A missing tool is reported before anything is mounted.
     assert any("fuse-overlayfs -o lowerdir" in script for script in scripts) == (tools == 0)
     # The instance is deleted on every path, including the two failures.
@@ -260,7 +260,7 @@ async def test_fuse_probe_requests_only_the_fuse_device(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("name", "node"), [("kvm", "/dev/kvm"), ("tun", "/dev/net/tun")])
 @pytest.mark.parametrize("exit_code", [0, 1])
-async def test_device_probe_creates_one_privileged_instance_per_device(
+async def test_device_probe_creates_one_instance_per_device(
     platform: FakePlatform, clock: ManualClock, name: str, node: str, exit_code: int
 ) -> None:
     SharedTree(platform)
@@ -282,9 +282,9 @@ async def test_device_probe_creates_one_privileged_instance_per_device(
 
     platform.set_exec_handler(execute)
     result = await clock.run(device(run, name))  # type: ignore[arg-type]
-    assert isinstance(result, Item) and result.scope == "privileged"
+    assert isinstance(result, Item)
     assert result.status == ("passed" if exit_code == 0 else "failed")
     (spec,) = specs.values()
-    assert spec.privileged and spec.devices == {name} and spec.image == "dind"
+    assert spec.devices == {name} and spec.image == "dind"
     assert len(scripts) == 1 and node in scripts[0]
     assert not run._created and platform.iids() == [anchor.iid]
