@@ -47,6 +47,42 @@ output to the runtime model and classifies fields, and never substitutes a
 variable or opens a file. Offline tests drive it through a double that merges
 the selected files without interpolating, not through a second parser.
 
+## The dialect parser
+
+`flotilla.compose.parse.load_project` reads the same inputs without an external
+executable, producing the document `normalize` consumes. Nothing uses it yet;
+it exists to be compared against official Compose before it replaces the
+adapter, and that comparison is the only thing that makes it trustworthy (see
+[verification scope](#verification-scope)).
+
+It opens only the files named in its arguments, a task-local `.env`, and the
+literal `env_file` paths a service declares, each confined to the environment
+directory. `include` and `extends` are never acted on, so they reach `normalize`
+and are rejected there by name rather than expanded. Caller values override
+`.env`; the process environment is never read, so a task resolves to the same
+project on any host. `${VAR}`, `${VAR:-d}`, `${VAR-d}`, `${VAR:+a}`, `${VAR+a}`
+and `$$` are supported, with references inside a default; a reference nothing
+provides a value for and that has no default is refused.
+
+It is stricter than Compose in three places, each a case where Compose
+substitutes something the author did not write. A bare `$VAR` is refused
+(`${VAR}` is required). A `$` in an env file value or variable name is refused,
+quoted or not: Compose interpolates those values in turn, against the shell
+environment, the keys above them in the same file, the files read before them,
+and the service's own `environment`, so one env file's value can depend on
+another's, and a single-quoted value is kept literal while a double-quoted one
+is substituted.
+
+Beyond interpolation it reproduces three Compose rules that are easy to miss. A
+key written with no value is refused, as Compose's schema refuses it, except
+`command`, `entrypoint` and `deploy`, where the null means "unset" and resets
+what an earlier file set. One mount survives per target: a repeated target keeps
+the last declaration at the first position, and two targets that differ as
+written but name the same directory (`/x/` and `/x`) are refused. Bind sources
+and build contexts are rewritten to normalized task-relative paths, because the
+layout keys attempt-owned storage by bind source and `conf`, `./conf` and
+`./x/../conf` must name one thing.
+
 ## Storage and command behavior
 
 - All file-backed mounts use attempt-owned storage, even one writable reference
@@ -110,4 +146,19 @@ through five literal dollars originating in YAML, explicit environment, `.env`,
 and raw or quoted service env files. This normalization-only check uses no
 Docker daemon or workloads and does not verify the management image's
 build/runtime toolchain. Translation is not proof of Docker equivalence.
+
+`tests/contract/compose_differential.py` compares the dialect parser against
+that same executable. Its two sets of inputs fail differently and neither
+replaces the other. `FLOTILLA_TEST_CORPUS` names dataset roots: every task in
+them is read both ways and the resulting `Project`s must be equal field by
+field, findings included. That covers what generated tasks actually use and says
+nothing about a field no generator writes yet, so written cases cover what a
+corpus does not contain at all — interpolation forms, `env_file`, `.env`,
+multi-file merge, short volume syntax — and the three deliberate strictness
+rules are pinned by a test asserting Compose reads what flotilla refuses, so
+each stays a choice rather than quietly becoming redundant.
+
+Agreement over a corpus is evidence about that corpus. A field form no
+generator writes today is unverified until someone writes it, which is the
+standing cost of maintaining the dialect rather than shelling out.
 
