@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from flotilla.platform.base import TaskDevice, TmpfsMount
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 Condition = Literal["service_started", "service_healthy", "service_completed_successfully"]
 RestartPolicy = Literal["no", "always", "unless-stopped", "on-failure"]
@@ -83,7 +83,6 @@ class Dependency(_Model):
 class TrialVolume(_Model):
     key: str
     owner: tuple[int, int] | None = None
-    seed: str | None = None
     copy_from: str | None = None
 
 
@@ -109,24 +108,43 @@ class Manifest(_Model):
 
     @model_validator(mode="before")
     @classmethod
-    def _upgrade_v7(cls, data: object) -> object:
-        """Schema 7 carried two fields this version resolves or no longer writes.
+    def _upgrade(cls, data: object) -> object:
+        """Load an older manifest by dropping what this version no longer writes.
 
-        `runtime_params` held deferred expressions; the Compose config adapter now
-        resolves every reference at preparation. `task_files_published` recorded the
-        storage root of the removed file-publication path, which a native release
-        never used. Either is dropped when empty, so a release prepared against
-        schema 7 keeps loading, and refused when populated, because that manifest
-        carries state this version cannot honor.
+        Each step drops a field when it is empty, so a release prepared against the
+        older schema keeps loading, and refuses it when populated, because that
+        manifest carries state this version cannot honor; prepare its release again.
+
+        Schema 7 carried two such fields. `runtime_params` held deferred
+        expressions; the Compose config adapter now resolves every reference at
+        preparation. `task_files_published` recorded the storage root of the removed
+        file-publication path, which a native release never used.
+
+        Schema 8 carried `trial_volumes[].seed`: a tar of the initial content Docker
+        would have copied out of the image into an empty named volume. Flotilla no
+        longer emulates that copy-up, so a trial volume starts empty; `owner` gives
+        its root identity.
         """
-        if not isinstance(data, dict) or data.get("schema", data.get("schema_")) != 7:
+        if not isinstance(data, dict):
             return data
-        if data.get("runtime_params"):
-            raise ValueError("manifest defers runtime parameters; prepare its release again")
-        if data.get("task_files_published"):
-            raise ValueError("manifest records published task files; prepare its release again")
-        dropped = ("runtime_params", "task_files_published")
-        upgraded = {key: value for key, value in data.items() if key not in dropped}
+        version = data.get("schema", data.get("schema_"))
+        if version not in (7, 8):  # anything else is current, or too old to upgrade
+            return data
+        upgraded = dict(data)
+        if version == 7:
+            if upgraded.pop("runtime_params", None):
+                raise ValueError("manifest defers runtime parameters; prepare its release again")
+            if upgraded.pop("task_files_published", None):
+                raise ValueError("manifest records published task files; prepare its release again")
+            version = 8
+        if "trial_volumes" in upgraded:
+            volumes = [dict(volume) if isinstance(volume, dict) else volume for volume in upgraded["trial_volumes"]]
+            if any(isinstance(volume, dict) and volume.get("seed") for volume in volumes):
+                raise ValueError("manifest seeds a trial volume from its image; prepare its release again")
+            for volume in volumes:
+                if isinstance(volume, dict):
+                    volume.pop("seed", None)
+            upgraded["trial_volumes"] = volumes
         upgraded["schema"] = SCHEMA_VERSION
         upgraded.pop("schema_", None)
         return upgraded

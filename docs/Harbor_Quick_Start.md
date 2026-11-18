@@ -1,6 +1,6 @@
 # Harbor quick start
 
-Harbor is a **host-side import source** and an optional evaluation consumer. Flotilla's execution authority is a versioned [native task release](Native_Tasks.md), not an original Harbor directory or a platform task key. Attempts do not parse Compose, build/push images, or export image seeds.
+Harbor is a **host-side import source** and an optional evaluation consumer. Flotilla's execution authority is a versioned [native task release](Native_Tasks.md), not an original Harbor directory or a platform task key. Attempts do not parse Compose or read source images.
 
 Install the controlled Flotilla wheel with its `harbor` extra, or use the full Git SHA in your delivery manifest:
 

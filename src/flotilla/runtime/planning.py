@@ -80,9 +80,7 @@ def to_plan(
             u: {d: Dependency(condition=dep.condition, required=dep.required) for d, dep in deps.items()}
             for u, deps in manifest.depends_on.items()
         },
-        volumes=tuple(
-            TrialVolume(key=v.key, owner=v.owner, seed=v.seed, copy_from=v.copy_from) for v in manifest.trial_volumes
-        ),
+        volumes=tuple(TrialVolume(key=v.key, owner=v.owner, copy_from=v.copy_from) for v in manifest.trial_volumes),
         external_units=frozenset(manifest.external_units),
         external_mounts={name: tuple(mounts) for name, mounts in (external_mounts or {}).items()},
         workspace_mounts={name: tuple(mounts) for name, mounts in (workspace_mounts or {}).items()},

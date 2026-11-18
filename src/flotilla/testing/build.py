@@ -1,7 +1,6 @@
-"""Task file export and the offline preparation driver used by `flotilla prepare`.
+"""The offline preparation driver used by `flotilla prepare`.
 
-Fake registry and image exporter for driver tests; no network or docker. They verify ordering, skips and
-error attribution.
+Fake registry for driver tests; no network or docker. It verifies ordering, skips and error attribution.
 """
 
 from __future__ import annotations
@@ -58,25 +57,6 @@ class FakeRegistry:
         return {"Cmd": ["/bin/bash"], "WorkingDir": "/app", "User": self.user}
 
 
-class FakeExport:
-    """Image content exporter: `contents` maps mount point -> {file name: content}."""
-
-    def __init__(self, contents: Mapping[str, Mapping[str, str]] | None = None) -> None:
-        self.contents = contents or {}
-
-    def extract(
-        self, image: str, path: str, dest: Path, *, identities: dict[str, tuple[int, int, int]] | None = None
-    ) -> bool:
-        files = self.contents.get(path)
-        if not files:
-            return False
-        for name, text in files.items():
-            (dest / name).write_text(text)
-            if identities is not None:
-                identities[name] = (1000, 1000, 0o644)
-        return True
-
-
 def _caps() -> Capabilities:
     return Capabilities(
         max_label_value_len=63,
@@ -116,7 +96,6 @@ def _ctx(**kw: Any) -> BuildContext:
         "settings": BuildSettings(pullable_registries=PULLABLE),
         "caps": _caps(),
         "registry": kw.get("registry", FakeRegistry()),
-        "image_export": kw.get("image_export", FakeExport()),
     }
     return BuildContext(**{**defaults, **kw})
 

@@ -27,12 +27,8 @@ def build_manifest(
     images: Mapping[str, str],
     meta: Mapping[str, ImageMeta],
     resources: Mapping[str, Resources],
-    seeds: Mapping[str, str] | None = None,
 ) -> Manifest:
     """Write the task manifest. `meta` includes the resolved image or Compose user identity.
-
-    `seeds`: volumes whose initial content was actually exported (name -> tar relative to task files), passed by
-    the builder after exporting task files; omitted means no volume has initial content.
 
     Must not be called when the project has rejections (scan rejects first).
     """
@@ -52,7 +48,7 @@ def build_manifest(
             for n, s in project.services.items()
             if s.depends_on
         },
-        trial_volumes=_trial_volumes(layout, seeds or {}),
+        trial_volumes=_trial_volumes(layout),
         task_files=None,  # written by publish
         external_units=sorted(
             n for n, s in project.services.items() if any(not project.networks[net].internal for net in s.networks)
@@ -129,15 +125,12 @@ def _networks(project: Project) -> dict[str, Network]:
     return out
 
 
-def _trial_volumes(layout: Layout, seeds: Mapping[str, str]) -> list[TrialVolume]:
-    """Directories this trial must prepare. `seeds` holds volumes that **actually exported** a seed (name -> tar).
-
-    An absent image path produces no seed; an empty directory's seed can still carry its root metadata.
-    """
+def _trial_volumes(layout: Layout) -> list[TrialVolume]:
+    """Directories this trial must prepare. A named volume starts empty; a bind is copied from task files."""
     out: list[TrialVolume] = []
     for v in layout.volumes:
         if v.mode == "trial":
-            out.append(TrialVolume(key=v.name, seed=None if v.nocopy else seeds.get(v.name)))
+            out.append(TrialVolume(key=v.name))
     for g in layout.binds:
         if g.mode == "trial":
             out.append(TrialVolume(key=f"binds/{g.index}", copy_from=f"binds/{g.index}"))

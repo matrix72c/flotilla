@@ -245,13 +245,6 @@ class Anchor:
         manifest owner)."""
         await self._run(("chown", f"{uid}:{gid}", "--", self._path(key)), stage)
 
-    async def unpack(self, tar_key: str, dest_key: str, *, stage: Stage, src_root: StorageRoot = "work") -> None:
-        """Unpack a tar on shared storage into a directory, keeping owners and modes (volume initial content).
-        `dest_key` must exist; the destination is always on the work root."""
-        await self._run(
-            ("tar", "-xpf", self._path(tar_key, src_root), "--numeric-owner", "-C", self._path(dest_key)), stage
-        )
-
     async def copy_tree(self, src_key: str, dest_key: str, *, stage: Stage, src_root: StorageRoot = "work") -> None:
         """Copy directory `src_key` to `dest_key`, keeping owners, modes, and symlinks (multi-reference bind sources
         with a writer).

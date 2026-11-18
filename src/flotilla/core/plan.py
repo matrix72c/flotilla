@@ -112,19 +112,13 @@ class Dependency:
 class TrialVolume:
     """A shared volume directory of this trial (a bind source group with multiple references and a writer).
 
-    prepare creates it at `launches/<launch>/<trial>/<key>`: with `seed`, unpacks a tar from the task files into it;
-    with `copy_from`, copies from the task files (preserving ownership and mode); otherwise creates an empty
-    directory and chowns it to `owner`.
+    prepare creates it at `launches/<launch>/<trial>/<key>`: with `copy_from`, copies from the task files
+    (preserving ownership and mode); otherwise creates an empty directory and chowns it to `owner`.
     """
 
     key: str
     owner: tuple[int, int] | None = None
-    seed: str | None = None  # tar relative to the task files directory
     copy_from: str | None = None  # source directory relative to the task files directory
-
-    def __post_init__(self) -> None:
-        if self.seed is not None and self.copy_from is not None:
-            raise ValueError("seed and copy_from are mutually exclusive")
 
 
 @dataclass(frozen=True)
@@ -236,9 +230,9 @@ class TrialPlan:
                 raise ValueError(f"{name} has no main process but declares a restart policy")
             if unit.healthcheck is not None and unit.command is None:
                 raise ValueError(f"{name} has no main process but declares a healthcheck")
-        if any(v.seed is not None or v.copy_from is not None for v in self.volumes) and self.task_files is None:
+        if any(v.copy_from is not None for v in self.volumes) and self.task_files is None:
             raise ValueError(
-                "trial volumes need a seed or source from the task files, but the task has no published task files"
+                "trial volumes need a source from the task files, but the task has no published task files"
             )
 
 

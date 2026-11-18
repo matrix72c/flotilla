@@ -615,7 +615,6 @@ async def test_stat_retry_wait_stops_on_cancellation_or_deactivation(
         "listdir",
         "chmod",
         "chown",
-        "unpack",
         "rename",
         "exists",
     ],
@@ -637,7 +636,6 @@ async def test_non_stat_operations_never_replay_transport_failures(
         "listdir": ("source",),
         "chmod": ("dest", 0o755),
         "chown": ("dest", 1, 1),
-        "unpack": ("source.tar", "dest"),
         "rename": ("source", "dest"),
         "exists": ("source",),
     }[operation]
@@ -860,19 +858,10 @@ async def test_named_input_roots_are_mounted_read_only_and_only_read(
 
     platform.set_exec_handler(handler)
     assert anchor.path("releases/r", root="datasets") == "/flotilla-inputs/datasets/releases/r"
-    await anchor.unpack("releases/r/seed.tar", "launches/L1/t/v", stage="prepare", src_root="datasets")
     await anchor.copy_tree("releases/r/src", "launches/L1/t/w", stage="prepare", src_root="datasets")
     await anchor.copy_contents("releases/r/tests", "launches/L1/a/tests", stage="prepare", src_root="datasets")
     assert await anchor.exists("", stage="prepare", root="runtimes")
     assert seen == [
-        (
-            "tar",
-            "-xpf",
-            "/flotilla-inputs/datasets/releases/r/seed.tar",
-            "--numeric-owner",
-            "-C",
-            "/flotilla-root/launches/L1/t/v",
-        ),
         ("mkdir", "-p", "--", "/flotilla-root/launches/L1/t"),
         ("cp", "-a", "--", "/flotilla-inputs/datasets/releases/r/src", "/flotilla-root/launches/L1/t/w"),
         ("mkdir", "-p", "--", "/flotilla-root/launches/L1/a/tests"),

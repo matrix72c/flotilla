@@ -4,14 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import heapq
-import io
 import re
-import tarfile
 from collections import Counter, defaultdict, deque
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from pathlib import PurePosixPath
 from typing import Literal
 
 from flotilla.platform.base import (
@@ -641,28 +638,6 @@ class SharedTree:
         if proc.argv == ("true",):
             return ExecResult(0, b"", b"")
         missing = ExecResult(exit_code=1, stdout=b"", stderr=b"No such file or directory")
-        if op == "tar":  # tar -xpf <tar> --numeric-owner -C <dest>
-            tar, dest = self._rel(proc.argv[2]), self._rel(proc.argv[-1], write=True)
-            if dest not in self.dirs or tar not in self.files:
-                return missing
-            data = self._platform.tree_contents[tar]
-            with tarfile.open(fileobj=io.BytesIO(data)) as archive:
-                for member in archive:
-                    assert not PurePosixPath(member.name).is_absolute() and ".." not in PurePosixPath(member.name).parts
-                    target = str(PurePosixPath(dest) / member.name)
-                    if member.isdir():
-                        self.dirs.add(target)
-                    elif member.isfile():
-                        source = archive.extractfile(member)
-                        assert source is not None
-                        self.files.add(target)
-                        self._platform.tree_contents[target] = source.read()
-                    else:
-                        raise AssertionError("unsupported archive member")
-                    self.owners[target] = f"{member.uid}:{member.gid}"
-                    self.modes[target] = f"{member.mode:04o}"
-            self.events.append(f"unpack {tar} {dest}")
-            return ExecResult(exit_code=0, stdout=b"", stderr=b"")
         if op == "cp":  # cp -a -- <src> <dest>: like real cp, no intermediate dirs; copies into an existing dest
             src, dest = self._rel(proc.argv[-2].removesuffix("/.")), self._rel(proc.argv[-1], write=True)
             if proc.argv[-2].endswith("/."):

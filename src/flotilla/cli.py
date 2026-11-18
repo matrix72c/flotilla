@@ -48,7 +48,7 @@ def _build_parser() -> argparse.ArgumentParser:
     pr.add_argument(
         "--cache",
         type=Path,
-        help="directory kept across runs for image configs, account databases and volume seeds, keyed by image digest",
+        help="directory kept across runs for image configs and account databases, keyed by image digest",
     )
     anc = sub.add_parser("anchor", help="installed-package Anchor tools")
     anchor_sub = anc.add_subparsers(dest="anchor_command", required=True)

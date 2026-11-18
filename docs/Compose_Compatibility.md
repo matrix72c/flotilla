@@ -55,31 +55,23 @@ the selected files without interpolating, not through a second parser.
 - Equal bind sources and a mounted source plus its mounted descendants share
   one backing root. Each mount retains its own read-only/read-write flag.
   Parent target mounts precede nested target mounts.
-- Build export `files/binds/<index>`, `files/seeds/<volume>.tar`, and adjacent
-  `file-identities.json` are **internal transient staging**, retained for the
-  lower-level runtime's copy/seed contract. The attempt owner must upload and
-  clean them up, restore numeric metadata, and preserve hardlinks during
-  transfer. The manifest uses trial-scope mounts and trial-volume `copy_from`
-  or `seed`, not shared read-only task mounts.
+- Build export `files/binds/<index>` and the adjacent `file-identities.json`
+  are **internal transient staging**, retained for the lower-level runtime's
+  copy contract. The attempt owner must upload and clean them up, restore
+  numeric metadata, and preserve hardlinks during transfer. The manifest uses
+  trial-scope mounts and trial-volume `copy_from`, not shared read-only task
+  mounts.
 - Hardlinks inside one bind source tree are preserved during export. Hardlinks
   spanning independent bind roots are rejected because separate runtime copies
   cannot preserve their identity. Symlinks and nonregular entries inside bind
   trees are rejected; missing bind sources are rejected rather than fabricated.
   This is not a complete POSIX filesystem snapshot contract (for example,
   extended attributes and ACL fidelity are not promised).
-- Named volumes start empty with `volume.nocopy: true`. Copy-enabled references
-  can supply image content and numeric root/file metadata through a seed tar.
-  A nocopy reference cannot provide a seed but still sees content initialized by
-  another copy-enabled reference. With several copy-enabled references every
-  source is extracted: Docker copies image content only into an empty volume, so
-  absent or empty paths contribute nothing. One distinct populated content (or,
-  when all are empty, one root identity) seeds the volume; differing contents or
-  root identities are rejected rather than resolved by start order.
-- A volume seed keeps symlinks whose target stays inside the volume, which
-  applications rely on (shared-library version aliases, for example). A symlink
-  leaving the volume, and any entry reached through a symlinked directory, are
-  rejected: the seed is unpacked with `tar` on shared storage, where writing
-  through such a link would escape the volume directory.
+- Named volumes always start empty, unlike Docker, which copies the image
+  content under the mount target into a fresh volume. `volume.nocopy: true` is
+  recorded as equivalent: it asks for the behavior already in force. A task that
+  needs content in a volume binds it from the task directory. `TrialVolume.owner`
+  declares the empty directory's root identity.
 - Null command/entrypoint means inherit; an empty string/list means explicitly
   empty. An explicit entrypoint drops the image CMD unless command supplies a
   replacement. Command strings are argv, not an implicit shell. These are argv
@@ -109,7 +101,7 @@ Unit contracts mock the official Compose subprocess, cover version/error
 handling and explicit arguments, and verify that resolved dollar expressions are
 not expanded again and that an undefined reference without a default is refused
 rather than blanked. Model and preparation tests cover null/empty argv, shared mixed RO/RW
-binds, nested mounts, nocopy seeds, real single-reference mounts and hardlinks.
+binds, nested mounts, named volumes, real single-reference mounts and hardlinks.
 
 `tests/contract/test_compose_official.py` is an opt-in check against an explicit
 official Compose 2.39.4 executable, selected with `FLOTILLA_TEST_COMPOSE`. It

@@ -566,7 +566,12 @@ def _volumes(value: object, path: str, named: set[str], c: _Collector) -> tuple[
         for key in volume_opts:
             if key != "nocopy":
                 c.reject(f"{p}.volume.{key}", "unsupported volume option")
-        nocopy = _boolean(volume_opts.get("nocopy", False), f"{p}.volume.nocopy", c)
+        if _boolean(volume_opts.get("nocopy", False), f"{p}.volume.nocopy", c):
+            # `nocopy` only opts out of Docker's copy-up, which flotilla does not do:
+            # a named volume always starts empty, so the option is already the behavior.
+            c.equivalent(
+                f"{p}.volume.nocopy", "a named volume always starts empty, so nothing is copied out of the image"
+            )
         bind_opts = _mapping(v.get("bind"), f"{p}.bind", c)
         for key in bind_opts:
             if key not in ("create_host_path",):
@@ -584,7 +589,6 @@ def _volumes(value: object, path: str, named: set[str], c: _Collector) -> tuple[
                 source=source,
                 target=target,
                 read_only=_boolean(v.get("read_only", False), f"{p}.read_only", c),
-                nocopy=nocopy,
             )
         )
     return tuple(out)
