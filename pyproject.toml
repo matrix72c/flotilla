@@ -24,7 +24,7 @@ dependencies = [
   # separate verifier environment -- the mode inheritance and the image precedence behind it --
   # is Harbor's definition, not a subset Flotilla can usefully maintain its own copy of. Running
   # a task needs it, so it is required rather than an extra.
-  "harbor @ git+https://github.com/matrix72c/harbor.git@d78eb9c262e7074944106d16bff0ba6426bb2d34",
+  "harbor>=0.26.0,<0.27",
 ]
 
 [project.optional-dependencies]

@@ -56,6 +56,8 @@ class FlotillaEnvironment(BaseEnvironment):  # type: ignore[misc]
         *,
         stream: bool = False,
         enable_environment_dir_upload: bool = True,
+        auto_mounts: list[ServiceVolumeConfig] | None = None,
+        auto_mounting: bool = False,
         deployment: str,
         prepared: str | None = None,
         plan: TrialPlan | None = None,
@@ -103,6 +105,10 @@ class FlotillaEnvironment(BaseEnvironment):  # type: ignore[misc]
             phase_network_policies=phase_network_policies,
             stream=stream,
             enable_environment_dir_upload=enable_environment_dir_upload,
+            # Output paths Harbor would bind to the host; the base refuses auto_mounting since
+            # capabilities do not declare `mounted`.
+            auto_mounts=auto_mounts,
+            auto_mounting=auto_mounting,
         )
 
     @staticmethod
