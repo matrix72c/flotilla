@@ -127,7 +127,7 @@ Compose `network_mode: none` also excludes the service from peer links and requi
 
 ## Variable interpolation
 
-Interpolation supports `${VAR}`, `${VAR:-default}`, `${VAR-default}`, `${VAR:+alt}`, `${VAR+alt}` and `$$` for a literal dollar, with references allowed inside a default. A bare `$VAR` is rejected; write the braces. The host environment is never read: values come from `environment/.env`, from `CONTEXT_DIR` (the absolute environment directory), and from the values the caller supplies for the run — the deployment's `runtime_params` table and, for one call, `describe_task_resources(runtime_params=...)` or a dataset row's `parameters` (the more specific wins).
+Interpolation supports `${VAR}`, `${VAR:-default}`, `${VAR-default}`, `${VAR:+alt}`, `${VAR+alt}` and `$$` for a literal dollar, with references allowed inside a default. A bare `$VAR` is rejected; write the braces. The host environment is never read: values come from `environment/.env`, from `CONTEXT_DIR` (the absolute environment directory), and from the values the caller supplies for the run — the deployment's `runtime_params` table and a dataset row's `parameters` (the more specific wins).
 
 Interpolation happens once, at preparation or inspection, and the result is fixed in the prepared definition. There is no deferred substitution at open time.
 
