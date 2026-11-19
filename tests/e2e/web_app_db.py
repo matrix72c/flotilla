@@ -299,7 +299,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         prog="python -m tests.e2e.web_app_db", description="Run a web + app + db trial on one deployment"
     )
-    parser.add_argument("--deployment", required=True, type=Path, help="deployment config (FlotillaConfig TOML)")
+    parser.add_argument("--deployment", required=True, help="deployment spec to import, as package.module:attribute")
     parser.add_argument("--image", required=True, help="image shared by all three units (repo@sha256:...)")
     parser.add_argument("--out", type=Path, help="write results as JSON")
     args = parser.parse_args()

@@ -1,24 +1,47 @@
 # Quick start
 
 This tutorial publishes a directory of Harbor tasks to shared storage, declares where it is, and runs
-one task using the installed Flotilla package. It assumes a working `deployment.toml`, platform
-credentials, a matching Anchor and shared tools. See [Native tasks](Native_Tasks.md) for installation
+one task using the installed Flotilla package. It assumes deployment values from whoever runs your
+sandbox platform, platform credentials, a matching Anchor and shared tools. See [Native tasks](Native_Tasks.md) for installation
 and protocol details, and [Compose support](Compose_Support.md) for which Compose keys are supported.
 
-## 1. Probe the deployment
+## 1. Write the deployment spec
 
-Install this repository's fixed commit with the `harbor` extra in a Python 3.12 Linux x86_64
-environment. Nothing needs Docker or a Compose binary. Do not install the unrelated public PyPI
-`flotilla` project.
+Install this repository's fixed commit in a Python 3.12 Linux x86_64 environment. Nothing needs Docker
+or a Compose binary. Do not install the unrelated public PyPI `flotilla` project.
 
-```sh
-flotilla probe --deployment deployment.toml --env sandbox.env
+A deployment is a `FlotillaConfig` you construct. There is no deployment file: put the spec in a module
+of your own, alongside the rest of your configuration, and the type checker tells you what is missing.
+
+```python
+# myproject/deployment.py
+from flotilla.config import DatasetBinding, FlotillaConfig, OpenSandbox, OpenSandboxNetwork, Reaper, Storage
+
+PLATFORM = FlotillaConfig(
+    opensandbox=OpenSandbox(
+        endpoint="https://sandbox.example.com",
+        credential_env="SANDBOX_CREDENTIAL",
+        network=OpenSandboxNetwork(sandbox_cidrs=["10.42.0.0/16"]),
+    ),
+    storage=Storage(host_path="/shared"),
+    datasets={"demo": DatasetBinding(local_root="/srv/tasks", platform_root="/shared/datasets/demo-v1")},
+    reaper=Reaper(anchor_image="registry.example.com/team/anchor@sha256:..."),
+)
 ```
 
-Probe records measured capabilities and requires confirmed cleanup. Run it once per deployment, before
-running any task on it.
+## 2. Measure the deployment's isolation
 
-## 2. Publish the dataset
+Commands outside your process name the spec by where to import it from, because a crashed launch
+leaves nobody to call the SDK:
+
+```sh
+flotilla probe --deployment myproject.deployment:PLATFORM --env sandbox.env
+```
+
+The probe measures whether the restrictions a deployment can lack silently actually hold, and requires
+confirmed cleanup. Run it once per deployment, before running any task on it.
+
+## 3. Publish the dataset
 
 A dataset is a directory of task directories. Copy it to shared storage with your existing tools,
 preserving contents and file metadata. Nothing is generated in between: the directory the platform
@@ -28,36 +51,30 @@ Each image must be published and referenced by digest (`repo@sha256:...`), and m
 `USER`: the exec daemon is the sandbox entrypoint. A task that declares `build:` instead of an image is
 rejected, because Flotilla does not build images.
 
-## 3. Declare where it is
+## 4. Both sides of the binding
 
-```toml
-[datasets.demo]
-local_root = "./tasks"
-platform_root = "/shared/datasets/demo-v1"
-```
+`datasets` above declares both views because neither side can infer the other: a client path says
+nothing about how the platform mounts the storage. On host storage the platform root is either a key
+relative to the shared root or an absolute path under it; a `pvc:` value is refused. PVC deployments
+require the explicit `pvc:<claim>/<subpath>/...` form and refuse a relative key. `local_root` must be
+absolute, because a spec outlives the directory it was written in. See
+[Native tasks](Native_Tasks.md#bind-local-and-platform-roots).
 
-Both views are declared because neither side can infer the other: a client path says nothing about how
-the platform mounts the storage. On host storage the platform root is either a key relative to the
-shared root or an absolute path under it; a `pvc:` value is refused. PVC deployments require the
-explicit `pvc:<claim>/<subpath>/...` form and refuse a relative key. See
-[Native tasks](Native_Tasks.md#bind-local-and-platform-roots). Local relative paths resolve against the
-deployment file.
-
-## 4. Execute
+## 5. Execute
 
 ```python
 import asyncio
 from pathlib import Path
 
 from flotilla import Flotilla, OpenOptions
-from flotilla.config import FlotillaConfig
 from flotilla.native import NativeAttempt
+
+from myproject.deployment import PLATFORM
 
 
 async def main():
-    config = FlotillaConfig.load("deployment.toml")
-    dataset = config.resolve_datasets()["demo"]
-    async with Flotilla(deployment=config) as fleet:
+    dataset = PLATFORM.resolve_datasets()["demo"]
+    async with Flotilla(deployment=PLATFORM) as fleet:
         for key in dataset.tasks():
             async with await NativeAttempt.create(fleet, dataset.source(key)) as attempt:
                 env = await attempt.open("main", OpenOptions(startup_timeout=900, lifetime=600))
@@ -100,5 +117,5 @@ Only use writable paths declared by the task: readonly-rootfs tasks do not impli
 
 - [Native tasks](Native_Tasks.md): protocol, installed Anchor builder and path binding.
 - [Harbor quick start](Harbor_Quick_Start.md): the optional Harbor evaluation consumer.
-- [Configuration](Configuration.md): deployment policies, storage and admission.
+- [Configuration](Configuration.md): every field of a deployment spec.
 - [Compose support](Compose_Support.md): which Compose keys are supported.

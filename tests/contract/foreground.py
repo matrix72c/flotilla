@@ -30,7 +30,7 @@ from flotilla.testing.environments import FixtureRequest as RunRequest
 from flotilla.testing.environments import open_fixture
 
 
-async def run(deployment: Path, image: str, output: Path, *, services: int = 3, soak_seconds: int = 0) -> bool:
+async def run(deployment: str, image: str, output: Path, *, services: int = 3, soak_seconds: int = 0) -> bool:
     if services not in (1, 3):
         raise ValueError("services must be 1 or 3")
     if not 0 <= soak_seconds <= 300:
@@ -280,7 +280,7 @@ async def run(deployment: Path, image: str, output: Path, *, services: int = 3, 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--deployment", type=Path, required=True)
+    parser.add_argument("--deployment", required=True, help="deployment spec to import, as package.module:attribute")
     parser.add_argument("--image", required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument(

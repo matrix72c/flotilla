@@ -28,3 +28,22 @@ def config_data(**sections: Any) -> dict[str, Any]:
 
 def config(**sections: Any) -> FlotillaConfig:
     return FlotillaConfig.from_mapping(config_data(**sections))
+
+
+def importable(spec: FlotillaConfig, name: str = "", attribute: str = "DEPLOYMENT") -> str:
+    """Publish `spec` as an importable module attribute and return its `module:attribute` target.
+
+    A deployment is named by where to import it from, so anything taking that name -- the CLI,
+    `Deployment.load`, a Harbor task source -- needs a spec some module actually holds. This puts
+    one in a synthetic module instead of writing a file. Not for production: nothing unregisters
+    the module, so it lives as long as the process.
+    """
+    import sys
+    import types
+    import uuid
+
+    module_name = name or f"flotilla_test_deployment_{uuid.uuid4().hex[:12]}"
+    module = sys.modules.get(module_name) or types.ModuleType(module_name)
+    setattr(module, attribute, spec)
+    sys.modules[module_name] = module
+    return f"{module_name}:{attribute}"

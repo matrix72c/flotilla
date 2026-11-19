@@ -44,11 +44,14 @@ verification — not by a consumer option.
 A dataset is a directory of task directories. Both sides are declared because neither can infer the
 other: a client path says nothing about how the platform mounts the storage.
 
-```toml
-[datasets.example]
-local_root = "./datasets/example"
-platform_root = "/shared/datasets/example"
-# input = "datasets"     # the [inputs.<name>] root it lives on; omitted means the work root
+```python
+datasets={
+    "example": DatasetBinding(
+        local_root="/srv/datasets/example",          # absolute: a spec outlives its own directory
+        platform_root="/shared/datasets/example",
+        # input="datasets",                          # the inputs[<name>] root it lives on; None means work
+    )
+}
 ```
 
 Local relative paths resolve against the deployment file, not the caller's working directory. For
@@ -83,13 +86,13 @@ training configuration.
 
 ```python
 from flotilla import Flotilla
-from flotilla.config import FlotillaConfig
 from flotilla.native import NativeAttempt
 
-config = FlotillaConfig.load("deployment.toml")
-dataset = config.resolve_datasets()["example"]
+from myproject.deployment import PLATFORM
 
-async with Flotilla(deployment=config) as fleet:
+dataset = PLATFORM.resolve_datasets()["example"]
+
+async with Flotilla(deployment=PLATFORM) as fleet:
     for key in dataset.tasks():
         async with await NativeAttempt.create(fleet, dataset.source(key)) as attempt:
             environment = await attempt.open("main")

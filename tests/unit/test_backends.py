@@ -67,9 +67,9 @@ def fake_data(**table: Any) -> dict[str, Any]:
     return data
 
 
-def test_the_management_client_is_bounded_regardless_of_what_the_platform_supports(tmp_path: Path) -> None:
+def test_the_management_client_is_bounded_regardless_of_what_the_platform_supports() -> None:
     """A management anchor gets no capability a task would get, so it cannot become a task runner."""
-    cfg = FlotillaConfig.from_mapping(config_data(), base_dir=tmp_path)
+    cfg = FlotillaConfig.from_mapping(config_data())
     management = cfg.management_capabilities()
     assert not management.privileged_runtime and not management.shared_volume and not management.link
     assert cfg.platform_capabilities().privileged_runtime
@@ -138,7 +138,7 @@ def test_runtime_builds_the_selected_backend(
 ) -> None:
     from flotilla.runtime.manager import Manager
 
-    cfg = FlotillaConfig.from_mapping(fake_data(region="cn-sh"), base_dir=tmp_path)
+    cfg = FlotillaConfig.from_mapping(fake_data(region="cn-sh"))
     monkeypatch.setenv("FAKE_TOKEN", "test-only")
     manager = Manager(cfg, clock=SystemClock())
     assert isinstance(manager.platform, FakePlatform)
@@ -147,9 +147,9 @@ def test_runtime_builds_the_selected_backend(
     assert built["gate"] is not None  # the runtime's exec rate limit reaches the backend
 
 
-def test_child_mapping_keeps_the_backend_and_its_settings(registered: FakeBackend, tmp_path: Path) -> None:
-    """A child process gets the same backend table, without needing the parent's `base_dir`."""
-    cfg = FlotillaConfig.from_mapping(fake_data(region="cn-sh"), base_dir=tmp_path)
-    child = FlotillaConfig.from_mapping(cfg.to_mapping())
+def test_child_mapping_keeps_the_backend_and_its_settings(registered: FakeBackend) -> None:
+    """A spec a process received as data validates to the same backend table it was dumped from."""
+    cfg = FlotillaConfig.from_mapping(fake_data(region="cn-sh"))
+    child = FlotillaConfig.from_mapping(cfg.model_dump(mode="json"))
     assert child.backend == "fake"
     assert child.backend_settings == cfg.backend_settings

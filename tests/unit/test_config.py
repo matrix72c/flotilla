@@ -16,32 +16,53 @@ from flotilla.testing.reports import evidence, no
 # ───────────────────────────── Loading ─────────────────────────────
 
 
-def test_loads_toml(tmp_path: Path) -> None:
-    (tmp_path / "flotilla.toml").write_text(
-        f"""
-[opensandbox]
-endpoint = "http://os.test"
-credential_env = "FLOTILLA_CRED"
-
-[opensandbox.network]
-sandbox_cidrs = ["10.0.0.0/16"]
-
-[opensandbox.create_fields]
-ports = [{{ containerPort = 44772, name = "execd", protocol = "tcp" }}]
-
-[storage]
-volumes = "host"
-host_path = "/srv/flotilla"
-
-[share]
-release = "2026-10-07.1"
-release_sha256 = "{SHA}"
-"""
+def test_a_spec_is_constructed_not_parsed() -> None:
+    """Backend settings reach the backend from the object a caller built, with no file in between."""
+    cfg = FlotillaConfig.from_mapping(
+        {
+            "opensandbox": {
+                "endpoint": "http://os.test",
+                "credential_env": "FLOTILLA_CRED",
+                "network": {"sandbox_cidrs": ["10.0.0.0/16"]},
+                "create_fields": {"ports": [{"containerPort": 44772, "name": "execd", "protocol": "tcp"}]},
+            },
+            "storage": {"volumes": "host", "host_path": "/srv/flotilla"},
+            "share": {"release": "2026-10-07.1", "release_sha256": SHA},
+        }
     )
-    cfg = FlotillaConfig.load(tmp_path / "flotilla.toml")
     assert cfg.opensandbox_settings().create_fields["ports"][0]["containerPort"] == 44772
     assert cfg.storage_settings().host_path == "/srv/flotilla"
     assert cfg.network.policy() == ExternalPolicy(mode="none")  # no external given: only none
+
+
+def test_a_deployment_is_named_by_where_to_import_it_from() -> None:
+    """`flotilla gc` has only a name to go on, so a name has to reach the same spec the client used."""
+    from flotilla.testing.config import importable
+
+    cfg = config()
+    assert FlotillaConfig.load(importable(cfg)) == cfg
+    for target in ("flotilla.testing.config", ":DEPLOYMENT", "flotilla.testing.config:"):
+        with pytest.raises(ConfigError, match=r"package\.module:attribute"):
+            FlotillaConfig.load(target)
+    with pytest.raises(ConfigError, match="cannot import"):
+        FlotillaConfig.load("flotilla.no_such_module:DEPLOYMENT")
+    with pytest.raises(ConfigError, match="defines no ABSENT"):
+        FlotillaConfig.load("flotilla.testing.config:ABSENT")
+    with pytest.raises(ConfigError, match="not a FlotillaConfig"):
+        FlotillaConfig.load("flotilla.testing.config:SHA")
+
+
+def test_a_deployment_may_be_named_as_a_factory() -> None:
+    """A recipe that builds its spec from arguments exposes the function, not a module global."""
+    from flotilla.testing.config import importable
+
+    cfg = config()
+    target = importable(cfg)
+    module_name, _, _ = target.partition(":")
+    import sys
+
+    sys.modules[module_name].build = lambda: cfg  # type: ignore[attr-defined]
+    assert FlotillaConfig.load(f"{module_name}:build") == cfg
 
 
 def test_group_extension_is_optional() -> None:
@@ -350,7 +371,7 @@ def test_management_settings_roundtrip_without_touching_task_capabilities(tmp_pa
     )
     assert cfg.probe_settings() == config(probe=probe).probe_settings()
     assert cfg.platform_capabilities() == config().platform_capabilities()
-    restored = FlotillaConfig.from_mapping(cfg.to_mapping(), base_dir=tmp_path)
+    restored = FlotillaConfig.from_mapping(cfg.model_dump(mode="json"))
     assert restored.prepare == cfg.prepare
     assert restored.opensandbox_settings().management_extensions == {"runtimeClassName": "kata"}
     assert restored.anchor_settings(workspace=True) == cfg.anchor_settings(workspace=True)
@@ -394,13 +415,13 @@ def test_probe_inputs_are_config_not_capability_declarations() -> None:
     [("echo", "tcp", 48080), ("echo", "udp", 48080), ("https", "tcp", 443), ("ntp", "udp", 123)],
 )
 def test_probe_service_config_roundtrip(
-    service: Literal["echo", "https", "ntp"], protocol: Literal["tcp", "udp"], port: int, tmp_path: Path
+    service: Literal["echo", "https", "ntp"], protocol: Literal["tcp", "udp"], port: int
 ) -> None:
     from flotilla.capabilities import ExternalTarget
 
     target = {"host": "control.example.com", "port": port, "protocol": protocol, "service": service}
     cfg = config(probe={"image": "reg/probe@sha256:" + "1" * 64, "external_targets": [target]})
-    restored = FlotillaConfig.from_mapping(cfg.to_mapping(), base_dir=tmp_path)
+    restored = FlotillaConfig.from_mapping(cfg.model_dump(mode="json"))
     assert restored.probe == cfg.probe
     assert restored.probe_settings().targets == (ExternalTarget("control.example.com", port, protocol, service),)
 
@@ -488,18 +509,28 @@ def test_agent_runtime_is_typed_and_layer_agnostic(tmp_path: Path) -> None:
         agent_runtime={
             "input": "runtimes",
             "layers": {
-                "lagent": {"local_root": "layers/lagent", "platform_root": "runtimes/lagent"},
+                "lagent": {"local_root": str(tmp_path / "layers/lagent"), "platform_root": "runtimes/lagent"},
                 "anything": {"local_root": "/abs/layer", "platform_root": "runtimes/anything"},
             },
         },
-    ).model_dump(mode="json", exclude={"base_dir"})
-    cfg = FlotillaConfig.from_mapping(data, base_dir=tmp_path)
+    ).model_dump(mode="json")
+    cfg = FlotillaConfig.from_mapping(data)
     assert cfg.agent_runtime is not None
     # Flotilla validates shape and roots; layer names stay consumer vocabulary.
     assert set(cfg.agent_runtime.layers) == {"lagent", "anything"}
-    assert cfg.agent_runtime.layers["lagent"].local_root == Path("layers/lagent")
-    resolved = cfg.to_mapping()["agent_runtime"]["layers"]["lagent"]["local_root"]
-    assert resolved == str(tmp_path / "layers/lagent")
+    assert cfg.agent_runtime.layers["lagent"].local_root == tmp_path / "layers/lagent"
+    assert FlotillaConfig.from_mapping(cfg.model_dump(mode="json")) == cfg
+
+
+def test_a_client_side_path_must_be_absolute() -> None:
+    """A spec outlives the directory it was written in, so a relative path has no anchor left."""
+    with pytest.raises(ValidationError, match=r"datasets\.tb"):
+        config(datasets={"tb": {"local_root": "data/tb", "platform_root": "datasets/tb"}})
+    with pytest.raises(ValidationError, match=r"agent_runtime\.layers\.node"):
+        config(
+            inputs={"runtimes": {"host_path": "@user:owner", "root_subpath": "runtimes"}},
+            agent_runtime={"input": "runtimes", "layers": {"node": {"platform_root": "n", "local_root": "layers/n"}}},
+        )
 
 
 def test_share_defaults_to_the_builtin_release() -> None:
@@ -509,11 +540,10 @@ def test_share_defaults_to_the_builtin_release() -> None:
     assert not config().share.builtin  # an explicit custom pin stays custom
 
 
-def test_runtime_layer_local_root_is_optional(tmp_path: Path) -> None:
+def test_runtime_layer_local_root_is_optional() -> None:
     cfg = config(
         inputs={"runtimes": {"host_path": "@user:owner", "root_subpath": "runtimes"}},
         agent_runtime={"input": "runtimes", "layers": {"node": {"platform_root": "node/node22"}}},
     )
     assert cfg.agent_runtime is not None and cfg.agent_runtime.layers["node"].local_root is None
-    restored = FlotillaConfig.from_mapping(cfg.to_mapping(), base_dir=tmp_path)
-    assert restored.agent_runtime == cfg.agent_runtime
+    assert FlotillaConfig.from_mapping(cfg.model_dump(mode="json")).agent_runtime == cfg.agent_runtime

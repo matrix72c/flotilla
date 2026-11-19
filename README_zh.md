@@ -16,22 +16,35 @@ Flotilla 读取已发布的任务目录，把它解析成每服务一个沙盒�
 
 任务的 `task.toml` 是 Harbor 的格式，所以 `harbor` 是必需依赖；Compose 二进制、Docker 和 GPU 栈都不需要。安装后的 `flotilla anchor build` 使用包内资源构建 Anchor；必须提供固定 digest 的 Python 基础镜像，显式 `--push` 才发布。
 
-## 两件事
+## 三件事
+
+1. **写 spec**。部署就是一个你自己构造的 `FlotillaConfig`，没有部署文件。把它放在自己的模块里，和其余配置放在一起：
+
+```python
+# myproject/deployment.py
+from flotilla.config import DatasetBinding, FlotillaConfig, OpenSandbox, OpenSandboxNetwork, Reaper, Storage
+
+PLATFORM = FlotillaConfig(
+    opensandbox=OpenSandbox(
+        endpoint="https://sandbox.example.com",
+        credential_env="SANDBOX_CREDENTIAL",
+        network=OpenSandboxNetwork(sandbox_cidrs=["10.42.0.0/16"]),
+    ),
+    storage=Storage(host_path="/shared"),
+    datasets={"example": DatasetBinding(local_root="/srv/tasks", platform_root="/shared/datasets/example")},
+    reaper=Reaper(anchor_image="registry.example.com/team/anchor@sha256:..."),
+)
+```
+
+2. **probe** 测量那些平台可以悄悄缺失的隔离属性——出网策略没生效、给了只读却能写、exec 通道不验 token——每个部署跑一次。功能项不测：平台做不到的事，create 请求自己会报错。进程外的命令按「从哪导入」来指名 spec：
 
 ```sh
-flotilla probe --deployment deployment.toml --env sandbox.env
+flotilla probe --deployment myproject.deployment:PLATFORM --env sandbox.env
 ```
 
-1. **probe** 测量平台能力、安全属性与清理结果，每个部署跑一次。不能以选择某个文件系统协议代替实测。
-2. 用现有存储工具把数据集发布到共享存储，再声明它在两侧的位置。中间不生成任何东西，平台挂载的就是你发布的那棵目录树。
+3. 用现有存储工具把数据集发布到共享存储。中间不生成任何东西，平台挂载的就是你发布的那棵目录树。
 
-```toml
-[datasets.example]
-local_root = "./tasks"
-platform_root = "/shared/datasets/example"
-```
-
-两侧都要显式声明，因为任何一侧都推不出另一侧：客户端路径说明不了平台怎么挂这块存储。本地相对路径相对 deployment 文件解析；平台路径受配置的 host/PVC 存储根限制，不猜测或剥离前缀。凭据保存在数据集外，运行时显式注入。
+上面 `datasets` 里两侧都要显式声明，因为任何一侧都推不出另一侧：客户端路径说明不了平台怎么挂这块存储。`local_root` 必须是绝对路径——spec 的寿命比写它的那个目录长。平台路径受配置的 host/PVC 存储根限制，不猜测或剥离前缀。凭据保存在数据集外，运行时显式注入。
 
 ```text
 tasks/
@@ -49,14 +62,14 @@ tasks/
 import asyncio
 
 from flotilla import Flotilla, OpenOptions
-from flotilla.config import FlotillaConfig
 from flotilla.native import NativeAttempt
+
+from myproject.deployment import PLATFORM
 
 
 async def main():
-    config = FlotillaConfig.load("deployment.toml")
-    dataset = config.resolve_datasets()["example"]
-    async with Flotilla(deployment=config) as fleet:
+    dataset = PLATFORM.resolve_datasets()["example"]
+    async with Flotilla(deployment=PLATFORM) as fleet:
         async with await NativeAttempt.create(fleet, dataset.source("demo/redis")) as attempt:
             env = await attempt.open("main", OpenOptions(startup_timeout=600, lifetime=300))
             result = await env.service("main").exec(["id"], timeout=30)

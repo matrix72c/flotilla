@@ -21,15 +21,15 @@ def test_probe_cleanup_is_required() -> None:
         config().check_isolation(evidence(cleanup=no()))
 
 
-def test_deployment_loading_does_not_open_datasets(tmp_path: Path) -> None:
-    """Loading a deployment touches no dataset: a config that names a missing directory still loads."""
-    data = config().model_dump(exclude={"base_dir"})
-    data["datasets"] = {"future": {"local_root": "not-created", "platform_root": "datasets/future"}}
-    data["agent_runtime"] = {"layers": {"lagent": {"local_root": "not-created", "platform_root": "runtimes/l1"}}}
-    cfg = FlotillaConfig.from_mapping(data, base_dir=tmp_path)
-    assert cfg.datasets["future"].local_root == Path("not-created")
-    assert cfg.agent_runtime is not None and cfg.agent_runtime.layers["lagent"].local_root == Path("not-created")
-    assert cfg.to_mapping()["datasets"]["future"]["local_root"] == str(tmp_path / "not-created")
+def test_a_spec_opens_no_dataset(tmp_path: Path) -> None:
+    """Building a spec touches no dataset: one naming a missing directory still validates."""
+    absent = tmp_path / "not-created"
+    data = config().model_dump(mode="json")
+    data["datasets"] = {"future": {"local_root": str(absent), "platform_root": "datasets/future"}}
+    data["agent_runtime"] = {"layers": {"lagent": {"local_root": str(absent), "platform_root": "runtimes/l1"}}}
+    cfg = FlotillaConfig.from_mapping(data)
+    assert cfg.datasets["future"].local_root == absent
+    assert cfg.agent_runtime is not None and cfg.agent_runtime.layers["lagent"].local_root == absent
     # Resolving it is what fails, and only then.
     with pytest.raises(DatasetError, match="not a directory"):
         cfg.resolve_datasets()

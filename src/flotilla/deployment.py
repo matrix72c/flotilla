@@ -82,9 +82,13 @@ class Deployment:
         self._config = config
 
     @classmethod
-    def load(cls, path: str | Path, *, credentials: str | Path | None = None) -> Deployment:
-        """Load and validate a deployment; optionally bind the platform credential from a file."""
-        deployment = cls(FlotillaConfig.load(path))
+    def load(cls, target: str, *, credentials: str | Path | None = None) -> Deployment:
+        """Import a deployment spec named `package.module:attribute`; optionally bind its credential.
+
+        A consumer holding the spec already passes it to `Deployment(spec)`. This is for a process
+        that only has its name, which is also what `flotilla gc` takes.
+        """
+        deployment = cls(FlotillaConfig.load(target))
         if credentials is not None:
             deployment.bind_credentials(credentials)
         return deployment

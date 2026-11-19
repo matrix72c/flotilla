@@ -49,7 +49,7 @@ No-network policies use `defaultAction="deny"` with no external allow rules. The
 Select each protocol explicitly and run the opt-in real contracts. Record server/execd image versions and protocol configuration privately with the results. A local mock contract is insufficient evidence for a real gateway's stream, interrupt, upload, or policy behavior.
 
 ```sh
-python -m tests.contract.foreground --deployment deployment.toml \
+python -m tests.contract.foreground --deployment myproject.deployment:PLATFORM \
   --image "$CONTRACT_IMAGE" --out artifacts/foreground-contract.json
 ```
 

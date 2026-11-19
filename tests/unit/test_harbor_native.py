@@ -19,17 +19,19 @@ from harbor.models.trial.config import TrialConfig
 from harbor.models.trial.paths import TrialPaths
 from harbor.verifier.verifier import RewardFileEmptyError, RewardFileNotFoundError, VerifierOutputParseError
 
+from flotilla.config import FlotillaConfig
 from flotilla.integrations.harbor_native import (
     FlotillaTaskSource,
     NativeFlotillaEnvironment,
     NativeFlotillaRuntime,
 )
 from flotilla.native import VerificationResult
+from flotilla.testing.config import importable
 
 pytestmark = pytest.mark.asyncio
 LOGGER = logging.getLogger(__name__)
 
-Selection = tuple["FlotillaTaskSource", Path, Path, str]
+Selection = tuple["FlotillaTaskSource", Path, str, str]
 
 IMAGE = "r.io/ns/main@sha256:" + "b" * 64
 TASK_KEY = "datasets/task"
@@ -59,9 +61,10 @@ def build_dataset(base: Path, *, mode: str = "separate", steps: bool = False) ->
     return base / "dataset"
 
 
-def write_deployment(path: Path, root: Path, *, name: str = "fixture") -> Path:
-    path.write_text(
-        toml.dumps(
+def write_deployment(root: Path, *, name: str = "fixture") -> str:
+    """A spec declaring one dataset, published where the task source can import it."""
+    return importable(
+        FlotillaConfig.from_mapping(
             {
                 "opensandbox": {
                     "endpoint": "http://os.test/",
@@ -74,15 +77,14 @@ def write_deployment(path: Path, root: Path, *, name: str = "fixture") -> Path:
             }
         )
     )
-    return path
 
 
 @pytest.fixture
 def selection(tmp_path: Path) -> Selection:
     root = build_dataset(tmp_path)
-    deployment_file = write_deployment(tmp_path / "deployment.toml", root)
-    source = FlotillaTaskSource(dataset="fixture", deployment=deployment_file, metadata_workers=2)
-    return source, root, deployment_file, TASK_KEY
+    deployment = write_deployment(root)
+    source = FlotillaTaskSource(dataset="fixture", deployment=deployment, metadata_workers=2)
+    return source, root, deployment, TASK_KEY
 
 
 # --------------------------------------------------------------------------- #
@@ -135,7 +137,7 @@ async def test_resolve_rejects_harbor_task_selection(selection: Selection) -> No
 
 
 async def test_resolve_rejects_empty_selections_and_undeclared_datasets(tmp_path: Path, selection: Selection) -> None:
-    source, _root, deployment_file, key = selection
+    source, _root, deployment, key = selection
     empty = tmp_path / "empty.txt"
     empty.write_text("\n# nothing\n")
     source.selection = empty
@@ -143,10 +145,10 @@ async def test_resolve_rejects_empty_selections_and_undeclared_datasets(tmp_path
         await source.resolve_task_configs(job_config(source))
     absent = tmp_path / "absent.txt"
     absent.write_text("datasets/missing\n")
-    other = FlotillaTaskSource(dataset="fixture", deployment=deployment_file, selection=absent)
+    other = FlotillaTaskSource(dataset="fixture", deployment=deployment, selection=absent)
     with pytest.raises(ValueError, match="not a task directory"):
         await other.resolve_task_configs(job_config(other))
-    foreign = FlotillaTaskSource(dataset="absent-name", deployment=deployment_file)
+    foreign = FlotillaTaskSource(dataset="absent-name", deployment=deployment)
     with pytest.raises(ValueError, match="declares no dataset"):
         await foreign.resolve_task_configs(job_config(foreign))
     del key
@@ -193,15 +195,14 @@ async def test_load_rejects_unsupported_and_foreign_tasks(tmp_path: Path, select
         await source.load_task(good.model_copy(update={"task": TrialTaskConfig(path=tmp_path / "elsewhere")}))
 
     multi = build_dataset(tmp_path / "multi", steps=True)
-    write_deployment(tmp_path / "multi.toml", multi)
-    many = FlotillaTaskSource(dataset="fixture", deployment=tmp_path / "multi.toml")
+    many = FlotillaTaskSource(dataset="fixture", deployment=write_deployment(multi))
     many_resolved = await many.resolve_task_configs(job_config(many))
     many_config = TrialConfig.model_validate(
         {
             "task": {"path": str(many_resolved[0].path)},
             "task_source": {
                 "import_path": "flotilla.integrations.harbor_native:FlotillaTaskSource",
-                "kwargs": {"dataset": many.dataset, "deployment": str(many.deployment)},
+                "kwargs": {"dataset": many.dataset, "deployment": many.deployment},
             },
         }
     )
@@ -209,12 +210,13 @@ async def test_load_rejects_unsupported_and_foreign_tasks(tmp_path: Path, select
         await many.load_task(many_config)
 
 
-async def test_a_relative_deployment_resolves_against_the_config_and_snapshots_absolute(
+async def test_a_relative_selection_resolves_against_the_config_and_snapshots_absolute(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    root = build_dataset(tmp_path / "data")
-    deployment_file = write_deployment(tmp_path / "data" / "deployment.toml", root)
+    """A deployment is an import target, so the selection file is the one input still named by path."""
     origin = tmp_path / "data"
+    root = build_dataset(origin)
+    (origin / "selection.txt").write_text(f"{TASK_KEY}\n")
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
     monkeypatch.chdir(elsewhere)
@@ -222,14 +224,18 @@ async def test_a_relative_deployment_resolves_against_the_config_and_snapshots_a
         {
             "task_source": {
                 "import_path": "flotilla.integrations.harbor_native:FlotillaTaskSource",
-                "kwargs": {"dataset": "fixture", "deployment": "deployment.toml"},
-                "kwargs_base_dirs": {"deployment": origin},
+                "kwargs": {
+                    "dataset": "fixture",
+                    "deployment": write_deployment(root),
+                    "selection": "selection.txt",
+                },
+                "kwargs_base_dirs": {"selection": origin},
             }
         }
     )
     source = config.task_source.resolve()
     resolved = await source.resolve_task_configs(config)
-    assert config.task_source.kwargs["deployment"] == str(deployment_file)
+    assert config.task_source.kwargs["selection"] == str(origin / "selection.txt")
     # Snapshots taken after resolution load from any working directory.
     restored = JobConfig.model_validate_json(config.model_dump_json())
     task, _ = await restored.task_source.resolve().load_task(
@@ -238,21 +244,24 @@ async def test_a_relative_deployment_resolves_against_the_config_and_snapshots_a
     assert "A neutral native instruction." in task.instruction
 
 
-async def test_a_relative_deployment_fails_without_a_local_config_file(
+async def test_a_relative_selection_fails_without_a_local_config_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = build_dataset(tmp_path / "data")
-    write_deployment(tmp_path / "deployment.toml", root)
     config = JobConfig.model_validate(
         {
             "task_source": {
                 "import_path": "flotilla.integrations.harbor_native:FlotillaTaskSource",
-                "kwargs": {"dataset": "fixture", "deployment": "deployment.toml"},
-                "kwargs_base_dirs": {"deployment": None},
+                "kwargs": {
+                    "dataset": "fixture",
+                    "deployment": write_deployment(root),
+                    "selection": "selection.txt",
+                },
+                "kwargs_base_dirs": {"selection": None},
             }
         }
     )
-    with pytest.raises(ValueError, match="relative deployment requires a local config file"):
+    with pytest.raises(ValueError, match="relative selection requires a local config file"):
         await config.task_source.resolve().resolve_task_configs(config)
 
 
@@ -271,7 +280,7 @@ async def make_runtime(
 ) -> NativeFlotillaRuntime:
     await selection[0].resolve_task_configs(job_config(selection[0]))
 
-    source, root, deployment_file, key = selection
+    source, root, deployment, key = selection
     config = SimpleNamespace(
         task_source=None,
         verifier=SimpleNamespace(import_path=None, env={}),
@@ -286,7 +295,7 @@ async def make_runtime(
     runtime.task = task
     runtime.paths = paths_of(tmp_path)
     runtime.context_id = None  # type: ignore[assignment]
-    runtime.deployment = str(deployment_file)
+    runtime.deployment = deployment
     runtime.run_timeout = 600.0
     runtime.fleet = SimpleNamespace(  # type: ignore[assignment]
         close=AsyncMock(return_value=SimpleNamespace(clean=True))
@@ -436,18 +445,18 @@ async def test_native_initialization_preserves_declared_readonly_filesystem() ->
 async def test_constructor_rejects_incompatible_trials(
     tmp_path: Path, selection: Selection, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    source, _root, deployment_file, _key = selection
+    source, _root, deployment, _key = selection
     resolved = await source.resolve_task_configs(job_config(source))
     config = TrialConfig.model_validate(
         {
             "task": {"path": str(resolved[0].path)},
             "task_source": {
                 "import_path": "flotilla.integrations.harbor_native:FlotillaTaskSource",
-                "kwargs": {"dataset": source.dataset, "deployment": str(deployment_file)},
+                "kwargs": {"dataset": source.dataset, "deployment": deployment},
             },
             "runtime": {
                 "import_path": "flotilla.integrations.harbor_native:NativeFlotillaRuntime",
-                "kwargs": {"deployment": str(deployment_file)},
+                "kwargs": {"deployment": deployment},
             },
             "environment": {"import_path": "flotilla.integrations.harbor_native:NativeFlotillaEnvironment"},
             "trials_dir": tmp_path / "trials",
@@ -462,7 +471,7 @@ async def test_constructor_rejects_incompatible_trials(
             "config": config,
             "paths": paths_of(tmp_path),
             "context_id": None,
-            "deployment": str(deployment_file),
+            "deployment": deployment,
         }
         values.update(overrides)
         monkeypatch.setattr(NativeFlotillaRuntime, "__init__", NativeFlotillaRuntime.__init__)

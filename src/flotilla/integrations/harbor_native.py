@@ -55,26 +55,26 @@ class FlotillaTaskSource:
     """
 
     def __init__(
-        self, *, dataset: str, deployment: str | Path, selection: str | Path | None = None, metadata_workers: int = 8
+        self, *, dataset: str, deployment: str, selection: str | Path | None = None, metadata_workers: int = 8
     ) -> None:
         if isinstance(metadata_workers, bool) or not isinstance(metadata_workers, int) or metadata_workers < 1:
             raise ValueError("metadata_workers must be a positive integer")
         if not hasattr(Task, "from_metadata"):
             raise RuntimeError("native Flotilla requires Harbor with task_source/runtime extension support")
         self.dataset = dataset
-        self.deployment = Path(deployment).expanduser()
+        self.deployment = deployment
         self.selection = None if selection is None else Path(selection).expanduser()
         self.metadata_workers = metadata_workers
         self._resolved: Dataset | None = None
         # Absolute task directories of selected tasks, keyed by where they are on this host.
         self.sources: dict[Path, TaskSource] = {}
 
-    def _resolve_input(self, value: Path, name: str, base_dirs: dict[str, Path | None] | None) -> Path:
+    def _resolve_selection_path(self, value: Path, base_dirs: dict[str, Path | None] | None) -> Path:
         if value.is_absolute():
             return value
-        base = Path.cwd() if base_dirs is None else base_dirs.get(name, Path.cwd())
+        base = Path.cwd() if base_dirs is None else base_dirs.get("selection", Path.cwd())
         if base is None:
-            raise ValueError(f"relative {name} requires a local config file; use absolute paths in remote configs")
+            raise ValueError("a relative selection requires a local config file; use an absolute path in a remote one")
         return base / value
 
     def _init_dataset(self, config: Any) -> None:
@@ -82,17 +82,15 @@ class FlotillaTaskSource:
             return
         source_config = config.task_source
         base_dirs = None if source_config is None else source_config.kwargs_base_dirs
-        deployment = self._resolve_input(self.deployment, "deployment", base_dirs)
-        selection = None if self.selection is None else self._resolve_input(self.selection, "selection", base_dirs)
-        declared = FlotillaConfig.load(deployment).resolve_datasets()
+        selection = None if self.selection is None else self._resolve_selection_path(self.selection, base_dirs)
+        declared = FlotillaConfig.load(self.deployment).resolve_datasets()
         if self.dataset not in declared:
             raise ValueError(f"the deployment declares no dataset {self.dataset!r}; declared: {sorted(declared)}")
-        # Snapshots carry resolved external paths, not the invocation's CWD.
-        self.deployment, self.selection, self._resolved = deployment, selection, declared[self.dataset]
-        if source_config is not None:
-            source_config.kwargs["deployment"] = str(deployment)
-            if selection is not None:
-                source_config.kwargs["selection"] = str(selection)
+        # Snapshots carry the resolved selection path, not the invocation's CWD. The deployment is
+        # an import target, which means the same thing in every process that can import it.
+        self.selection, self._resolved = selection, declared[self.dataset]
+        if source_config is not None and selection is not None:
+            source_config.kwargs["selection"] = str(selection)
 
     @property
     def tasks(self) -> Dataset:

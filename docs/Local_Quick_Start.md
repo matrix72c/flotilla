@@ -110,71 +110,73 @@ docker network inspect bridge --format '{{(index .IPAM.Config 0).Subnet}} {{(ind
 # 172.17.0.0/16 172.17.0.1
 ```
 
-Create `$LOCAL/deployment.toml`, replacing the bridge subnet and gateway, the shared path, and the anchor digest:
+Write `$LOCAL/deployment.py`, replacing the bridge subnet and gateway, the shared path, and the two image digests:
 
-```toml
-[opensandbox]
-endpoint = "http://127.0.0.1:8080"
-credential_env = "FLOTILLA_OPENSANDBOX_CREDENTIAL"
+```python
+from flotilla.config import (
+    FlotillaConfig,
+    Limits,
+    Network,
+    OpenSandbox,
+    OpenSandboxExecd,
+    OpenSandboxNetwork,
+    PlatformFacts,
+    Probe,
+    Reaper,
+    Resource,
+    ResourceDefaults,
+    Security,
+    Storage,
+)
 
-[opensandbox.network]
-link = "cidr"
-sandbox_cidrs = ["172.17.0.0/16"]     # bridge subnet
-platform_cidrs = ["172.17.0.1/32"]    # bridge gateway
-
-[opensandbox.execd]
-protocol = "current"
-
-[storage]
-volumes = "host"
-host_path = "/path/to/flotilla-local/shared"
-
-[network]
-external = []                         # sandboxes get no internet access
-
-[security]
-# A single Docker host cannot provide these; see "What this setup does not provide".
-accept_insecure = ["inbound_isolation", "exec_auth", "no_auto_mount"]
-
-[reaper]
-anchor_image = "localhost:5000/flotilla/anchor@sha256:REPLACE_WITH_ANCHOR_DIGEST"
-
-[limits]
-trial_concurrency = 4
-instance_budget = 25
-
-[resources.default]
-cpu = "1"
-memory = "1Gi"
+PLATFORM = FlotillaConfig(
+    opensandbox=OpenSandbox(
+        endpoint="http://127.0.0.1:8080",
+        credential_env="FLOTILLA_OPENSANDBOX_CREDENTIAL",
+        network=OpenSandboxNetwork(
+            link="cidr",
+            sandbox_cidrs=["172.17.0.0/16"],      # bridge subnet
+            platform_cidrs=["172.17.0.1/32"],     # bridge gateway
+        ),
+        execd=OpenSandboxExecd(protocol="current"),
+    ),
+    storage=Storage(volumes="host", host_path="/path/to/flotilla-local/shared"),
+    network=Network(external=[]),                 # sandboxes get no internet access
+    # A single Docker host cannot provide these; see "What this setup does not provide".
+    security=Security(accept_insecure=["inbound_isolation", "exec_auth", "no_auto_mount"]),
+    reaper=Reaper(anchor_image="localhost:5000/flotilla/anchor@sha256:REPLACE_WITH_ANCHOR_DIGEST"),
+    limits=Limits(trial_concurrency=4, instance_budget=25),
+    resources=ResourceDefaults(default=Resource(cpu="1", memory="1Gi")),
+    platform=PlatformFacts(list_visibility_s=30.0),
+    probe=Probe(
+        deployment="local-docker",
+        image="localhost:5000/flotilla/probe@sha256:REPLACE_WITH_PROBE_DIGEST",
+        link_members=9,
+        # Use these services only if approved and reachable for your deployment; there are no
+        # built-in targets.
+        dns_name="pypi.org",
+        external_targets=[
+            {"host": "pypi.org", "port": 443, "protocol": "tcp", "service": "https"},
+            {"host": "time.cloudflare.com", "port": 123, "protocol": "udp", "service": "ntp"},
+        ],
+    ),
+)
 ```
 
 A task's images must be published where the sandboxes can pull from, and named by digest.
 
-Add probe inputs to the same `deployment.toml`:
-
-```toml
-[probe]
-deployment = "local-docker"
-image = "localhost:5000/flotilla/probe@sha256:REPLACE_WITH_PROBE_DIGEST"
-link_members = 9
-list_visibility_s = 30
-# Use these services only if approved/reachable for your deployment; no built-in targets.
-dns_name = "pypi.org"
-external_targets = [
-  { host = "pypi.org", port = 443, protocol = "tcp", service = "https" },
-  { host = "time.cloudflare.com", port = 123, protocol = "udp", service = "ntp" },
-]
-```
-
-There is no handwritten declaration file. A probe reports `passed`, `failed`, `skipped`, or `error`; absent controls never count as success. Configure TCP/UDP service controls and a DNS query name as described in [Network validation](Network_Validation.md). HTTPS and NTP avoid the need to operate raw echo servers; `service = "echo"` remains the default for existing controls. Standard services use one pinned IP across allow/deny/restore, and HTTPS requires valid CA trust and hostname verification. Cluster DNS may remain reachable; resolver-IP non-53 controls are optional diagnostics, not a prerequisite. Explicit security waivers cannot manufacture functional or no-network acceptance.
+Nothing here declares what the platform can do: every capability is assumed until a request is refused, and only isolation is measured. An absent control is reported as not shown, never as isolation. Configure TCP/UDP service controls and a DNS query name as described in [Network validation](Network_Validation.md). HTTPS and NTP avoid the need to operate raw echo servers; `service="echo"` remains the default. A standard service uses one pinned IP across allow, deny and allow again, and HTTPS requires valid CA trust and hostname verification. The resolvers named in `platform.cluster_dns` may remain reachable. A waiver records that you run without a property; it does not provide it.
 
 ## 5. Measure the platform's isolation
 
-Every sandbox mounts a small, immutable directory of helper tools at `/.flotilla`. The deployment has no `[share]`, so the first probe publishes the built-in release from the anchor image's BusyBox.
+Every sandbox mounts a small, immutable directory of helper tools at `/.flotilla`. The spec sets no `share=`, so the first probe publishes the built-in release from the anchor image's BusyBox.
+
+Commands outside your own process name the spec by where to import it from, so run them with `$LOCAL` on `PYTHONPATH`:
 
 ```sh
-flotilla probe --deployment deployment.toml
-flotilla share verify --deployment deployment.toml
+export PYTHONPATH="$LOCAL"
+flotilla probe --deployment deployment:PLATFORM
+flotilla share verify --deployment deployment:PLATFORM
 ```
 
 The probe creates real sandboxes and measures whether egress policy, inbound isolation, read-only and subdirectory mounts, auto-mounting and exec authentication actually hold. It prints each observation and writes nothing; a nonzero exit means something it measured did not hold. This guide does not predict which will hold on your Docker runtime. Read the gaps before naming any of them in `security.accept_insecure` — a waiver records that you run without the property, and does not provide it.
@@ -212,14 +214,14 @@ python example.py
 # PONG
 ```
 
-Continue with the [quick start](Quick_Start.md), which uses this `deployment.toml`.
+Continue with the [quick start](Quick_Start.md), which uses this spec.
 
 ## Clean up
 
 A Flotilla client deletes what it created when it exits normally. `flotilla gc` collects what a crashed client left behind. It waits a few minutes between two observations so it never collects a live client:
 
 ```sh
-flotilla gc --deployment deployment.toml
+flotilla gc --deployment deployment:PLATFORM
 docker ps -a --filter name=sandbox-     # should list nothing
 ```
 

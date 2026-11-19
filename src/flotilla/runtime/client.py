@@ -11,7 +11,6 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Callable, Coroutine, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
-from pathlib import Path
 from types import TracebackType
 from typing import TYPE_CHECKING, Any
 
@@ -94,7 +93,7 @@ def with_resources(plan: TrialPlan, overrides: Mapping[str, Mapping[str, str]]) 
 
 class Flotilla:
     def __init__(
-        self, *, deployment: str | Path | FlotillaConfig, on_event: Callable[[RuntimeEvent], None] | None = None
+        self, *, deployment: str | FlotillaConfig, on_event: Callable[[RuntimeEvent], None] | None = None
     ) -> None:
         self._deployment = (
             deployment.model_copy(deep=True)

@@ -45,21 +45,19 @@ The value may point to a `Backend` subclass (instantiated with no arguments) or 
 
 ## Configuration
 
-A deployment selects the backend and gives it a table under `[backends.<name>]`:
+A deployment selects the backend by name and gives it a table under `backends`:
 
-```toml
-backend = "mycloud"
-
-[backends.mycloud]
-endpoint = "https://api.mycloud.example"
-credential_env = "MYCLOUD_TOKEN"
-region = "cn-sh"
-
-[storage]
-volumes = "host"
-host_path = "/mnt/shared/flotilla"
-
-# [share], [reaper], [network], [limits], ... are the same for every backend.
+```python
+backend="mycloud",
+backends={
+    "mycloud": {
+        "endpoint": "https://api.mycloud.example",
+        "credential_env": "MYCLOUD_TOKEN",
+        "region": "cn-sh",
+    }
+},
+storage=Storage(volumes="host", host_path="/mnt/shared/flotilla"),
+# share, reaper, network, limits, ... are the same for every backend.
 ```
 
 The table is validated by your settings model, which subclasses `BackendSettings`. The base class provides the three fields every backend needs and rejects unknown keys:
@@ -78,7 +76,7 @@ class MyCloudSettings(BackendSettings):
     instance_class: str = "standard"
 ```
 
-Validation errors are reported with the TOML path (`backends.mycloud.region: Field required`) and never echo input values. Keep it that way: a pasted credential in the wrong key must not reach logs.
+Validation errors are reported with the field path (`backends.mycloud.region: Field required`) and never echo input values. Keep it that way: a pasted credential in the wrong key must not reach logs.
 
 `[storage]` is shared by all backends. `cfg.storage_settings()` (and `cfg.input_settings()` for the named read-only input roots) returns its `volumes` (`"host"` or `"pvc"`), `host_path`, `claim_name`, and `root_subpath`. Map them to whatever your platform calls a shared mount. If your platform has a different storage model, add your own keys to the settings model and document how they relate to `[storage]`.
 
