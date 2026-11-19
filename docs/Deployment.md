@@ -1,6 +1,6 @@
 # Deployment guide
 
-A deployment provides a sandbox endpoint, an image registry, shared storage, native Anchor/shared tools and measured capability evidence. Users receive `deployment.toml`, its generated capability report and credentials through a separate channel. Field details are in [Configuration](Configuration.md).
+A deployment provides a sandbox endpoint, an image registry, shared storage and the native Anchor/shared tools. Users receive `deployment.toml` and credentials through a separate channel; isolation is measured by running `flotilla probe` against the deployment, which writes nothing. Field details are in [Configuration](Configuration.md).
 
 ## What the deployment has to provide
 
@@ -36,20 +36,20 @@ flotilla share publish share-root --deployment deployment.toml \
 
 Then put its release name and `RELEASE.json` digest in `[share]`. Shared-tools releases are immutable. They are separate from native task releases and any Agent runtime.
 
-## 3. Probe the actual deployment
+## 3. Declare `[platform]` and measure isolation
 
-Configure an ordinary probe image with the required shell/Python/socket tools and pin it by digest. Configure controlled TCP/UDP targets and DNS inputs as described in [Network validation](Network_Validation.md). Privileged images/device checks are optional, explicitly configured paths, not inferred from runtime names.
+Declare the platform numbers a request cannot discover: how long a listing may lag, any TTL cap, the label and link limits, and the implicit egress with the resolver IPs behind it. Getting one wrong refuses nothing and misbehaves later, which is why they are stated rather than assumed. Everything else the platform either does or refuses at create.
+
+Then configure an ordinary probe image with the required shell, Python and socket tools, pinned by digest, and the controlled TCP/UDP targets and DNS inputs described in [Network validation](Network_Validation.md). A privileged image is optional and explicitly configured, never inferred from a runtime name.
 
 ```sh
 flotilla probe --deployment deployment.toml --env sandbox.env
 flotilla share verify --deployment deployment.toml
 ```
 
-Probe writes to the capability path declared in this deployment. `--out`, if supplied, must resolve to that same path; use a separate deployment file with a candidate capability path when evaluating candidates. The command applies required capability and security admission and fails if cleanup is not confirmed. It persists the measured report rather than replacing failures with manual success flags.
+The probe writes nothing. It prints each isolation property with what it observed and exits nonzero when one did not hold and `security.accept_insecure` does not name it, or when cleanup was not confirmed. The observations exist only for the length of the run, so read them there: a client in another process cannot re-derive them, and no later startup re-checks them.
 
-Inspect `passed`, `failed`, `skipped` and `error` independently. Selecting a filesystem protocol is not evidence of behavior. The native profile includes readonly-rootfs/tmpfs and missing/nested mount targets where supported, in addition to actual ownership/mode, non-root writes, capacity, file transfer and isolation checks. Symlink path support is not inferred from success on missing ordinary directories.
-
-Relevant configuration changes invalidate evidence. Do not merge old reports, waive security gaps merely to pass migration, or treat unit mocks/historical runs as current platform acceptance. Probe, Anchor cleanup, platform client cleanup and owned-directory deletion all matter.
+Measure again after the platform itself changes. A waiver is not a migration tool — it records that you run without the property — and unit tests or an earlier run against another deployment are not acceptance of this one.
 
 ## 4. Publish and bind datasets
 

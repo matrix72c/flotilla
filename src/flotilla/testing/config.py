@@ -13,7 +13,6 @@ def config_data(**sections: Any) -> dict[str, Any]:
         "opensandbox": {
             "endpoint": "http://os.test/",
             "credential_env": "FLOTILLA_CRED",
-            "capabilities": "deployments/test.json",
             "network": {"sandbox_cidrs": ["10.0.0.0/16"], "platform_cidrs": ["169.254.169.254/32"]},
         },
         "storage": {"host_path": "/mnt/shared"},

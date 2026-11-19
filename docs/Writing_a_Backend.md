@@ -53,7 +53,6 @@ backend = "mycloud"
 [backends.mycloud]
 endpoint = "https://api.mycloud.example"
 credential_env = "MYCLOUD_TOKEN"
-capabilities = "capabilities.json"
 region = "cn-sh"
 
 [storage]
@@ -67,9 +66,8 @@ The table is validated by your settings model, which subclasses `BackendSettings
 
 | Field | Meaning |
 |---|---|
-| `endpoint` | `http(s)` URL identifying the deployment. `flotilla probe` records it in the capability report, and startup refuses a report from a different endpoint |
+| `endpoint` | `http(s)` URL identifying the deployment |
 | `credential_env` | Name of the environment variable holding the credential. Flotilla reads it and passes the value to `build` |
-| `capabilities` | Path of the capability report, relative to the config file |
 
 ```python
 from flotilla.backends import BackendSettings
@@ -156,7 +154,7 @@ Never include raw response bodies, credentials, environment values, or command o
 - `InstanceHandle` holds only the instance ID. Anything else you need (an exec address, a node name) must be derivable from the ID, because the core rebuilds handles from `list` results.
 - `get` and `list` return `InstanceState` with a normalized `InstanceStatus`: `PENDING` (cannot run commands yet), `RUNNING` (can), `TERMINAL` (never returns to running), `UNKNOWN` (anything you cannot map; treated as unhealthy). Put the native state string in `reason`.
 - `delete` of a missing instance succeeds. A rejected delete must raise; the core only releases capacity after deletion is confirmed.
-- `list` pages internally and returns every match. Report the platform's worst-case delay before a new instance appears in listings as `list_visibility_s` in the declarations; GC safety depends on it.
+- `list` pages internally and returns every match. The deployment declares the platform's worst-case delay before a new instance appears in listings as `[platform].list_visibility_s`; GC safety depends on it.
 
 **Execution.**
 
@@ -180,7 +178,9 @@ Never include raw response bodies, credentials, environment values, or command o
 
 ## Capabilities and the probe
 
-`flotilla probe` runs shared behavioral checks through your `Platform` and writes generated schema-2 `capabilities.json`. Each outcome is `passed`, `failed`, `skipped`, or `error`, bound to relevant deployment/runtime settings. There are no manual capability assertions. Unsupported backend-specific controls must remain non-passed; implement authentic backend hooks where required rather than fabricating success. Startup refuses missing required evidence, mismatched configurations, and unaccepted security gaps. See [Platform requirements](Platform_Requirements.md).
+`Backend.capabilities` is where your backend narrows what a deployment may be asked for. It receives everything on, because a platform that cannot do something refuses the request, and takes away what your configuration rules out. It must never add a capability back.
+
+`flotilla probe` measures isolation through your `Platform` and reports it through its output and exit status; it writes nothing. A check your backend cannot express must raise `NotImplementedError`, which the probe records as not-shown. Never fabricate a success. See [Platform requirements](Platform_Requirements.md).
 
 The probe follows the normal [deployment guide](Deployment.md): build and push the anchor and probe images, publish a share release, run `flotilla probe`, and review the report. Common checks use the Platform contract. Current independent ingress, execd authentication and privileged-runtime checks also use explicit OpenSandbox helpers; another backend must provide equivalent measured controls before those capabilities can be enabled. Management bootstrap uses conservative capabilities and must not bypass normal create gates.
 
@@ -197,7 +197,7 @@ The opt-in real-platform contracts in `tests/contract/` currently construct Open
 
 - [ ] Entry point registered, settings model rejects unknown keys, credential read only through `credential_env`.
 - [ ] Every platform failure raised as `FlotillaError` with a deliberate category; create ambiguity reported as `TRANSIENT`.
-- [ ] Labels are filterable by `list`, and `list_visibility_s` is measured.
+- [ ] Labels are filterable by `list`, and the deployment's declared `[platform].list_visibility_s` holds.
 - [ ] `exec` uses exact argv, identity, cwd, and environment; timeouts are confirmed stopped; `attempt` is updated.
 - [ ] Only the requested volumes are mounted.
 - [ ] Egress policies and links are enforced, with positive and negative checks ([network validation](Network_Validation.md)).

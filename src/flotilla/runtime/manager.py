@@ -73,12 +73,9 @@ class Manager:
         self.cfg = cfg
         self.on_event: Callable[[RuntimeEvent], None] | None = None
         self.clock = clock or SystemClock()
-        report = cfg.load_report()
-        cfg.check_against(report)
-        self.capability_report = report
         command_rate = RateLimiter(self.clock, cfg.limits.exec_rate)
         self.platform = platform or cfg.build_platform(
-            clock=self.clock, caps=cfg.platform_capabilities(report), command_gate=command_rate.acquire
+            clock=self.clock, caps=cfg.platform_capabilities(), command_gate=command_rate.acquire
         )
         self.launch_id = f"run-{uuid.uuid4().hex[:16]}"
         self.anchor = Anchor(self.platform, self.clock, self.launch_id, cfg.anchor_settings(workspace=True))
@@ -168,7 +165,6 @@ class Manager:
             raise invalid("the plan's workspace root is not the workspace this attempt owns")
         if set(request.exec_env) - set(plan.units):
             raise invalid("exec_env contains unknown services")
-        self.cfg.check_against(self.capability_report)
         members = network.link_members(plan)
         caps = self.platform.caps
         for name, unit in plan.units.items():
@@ -333,8 +329,7 @@ class Manager:
             ),
             tuple(run.ready.timings.items()),
             "released" if run.released else "ready",
-            tuple(self.capability_report.security_gaps()),
-            tuple(sorted(self.cfg.security.accept_insecure & set(self.capability_report.security_gaps()))),
+            tuple(sorted(self.cfg.security.accept_insecure)),
         )
 
     async def operation[T](self, eid: str, service: str, action: Callable[[Run], Awaitable[T]]) -> T:

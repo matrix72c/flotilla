@@ -16,7 +16,6 @@ from flotilla.platform.opensandbox.filesystem import INTERNAL_LIMITS
 from flotilla.scan import scan
 from flotilla.testing.config import config_data
 from flotilla.testing.planning import APP, _caps, _task, plan
-from flotilla.testing.reports import ok, report
 
 
 @pytest.mark.parametrize(
@@ -64,15 +63,12 @@ def test_shm_size_admission_shares_the_tmpfs_memory_budget(caps: Capabilities) -
         supported.require_filesystem(False, (), privileged=True, shm_size_bytes=1024**2)
 
 
-def test_report_requires_probed_shm_evidence_and_the_internal_dialect() -> None:
+def test_only_the_internal_dialect_can_express_shm_size() -> None:
     data = config_data()
     data["opensandbox"]["filesystem_protocol"] = "sandbox-system-v1"
     cfg = FlotillaConfig.from_mapping(data)
-    evidence = report(**{"storage.shm_size": ok(), "evidence_profile": cfg.evidence_profile()})
-    assert cfg.platform_capabilities(evidence).shm_size
-    assert not cfg.platform_capabilities(report(evidence_profile=cfg.evidence_profile())).shm_size
-    assert cfg.platform_capabilities(evidence.model_copy(update={"evidence_profile": ""})).shm_size
+    assert cfg.platform_capabilities().shm_size
     upstream = cfg.model_copy(
         update={"opensandbox": cfg.opensandbox_settings().model_copy(update={"filesystem_protocol": "upstream"})}
     )
-    assert not upstream.platform_capabilities(evidence).shm_size
+    assert not upstream.platform_capabilities().shm_size

@@ -11,6 +11,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from flotilla.capabilities import ISOLATION_PROPERTIES, PRIVILEGED_PROPERTIES, UNMEASURED
 from flotilla.config import ConfigError, FlotillaConfig
 from flotilla.core.anchor import Anchor
 from flotilla.core.deletion import Deleter
@@ -52,15 +53,10 @@ def _build_parser() -> argparse.ArgumentParser:
         default=24 * 3600,
         help="remove share/staging entries older than this many seconds",
     )
-    p = sub.add_parser("probe", help="run contract tests against a deployment and write a capability report")
+    p = sub.add_parser("probe", help="measure a deployment's isolation; nonzero exit means it was not demonstrated")
     p.add_argument("--deployment", required=True, type=Path, help="deployment configuration (TOML)")
     p.add_argument("--env", type=Path, help="explicit platform credential environment file")
     p.add_argument("--image", help="explicit override of [probe].image (digest-pinned)")
-    p.add_argument(
-        "--out",
-        type=Path,
-        help="capabilities path declared by the backend table; any other path is refused",
-    )
     p.add_argument(
         "--hosts-recheck",
         type=float,
@@ -91,9 +87,31 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 async def _probe(args: argparse.Namespace) -> int:
+    """Measure isolation and print what held. Exit status is the verdict; nothing is written.
+
+    A client in another process cannot re-derive these observations, so they are not persisted and
+    not re-checked at startup: running this, and reading its exit status, is the gate.
+    """
     cfg = FlotillaConfig.load(args.deployment)
-    await probe_deployment(cfg, out=args.out, image=args.image, hosts_recheck=args.hosts_recheck)
-    print(f"capability report written and admission passed: {cfg.capabilities_path()}")
+    evidence = await probe_deployment(cfg, image=args.image, hosts_recheck=args.hosts_recheck)
+
+    def line(name: str) -> None:
+        item = getattr(evidence, name)
+        print(f"{'held' if item.held else 'NOT SHOWN'}  {name}: {item.observed}")
+
+    for name in (*ISOLATION_PROPERTIES, "cleanup"):
+        line(name)
+    for name in PRIVILEGED_PROPERTIES:
+        if getattr(evidence, name) != UNMEASURED:
+            line(name)
+    print(f"egress forms exercised: {', '.join(sorted(evidence.external_forms)) or 'none'}")
+    if evidence.implicit_egress:
+        print(f"reached without a policy allowing it: {', '.join(evidence.implicit_egress)}")
+    accepted = sorted(cfg.security.accept_insecure)
+    if accepted:
+        # check_isolation already refused anything missing that is not named here.
+        print(f"gaps this deployment accepts running without: {', '.join(accepted)}")
+    print("every isolation property held, except those accepted above")
     return 0
 
 

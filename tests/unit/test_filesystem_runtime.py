@@ -10,7 +10,6 @@ from pathlib import Path
 import pytest
 
 from flotilla import Flotilla, OpenOptions
-from flotilla.capabilities import Item
 from flotilla.config import FlotillaConfig
 from flotilla.platform.base import (
     ExecAttempt,
@@ -103,17 +102,7 @@ async def test_readonly_directory_transfers_use_scratch_and_preserve_environment
             "opensandbox": cfg.opensandbox_settings().model_copy(update={"filesystem_protocol": "sandbox-system-v1"})
         }
     )
-    measured = Item(status="passed", evidence="test double")
-    report = cfg.load_report()
-    report = report.model_copy(
-        update={
-            "runtime": report.runtime.model_copy(update={"readonly_rootfs": measured}),
-            "storage": report.storage.model_copy(update={"native_tmpfs": measured}),
-            "evidence_profile": cfg.evidence_profile(),
-        }
-    )
-    cfg.capabilities_path().write_text(report.dump_json())
-    platform.caps = cfg.platform_capabilities(report)
+    platform.caps = cfg.platform_capabilities()
     base = task()
     unit = base.units["main"]
     prepared = replace(

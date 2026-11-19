@@ -18,7 +18,6 @@ from flotilla.platform.opensandbox.filesystem import INTERNAL_LIMITS, parse_effe
 from flotilla.scan import scan
 from flotilla.testing.config import config_data
 from flotilla.testing.planning import APP, _caps, _task, plan
-from flotilla.testing.reports import ok, report
 
 
 def test_compose_filesystem_fields_roundtrip_to_the_plan(tmp_path: Path) -> None:
@@ -151,28 +150,17 @@ def test_unsupported_tmpfs_is_rejected_at_admission(tmp_path: Path) -> None:
     assert any("native_tmpfs" in f.reason for f in result.findings if f.kind == "reject")
 
 
-def test_report_requires_probed_evidence_and_the_internal_dialect() -> None:
+def test_only_the_internal_dialect_can_express_readonly_rootfs_and_tmpfs() -> None:
+    """A deployment on the upstream protocol has no field to send these in, so a task asking is refused."""
     data = config_data()
     data["opensandbox"]["filesystem_protocol"] = "sandbox-system-v1"
     cfg = FlotillaConfig.from_mapping(data)
-    evidence = report(
-        **{
-            "runtime.readonly_rootfs": ok(),
-            "storage.native_tmpfs": ok(),
-            "evidence_profile": cfg.evidence_profile(),
-        }
-    )
-    assert cfg.platform_capabilities(evidence).readonly_rootfs and cfg.platform_capabilities(evidence).native_tmpfs
-    assert not cfg.platform_capabilities(report(evidence_profile=cfg.evidence_profile())).readonly_rootfs
+    assert cfg.platform_capabilities().readonly_rootfs and cfg.platform_capabilities().native_tmpfs
     upstream = cfg.model_copy(
         update={"opensandbox": cfg.opensandbox_settings().model_copy(update={"filesystem_protocol": "upstream"})}
     )
-    caps = upstream.platform_capabilities(evidence)
-    assert not caps.readonly_rootfs and not caps.native_tmpfs  # the dialect is still enforced
-    kata = cfg.model_copy(
-        update={"opensandbox": cfg.opensandbox_settings().model_copy(update={"extensions": {"runtimeClass": "kata"}})}
-    )
-    assert kata.platform_capabilities(evidence).readonly_rootfs  # settings changes no longer discard evidence
+    caps = upstream.platform_capabilities()
+    assert not caps.readonly_rootfs and not caps.native_tmpfs
 
 
 def test_effective_configuration_is_normalized_and_malformed_values_fail_closed() -> None:

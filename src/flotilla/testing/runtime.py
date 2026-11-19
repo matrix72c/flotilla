@@ -18,19 +18,16 @@ from flotilla.runtime.manager import Manager
 from flotilla.runtime.types import CleanupReport
 from flotilla.testing.config import config_data
 from flotilla.testing.platform import FakePlatform, SharedTree
-from flotilla.testing.reports import report
 
 
 @pytest.fixture
 def deployment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[FlotillaConfig, FakePlatform, SharedTree]:
-    report_path = tmp_path / "caps.json"
     data = config_data(
         network={"external": []},
         limits={"create_rate": 10000, "exec_rate": 10000},
         timeouts={"close": 1},
-        probe={"list_visibility_s": 0.01},
+        platform={"list_visibility_s": 0.01, "implicit_egress": [], "link_max_members": 10},
     )
-    data["opensandbox"]["capabilities"] = str(report_path)
     busybox = b"fake-busybox"
     blob = json.dumps(
         {
@@ -46,16 +43,8 @@ def deployment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Flotill
     ).encode()
     data["share"] = {"release": "test", "release_sha256": hashlib.sha256(blob).hexdigest()}
     cfg = FlotillaConfig.from_mapping(data)
-    caps = report(
-        **{
-            "network.implicit_egress": [],
-            "lifecycle.list_visibility_s": cfg.probe.list_visibility_s,
-            "evidence_profile": cfg.evidence_profile(),
-        }
-    )
-    report_path.write_text(caps.dump_json())
     clock = SystemClock()
-    platform = FakePlatform(caps.to_capabilities(), clock=clock)
+    platform = FakePlatform(cfg.platform_capabilities(), clock=clock)
     platform.initial_files["/etc/hosts"] = b"127.0.0.1 localhost\n"
     tree = SharedTree(platform)
     tree.dirs.update({"", "share", "share/releases", "share/releases/test", "share/releases/test/bin"})

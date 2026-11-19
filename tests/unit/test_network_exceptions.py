@@ -3,9 +3,9 @@
 from dataclasses import replace
 
 import pytest
+from pydantic import ValidationError
 
 from flotilla.platform.base import Capabilities
-from flotilla.testing.reports import report
 
 
 @pytest.mark.parametrize(
@@ -45,13 +45,17 @@ def test_network_none_also_requires_inbound_isolation(caps: Capabilities) -> Non
 
 @pytest.mark.parametrize("address", ["0.0.0.0", "::", "224.0.0.1", "10.96.0.0/16", "kube-dns"])
 def test_resolver_declarations_reject_non_host_targets(address: str) -> None:
-    with pytest.raises(ValueError):
-        report(**{"network.cluster_dns": [address]})
+    from flotilla.testing.config import config
+
+    with pytest.raises(ValidationError):
+        config(platform={"cluster_dns": [address]})
 
 
-def test_old_report_preserves_exceptions_without_granting_dns_exemption() -> None:
-    data = report().model_dump(by_alias=True)
-    del data["network"]["cluster_dns"]
-    old = type(report()).model_validate(data)
-    assert old.network.implicit_egress == ("10.96.0.10:53/udp",)
-    assert not old.to_capabilities().supports_no_network
+def test_implicit_egress_without_a_matching_resolver_declaration_forbids_no_network() -> None:
+    """An undeclared address reaching out is not excused by being on port 53."""
+    from flotilla.testing.config import config
+
+    declared = config(platform={"implicit_egress": ["10.96.0.10:53/udp"], "cluster_dns": ["10.96.0.10"]})
+    assert declared.platform_capabilities().supports_no_network
+    undeclared = config(platform={"implicit_egress": ["10.96.0.10:53/udp"]})
+    assert not undeclared.platform_capabilities().supports_no_network

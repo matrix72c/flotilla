@@ -37,9 +37,8 @@ class BackendSettings(BaseModel):
     # credential = "ak:sk") never reaches terminals or logs. Errors still carry the field path and reason.
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True, allow_inf_nan=False)
 
-    endpoint: str  # identifies the deployment; the capability report must record the same value
+    endpoint: str  # identifies the deployment
     credential_env: str
-    capabilities: str = "capabilities.json"  # generated report path, relative to the config file's directory
 
     @field_validator("endpoint")
     @classmethod
@@ -70,7 +69,7 @@ class Backend[S: BackendSettings](ABC):
         return []
 
     def capabilities(self, settings: S, cfg: FlotillaConfig, caps: Capabilities) -> Capabilities:
-        """Adjust capabilities from the report for what this configuration enforces or cannot provide."""
+        """Narrow the assumed capabilities to what this configuration enforces or cannot provide."""
         return caps
 
     @abstractmethod

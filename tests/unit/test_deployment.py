@@ -50,11 +50,10 @@ def build_dataset(base: Path, *, services: int = 1, cpu: str = "1", shared: bool
 
 
 def write_deployment(root: Path, dataset: Path, *, runtime: str = "", extra: str = "") -> Path:
-    (root / "capabilities.json").write_text('{"report": "fixture"}\n')
     path = root / "deployment.toml"
     path.write_text(
         '[opensandbox]\nendpoint="http://fixture.test"\ncredential_env="TEST_CREDENTIAL"\n'
-        'capabilities="capabilities.json"\n[opensandbox.network]\nlink="sandbox"\n'
+        '[opensandbox.network]\nlink="sandbox"\n'
         '[storage]\nhost_path="/srv/shared"\n'
         '[reaper]\nanchor_image="fixture/anchor:1"\n'
         f'[datasets.rel]\nlocal_root="{os.path.relpath(dataset, root)}"\nplatform_root="datasets/rel"\n'

@@ -12,7 +12,6 @@ from typing import Any
 import pytest
 
 from flotilla import Flotilla
-from flotilla.capabilities import CapabilityReport
 from flotilla.config import FlotillaConfig, Storage
 from flotilla.core import labels
 from flotilla.core.plan import TaskSource, TrialPlan
@@ -407,11 +406,6 @@ async def test_releases_on_named_read_only_input_roots(
     cfg, platform, tree = deployment
     inputs = {"datasets": Storage(host_path="@user:owner"), "extra": Storage(host_path="@user:other")}
     cfg = cfg.model_copy(update={"inputs": inputs})
-    report_path = cfg.capabilities_path()
-    caps = CapabilityReport.load_json(report_path.read_bytes()).model_copy(
-        update={"evidence_profile": cfg.evidence_profile()}
-    )
-    report_path.write_text(caps.dump_json())
     tree.dirs.update({tree.input_key("datasets"), tree.input_key("extra")})
     published = build_dataset(tmp_path / "build", verifier=True)
     platform_copy = tmp_path / "platform-copy"

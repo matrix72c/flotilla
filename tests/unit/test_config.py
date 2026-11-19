@@ -1,4 +1,4 @@
-"""`FlotillaConfig`: load validation, capability report checks, core/backend translation."""
+"""`FlotillaConfig`: load validation, isolation evidence checks, core/backend translation."""
 
 from __future__ import annotations
 
@@ -11,18 +11,17 @@ from pydantic import ValidationError
 from flotilla.config import ConfigError, FlotillaConfig
 from flotilla.platform.base import ExternalPolicy
 from flotilla.testing.config import SHA, config, config_data
-from flotilla.testing.reports import no, report
+from flotilla.testing.reports import evidence, no
 
 # ───────────────────────────── Loading ─────────────────────────────
 
 
-def test_loads_toml_and_resolves_report_path(tmp_path: Path) -> None:
+def test_loads_toml(tmp_path: Path) -> None:
     (tmp_path / "flotilla.toml").write_text(
         f"""
 [opensandbox]
 endpoint = "http://os.test"
 credential_env = "FLOTILLA_CRED"
-capabilities = "deployments/test.json"
 
 [opensandbox.network]
 sandbox_cidrs = ["10.0.0.0/16"]
@@ -40,7 +39,6 @@ release_sha256 = "{SHA}"
 """
     )
     cfg = FlotillaConfig.load(tmp_path / "flotilla.toml")
-    assert cfg.capabilities_path() == tmp_path / "deployments/test.json"
     assert cfg.opensandbox_settings().create_fields["ports"][0]["containerPort"] == 44772
     assert cfg.storage_settings().host_path == "/srv/flotilla"
     assert cfg.network.policy() == ExternalPolicy(mode="none")  # no external given: only none
@@ -131,48 +129,51 @@ def test_credential_from_environment_only() -> None:
     assert "ak:sk" not in str(exc.value)
 
 
-# ───────────────────────────── Checks against the capability report ─────────────────────────────
+# ───────────────────────────── Checks against the isolation evidence ─────────────────────────────
 
 
-def test_matching_report_passes() -> None:
-    config().check_against(report())
+def test_fully_isolated_evidence_passes() -> None:
+    config().check_isolation(evidence())
 
 
 def test_collects_all_problems() -> None:
-    bad = report(
-        **{
-            "lifecycle.label_list": no(),
-            "runtime.exec_auth": no(),
-            "network.external_allowlist": no(),
-        }
-    )
+    """One call reports every missing property, so an operator sees the whole gap at once."""
     with pytest.raises(ConfigError) as exc:
-        config().check_against(bad)
+        config().check_isolation(evidence(exec_auth=no(), read_only=no(), cleanup=no()))
     problems = exc.value.problems
-    assert any("lifecycle list by label" in p for p in problems)
     assert any("exec_auth" in p and "accept_insecure" in p for p in problems)
-    assert any("allowlist" in p for p in problems)  # a narrow allowlist needs deployment allowlist support
+    assert any("read_only" in p for p in problems)
+    assert any("cleanup" in p for p in problems)
 
 
-def test_endpoint_mismatch_rejected() -> None:
-    with pytest.raises(ConfigError, match="endpoint"):
-        config().check_against(report(endpoint="http://other.test"))
+def test_an_unexercised_external_form_is_a_problem() -> None:
+    """The probe allows and denies traffic for a form; a form it never tried proves nothing."""
+    with pytest.raises(ConfigError, match="allowlist"):
+        config().check_isolation(evidence(external_forms=frozenset({"none", "any"})))
+    config(network={"external": []}).check_isolation(evidence(external_forms=frozenset()))
 
 
 def test_security_gaps_require_explicit_acceptance_and_no_stale_entries() -> None:
-    gap = report(**{"storage.no_auto_mount": no()})
-    config(security={"accept_insecure": ["no_auto_mount"]}).check_against(gap)
+    gap = evidence(no_auto_mount=no())
+    config(security={"accept_insecure": ["no_auto_mount"]}).check_isolation(gap)
     with pytest.raises(ConfigError, match="no_auto_mount"):
-        config().check_against(gap)
-    config(security={"accept_insecure": ["exec_auth"]}).check_against(report())
+        config().check_isolation(gap)
+    config(security={"accept_insecure": ["exec_auth"]}).check_isolation(evidence())
 
 
-def test_gc_window_must_exceed_grace_plus_visibility() -> None:
-    cfg = config(probe={"list_visibility_s": 120.0})
-    slow = report(evidence_profile=cfg.evidence_profile())
-    with pytest.raises(ConfigError, match="gc_window"):
-        cfg.check_against(slow)
-    config(probe={"list_visibility_s": 120.0}, reaper={**config_data()["reaper"], "gc_window": 300}).check_against(slow)
+def test_gc_window_must_exceed_grace_plus_declared_visibility() -> None:
+    """The listing budget is a platform fact, so the timing is settled at load, not at probe time."""
+    with pytest.raises(ValidationError, match="gc_window"):
+        config(platform={"list_visibility_s": 120.0})
+    cfg = config(platform={"list_visibility_s": 120.0}, reaper={**config_data()["reaper"], "gc_window": 300})
+    assert cfg.platform_capabilities().list_visibility_s == 120.0
+
+
+def test_anchor_ttl_must_fit_a_declared_platform_cap() -> None:
+    with pytest.raises(ValidationError, match="max_ttl_s"):
+        config(platform={"max_ttl_s": 300}, reaper={**config_data()["reaper"], "anchor_ttl": 600})
+    assert config(platform={"max_ttl_s": 7200}).platform_capabilities().max_ttl_seconds == 7200
+    assert config().platform_capabilities().max_ttl_seconds is None  # uncapped unless declared
 
 
 @pytest.mark.parametrize(
@@ -190,13 +191,12 @@ def test_gc_window_must_exceed_grace_plus_visibility() -> None:
 )
 def test_runtime_params_must_be_reachable(external: list[str], value: str, ok: bool) -> None:
     cfg = config(network={"external": external}, runtime_params={"UPSTREAM": value})
-    cfg.check_against(report(evidence_profile=cfg.evidence_profile()))
     assert cfg.runtime_params["UPSTREAM"] == value
 
 
 def test_any_rejects_runtime_param_on_platform_infrastructure() -> None:
     cfg = config(network={"external": "any"}, runtime_params={"META": "http://169.254.169.254/latest"})
-    cfg.check_against(report(evidence_profile=cfg.evidence_profile()))
+    assert cfg.runtime_params["META"].endswith("/latest")
 
 
 # ───────────────────────────── Translation ─────────────────────────────
@@ -295,7 +295,7 @@ def test_validation_errors_never_echo_values(section: dict[str, Any]) -> None:
 
 def test_any_rejects_runtime_param_inside_sandbox_cidrs() -> None:
     cfg = config(network={"external": "any"}, runtime_params={"PEER": "http://10.0.3.4:8000"})
-    cfg.check_against(report(evidence_profile=cfg.evidence_profile()))
+    assert cfg.runtime_params["PEER"].startswith("http://10.0.3.4")
 
 
 def test_unknown_link_mode_is_rejected() -> None:
@@ -325,61 +325,31 @@ def test_ingress_extension_is_explicit_and_requires_sandbox_id_linking() -> None
         FlotillaConfig.from_mapping(data)
     data["opensandbox"]["network"]["link"] = "sandbox"
     cfg = FlotillaConfig.from_mapping(data)
-    evidence = report(**{"network.inbound_isolation": {"status": "failed"}, "evidence_profile": cfg.evidence_profile()})
     assert cfg.network_settings().ingress == "sandbox"
-    caps = cfg.platform_capabilities(evidence)
-    assert not caps.supports_network_none and not caps.inbound_isolation
-    assert not evidence.network.inbound_isolation.ok  # opting in does not fabricate probe evidence
+    assert cfg.platform_capabilities().sandbox_ingress
+    assert not FlotillaConfig.from_mapping(config_data()).platform_capabilities().sandbox_ingress
 
 
-@pytest.mark.parametrize(
-    "section,value",
-    [
-        ("storage", {"host_path": "/other"}),
-        ("share", {"release": "other", "release_sha256": SHA}),
-        ("network", {"external": []}),
-        ("inputs", {"datasets": {"host_path": "@user:owner"}}),
-    ],
-)
-def test_config_changes_keep_evidence_and_only_warn(
-    section: str, value: dict[str, Any], caplog: pytest.LogCaptureFixture
-) -> None:
-    cfg = config(**{section: value})
-    evidence = report()
-    assert evidence.evidence_profile != cfg.evidence_profile()
-    assert cfg.platform_capabilities(evidence).link  # the report describes the platform, not this text
-    with caplog.at_level("WARNING", logger="flotilla.config"):
-        cfg.check_against(evidence)
-    assert "different deployment settings" in caplog.text
+def test_the_filesystem_protocol_decides_the_filesystem_capabilities() -> None:
+    """Read-only rootfs and tmpfs ride on a lifecycle extension, so the upstream dialect lacks them."""
+    upstream = config().platform_capabilities()
+    assert not (upstream.readonly_rootfs or upstream.native_tmpfs or upstream.shm_size)
+    internal = config(
+        opensandbox={**config_data()["opensandbox"], "filesystem_protocol": "sandbox-system-v1"}
+    ).platform_capabilities()
+    assert internal.readonly_rootfs and internal.native_tmpfs and internal.shm_size
+    assert internal.filesystem_limits.max_tmpfs_mounts == 8
 
 
-def test_protocol_runtime_extension_binding() -> None:
-    for changes in (
-        {"execd": {"protocol": "legacy"}},
-        {"extensions": {"project": "other"}},
-        {"privileged_extensions": {"runtimeClassName": "kata"}},
-        {"filesystem_protocol": "sandbox-system-v1"},
-    ):
-        cfg = config(opensandbox={**config_data()["opensandbox"], **changes})
-        assert cfg.evidence_profile() != config().evidence_profile()
-
-
-def test_prepare_changes_do_not_invalidate_evidence() -> None:
-    cfg = config(prepare={"concurrency": 17})
-    assert cfg.evidence_profile() == config().evidence_profile()
-    assert cfg.platform_capabilities(report()).link
-
-
-def test_management_settings_roundtrip_without_changing_task_evidence(tmp_path: Path) -> None:
+def test_management_settings_roundtrip_without_touching_task_capabilities(tmp_path: Path) -> None:
     probe = {"image": "reg/probe@sha256:" + "1" * 64}
     cfg = config(
         opensandbox={**config_data()["opensandbox"], "management_extensions": {"runtimeClassName": "kata"}},
         prepare={"management_profile": "management", "management_resources": {"cpu": "2", "memory": "4Gi"}},
         probe=probe,
     )
-    assert cfg.evidence_profile() == config().evidence_profile()
     assert cfg.probe_settings() == config(probe=probe).probe_settings()
-    assert cfg.platform_capabilities(report()) == config().platform_capabilities(report())
+    assert cfg.platform_capabilities() == config().platform_capabilities()
     restored = FlotillaConfig.from_mapping(cfg.to_mapping(), base_dir=tmp_path)
     assert restored.prepare == cfg.prepare
     assert restored.opensandbox_settings().management_extensions == {"runtimeClassName": "kata"}
@@ -401,7 +371,7 @@ def test_invalid_management_configuration_is_rejected(prepare: dict[str, Any]) -
         config(prepare=prepare)
 
 
-def test_bootstrap_needs_no_report_and_grants_no_capabilities() -> None:
+def test_bootstrap_grants_no_capabilities() -> None:
     cfg = config()
     caps = cfg.management_capabilities()
     assert not caps.link and not caps.privileged_runtime and not caps.shared_volume
@@ -411,7 +381,6 @@ def test_bootstrap_needs_no_report_and_grants_no_capabilities() -> None:
 def test_probe_inputs_are_config_not_capability_declarations() -> None:
     cfg = config(probe={"image": "reg/probe@sha256:" + "1" * 64, "link_members": 9})
     assert cfg.probe_settings().image == cfg.probe.image
-    assert cfg.probe_settings().evidence_profile == cfg.evidence_profile()
     with pytest.raises(ValidationError):
         config(probe={"image": "reg/probe:latest"})
     with pytest.raises(ValidationError):
@@ -455,18 +424,11 @@ def test_legacy_probe_target_defaults_to_echo() -> None:
     assert cfg.probe_settings().targets[0].service == "echo"
 
 
-def test_serialized_config_keeps_evidence_binding(tmp_path: Path) -> None:
-    cfg = config()
-    restored = FlotillaConfig.from_mapping(cfg.to_mapping(), base_dir=tmp_path)
-    assert restored.evidence_profile() == cfg.evidence_profile()
-
-
 def test_datasets_default_to_the_work_root(tmp_path: Path) -> None:
     cfg = config(inputs={}, datasets={"tb": {"local_root": str(tmp_path), "platform_root": "datasets/tb"}})
     assert cfg.inputs == {} and cfg.datasets["tb"].input is None
     assert cfg.storage_settings_for("work") == cfg.storage_settings()
     assert cfg.anchor_settings().inputs == ()
-    assert "inputs" not in cfg.evidence_profile()
 
 
 def test_named_inputs_bind_datasets_and_the_anchor(tmp_path: Path) -> None:

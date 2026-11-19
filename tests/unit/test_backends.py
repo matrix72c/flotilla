@@ -17,7 +17,6 @@ from flotilla.platform.base import Capabilities, Clock, Platform
 from flotilla.platform.clock import SystemClock
 from flotilla.testing.config import config_data
 from flotilla.testing.platform import FakePlatform
-from flotilla.testing.reports import report
 
 
 class FakeSettings(BackendSettings):
@@ -64,19 +63,16 @@ def fake_data(**table: Any) -> dict[str, Any]:
     data = config_data()
     del data["opensandbox"]
     data["backend"] = "fake"
-    data["backends"] = {
-        "fake": {"endpoint": "http://os.test", "credential_env": "FAKE_TOKEN", "capabilities": "caps.json", **table}
-    }
+    data["backends"] = {"fake": {"endpoint": "http://os.test", "credential_env": "FAKE_TOKEN", **table}}
     return data
 
 
-def test_generated_capabilities_path_defaults_without_a_handwritten_report(tmp_path: Path) -> None:
-    data = config_data()
-    del data["opensandbox"]["capabilities"]
-    cfg = FlotillaConfig.from_mapping(data, base_dir=tmp_path)
-    assert cfg.backend_settings.capabilities == "capabilities.json"
-    assert cfg.capabilities_path() == tmp_path / "capabilities.json"
-    assert not cfg.management_capabilities().privileged_runtime
+def test_the_management_client_is_bounded_regardless_of_what_the_platform_supports(tmp_path: Path) -> None:
+    """A management anchor gets no capability a task would get, so it cannot become a task runner."""
+    cfg = FlotillaConfig.from_mapping(config_data(), base_dir=tmp_path)
+    management = cfg.management_capabilities()
+    assert not management.privileged_runtime and not management.shared_volume and not management.link
+    assert cfg.platform_capabilities().privileged_runtime
 
 
 def test_builtin_backend_is_the_default() -> None:
@@ -143,7 +139,6 @@ def test_runtime_builds_the_selected_backend(
     from flotilla.runtime.manager import Manager
 
     cfg = FlotillaConfig.from_mapping(fake_data(region="cn-sh"), base_dir=tmp_path)
-    (tmp_path / "caps.json").write_text(report(evidence_profile=cfg.evidence_profile()).dump_json())
     monkeypatch.setenv("FAKE_TOKEN", "test-only")
     manager = Manager(cfg, clock=SystemClock())
     assert isinstance(manager.platform, FakePlatform)
@@ -152,11 +147,9 @@ def test_runtime_builds_the_selected_backend(
     assert built["gate"] is not None  # the runtime's exec rate limit reaches the backend
 
 
-def test_child_mapping_keeps_backend_and_absolute_report_path(registered: FakeBackend, tmp_path: Path) -> None:
+def test_child_mapping_keeps_the_backend_and_its_settings(registered: FakeBackend, tmp_path: Path) -> None:
+    """A child process gets the same backend table, without needing the parent's `base_dir`."""
     cfg = FlotillaConfig.from_mapping(fake_data(region="cn-sh"), base_dir=tmp_path)
     child = FlotillaConfig.from_mapping(cfg.to_mapping())
     assert child.backend == "fake"
-    assert child.backend_settings == cfg.backend_settings.model_copy(
-        update={"capabilities": str(tmp_path / "caps.json")}
-    )
-    assert child.capabilities_path() == tmp_path / "caps.json"
+    assert child.backend_settings == cfg.backend_settings

@@ -69,7 +69,6 @@ class FlotillaEnvironment(BaseEnvironment):  # type: ignore[misc]
             raise ValueError("runtime parameters belong to the deployment; set them in [runtime_params]")
         self._transient_plan = plan
         self._cfg = fleet.config if fleet is not None else FlotillaConfig.load(deployment)
-        self._cfg.check_against(self._cfg.load_report())
         self._owns_environment = True
         self._fleet = fleet or Flotilla(deployment=self._cfg)
         self._owns_fleet = fleet is None
