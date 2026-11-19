@@ -153,19 +153,8 @@ class OpenSandboxPlatform:
         self._addresses: dict[str, str] = {}  # iid -> internal address (fixed while alive)
 
     async def create(self, spec: InstanceSpec) -> InstanceHandle:
-        try:
-            self.caps.require_filesystem(
-                spec.readonly_rootfs,
-                spec.tmpfs_mounts,
-                privileged=spec.privileged,
-                memory=spec.resources.memory,
-                volume_paths=tuple(v.mount_path for v in spec.volumes),
-                shm_size_bytes=spec.shm_size_bytes,
-            )
-            if missing := sorted(spec.devices - self.caps.devices):
-                raise ValueError(f"deployment does not support devices {missing}")
-        except ValueError as exc:
-            raise FlotillaError(str(exc), stage="create", category=ErrorCategory.INVALID, retryable=False) from exc
+        # Filesystem/device compatibility is decided by admission (core/admission.py) before the
+        # create request is sent; the platform only reports what the backend itself rejects.
         return await self._create(spec)
 
     async def probe_create(self, spec: InstanceSpec) -> InstanceHandle:

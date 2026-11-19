@@ -59,9 +59,9 @@ def _default_exec_handler(iid: str, proc: ProcessSpec) -> ExecResult:
 
 
 def _has_short_flag(argv: tuple[str, ...], flag: str) -> bool:
-    """Whether argv contains the short option `flag` (`-l`, `-dl` and `-ln` all count).
+    """Whether argv contains the short option `flag` (`-d`, `-dl` and `-Tn` all count).
 
-    Real tools bundle short options into clusters (`ls -ln`, `mv -Tn`), so a plain `"-l" in argv` check is not enough.
+    Real tools bundle short options into clusters (`ls -d`, `mv -Tn`), so a plain `"-d" in argv` check is not enough.
     """
     return any(arg.startswith("-") and not arg.startswith("--") and flag in arg[1:] for arg in argv)
 
@@ -396,19 +396,8 @@ class FakePlatform:
     # ───────────────────────────── Platform ─────────────────────────────
 
     async def create(self, spec: InstanceSpec) -> InstanceHandle:
-        try:
-            self.caps.require_filesystem(
-                spec.readonly_rootfs,
-                spec.tmpfs_mounts,
-                privileged=spec.privileged,
-                memory=spec.resources.memory,
-                volume_paths=tuple(m.mount_path for m in spec.volumes),
-                shm_size_bytes=spec.shm_size_bytes,
-            )
-            if missing := sorted(spec.devices - self.caps.devices):
-                raise ValueError(f"deployment does not support devices {missing}")
-        except ValueError as exc:
-            raise FlotillaError(str(exc), stage="create", category=ErrorCategory.INVALID, retryable=False) from exc
+        # Filesystem/device compatibility is decided by admission; the fake still checks what the
+        # spec itself carries (TTL and label shape) the way a real backend would.
         max_ttl = self.caps.max_ttl_seconds
         if spec.timeout_seconds <= 0 or (max_ttl is not None and spec.timeout_seconds > max_ttl):
             raise FlotillaError(
@@ -608,7 +597,6 @@ class SharedTree:
         self.files: set[str] = set()  # regular files (e.g. published seed tars)
         self.owners: dict[str, str] = {}  # path -> "uid:gid"
         self.modes: dict[str, str] = {}  # path -> mode (octal string)
-        self.links: dict[str, str] = {}  # symlink -> target (verbatim)
         self.events: list[str] = []
         self.mount = mount.rstrip("/") + "/"
         # Paths under `<inputs_mount>/<name>` map to `@<name>/<key>` (see `input_key`); any write there fails the
@@ -653,7 +641,7 @@ class SharedTree:
                 self.files.add(dest)
             self.dirs.update(dest + d[len(src) :] for d in list(self.dirs) if d.startswith(src + "/"))
             self.files.update(dest + f[len(src) :] for f in list(self.files) if f.startswith(src + "/"))
-            for values in (self.owners, self.modes, self.links):
+            for values in (self.owners, self.modes):
                 values.update(
                     {dest + k[len(src) :]: v for k, v in list(values.items()) if k == src or k.startswith(src + "/")}
                 )
@@ -712,19 +700,16 @@ class SharedTree:
         elif op == "rm":
             self.dirs = {d for d in self.dirs if d != path and not d.startswith(path + "/")}
             self.files = {f for f in self.files if f != path and not f.startswith(path + "/")}
-            for records in (self.owners, self.modes, self.links, self._platform.tree_contents):
+            for records in (self.owners, self.modes, self._platform.tree_contents):
                 for key in list(records):
                     if key == path or key.startswith(path + "/"):
                         del records[key]
             self.events.append(f"rm {path}")
         elif op == "ls":
             if _has_short_flag(proc.argv, "d"):
-                found = path in self.dirs or path in self.files
-                if not found:
-                    return ExecResult(exit_code=1, stdout=b"", stderr=missing.stderr)
-                if _has_short_flag(proc.argv, "l"):
-                    return ExecResult(exit_code=0, stdout=f"{self._ls_line(path)}\n".encode(), stderr=b"")
                 # ls -d -- <path>: existence check only (real busybox behavior)
+                if path not in self.dirs and path not in self.files:
+                    return ExecResult(exit_code=1, stdout=b"", stderr=missing.stderr)
                 return ExecResult(exit_code=0, stdout=b"", stderr=b"")
             if path not in self.dirs:
                 return missing
@@ -733,26 +718,8 @@ class SharedTree:
             return ExecResult(exit_code=0, stdout="".join(f"{c}\n" for c in children).encode(), stderr=b"")
         return ExecResult(exit_code=0, stdout=b"", stderr=b"")
 
-    def _ls_line(self, path: str) -> str:
-        """One line of `ls -ln -d`: mode, links, uid, gid, size.
-
-        Same column order as real busybox, so `Anchor.stat` parsing takes the same path on the fake and on real hosts.
-        """
-        mode = self.modes.get(path, "0755" if path in self.dirs else "0644")
-        numeric = int(mode, 8)
-        kind = "d" if path in self.dirs else "-"
-        chars = []
-        for shift in (6, 3, 0):  # owner / group / other
-            bits = (numeric >> shift) & 0o7
-            chars.append("r" if bits & 4 else "-")
-            chars.append("w" if bits & 2 else "-")
-            chars.append("x" if bits & 1 else "-")
-        uid, _, gid = self.owners.get(path, "0:0").partition(":")
-        size = len(self._platform.tree_contents.get(path, b""))
-        return f"{kind}{''.join(chars)} 1 {uid or 0} {gid or 0} {size}"
-
     def _move(self, src: str, dest: str) -> None:
-        """Rename `src` (and its subtree) to `dest`, together with owners, modes, links and file contents."""
+        """Rename `src` (and its subtree) to `dest`, together with owners, modes and file contents."""
 
         def moved(path: str) -> str:
             return dest + path[len(src) :] if path == src or path.startswith(src + "/") else path
@@ -761,7 +728,6 @@ class SharedTree:
         self.files = {moved(f) for f in self.files}
         self.owners = {moved(k): v for k, v in self.owners.items()}
         self.modes = {moved(k): v for k, v in self.modes.items()}
-        self.links = {moved(k): v for k, v in self.links.items()}
         contents = self._platform.tree_contents
         self._platform.tree_contents = {moved(k): v for k, v in contents.items()}
 
