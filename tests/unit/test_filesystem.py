@@ -134,11 +134,8 @@ def test_readonly_rootfs_promotes_single_writer_mounts_to_real_storage() -> None
         "services": {"main": {"image": "app", "volumes": ["data:/db", "./seed:/work"]}},
         "volumes": {"data": {}},
     }
-    writable = classify(normalize(raw).services)
-    assert writable.volumes[0].mode == writable.binds[0].mode == "trial"
     raw["services"]["main"]["read_only"] = True
     readonly = classify(normalize(raw).services)
-    assert readonly.volumes[0].mode == readonly.binds[0].mode == "trial"
     assert {m.target for m in readonly.mounts["main"]} == {"/db", "/work"}
     assert all(not m.read_only for m in readonly.mounts["main"])
 

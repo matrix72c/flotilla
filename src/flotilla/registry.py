@@ -22,7 +22,7 @@ import json
 import re
 import threading
 import uuid
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -66,7 +66,6 @@ class ImageConfigs:
         credentials: Mapping[str, tuple[str, str]] | None = None,
         store: Path | None = None,
         client: httpx.Client | None = None,
-        timeout_s: float = TIMEOUT_S,
     ) -> None:
         """`credentials` maps a registry host to `(username, password)`, used only to obtain a token.
 
@@ -74,7 +73,6 @@ class ImageConfigs:
         """
         self._credentials = dict(credentials or {})
         self._store = store
-        self._timeout_s = timeout_s
         self._client = client
         self._owned = client is None
         self._memory: dict[str, Mapping[str, Any]] = {}
@@ -93,11 +91,6 @@ class ImageConfigs:
         if self._owned and self._client is not None:
             self._client.close()
             self._client = None
-
-    def prewarm(self, pinned: Iterable[str]) -> None:
-        """Read every config now, so a later caller finds them all in memory."""
-        for reference in dict.fromkeys(pinned):
-            self.image_config(reference)
 
     def image_config(self, pinned: str) -> Mapping[str, Any]:
         """The `config` section of `pinned`'s image config (`Entrypoint`, `Cmd`, `User`, ...)."""
@@ -228,7 +221,7 @@ class ImageConfigs:
 
     def _http(self) -> httpx.Client:
         if self._client is None:
-            self._client = httpx.Client(timeout=self._timeout_s, follow_redirects=True)
+            self._client = httpx.Client(timeout=TIMEOUT_S, follow_redirects=True)
         return self._client
 
 

@@ -274,7 +274,7 @@ def _env_prefix(task: HarborTask) -> str:
 
 def _volumes(layout: Layout, env_prefix: str) -> tuple[TrialVolume, ...]:
     """Directories this trial owns: a named volume starts empty, a bind group is copied from the task files."""
-    named = tuple(TrialVolume(key=v.name) for v in layout.volumes if v.mode == "trial")
+    named = tuple(TrialVolume(key=v.name) for v in layout.volumes)
     binds = tuple(
         TrialVolume(key=f"binds/{g.index}", copy_from=f"{env_prefix}{g.root.removeprefix('./')}")
         for g in layout.binds

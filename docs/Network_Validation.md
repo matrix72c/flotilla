@@ -31,7 +31,7 @@ These are explicit examples, not built-in defaults or a guarantee of availabilit
 
 ## Peer links and inbound isolation
 
-The configured `link_members` defaults to nine. Probe creates that many members, verifies every directed pair on TCP and UDP, disconnects a member through the real topology API, and checks that reconnecting restores content exchange. The report means “this group size was tested”, not “this is the platform maximum”.
+The probe creates a two-member group, verifies the directed pair on TCP and UDP, disconnects a member through the real topology API, and checks that reconnecting restores content exchange. The report means “a linked group was tested”, not “this is the platform maximum”; `platform.link_max_members` is the deployment's own limit.
 
 Peer checks take one TCP sample and a fixed three UDP samples, with distinct tokens, in both allowing and denying phases. They always complete the sample set, not retry until success. An allowed UDP pair needs at least one matching response and no command errors or mismatched responses; this establishes bounded reachability, **not lossless delivery**. Every sample, including timeouts, and the member addresses remain in the report. A timeout alone does not identify policy, routing or packet loss as the cause. Deny requires every sample to be blocked; any received data is a failure and cannot be hidden by later timeouts or failed restoration. Inbound controls run independently of unrelated matrix failures, with their own allow/deny/restore observations. External HTTPS/NTP controls retain the single-exchange behavior described above.
 

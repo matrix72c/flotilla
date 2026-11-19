@@ -119,7 +119,7 @@ _HANDLED = {
     "image", "command", "entrypoint", "environment", "working_dir", "user", "healthcheck", "depends_on",
     "networks", "network_mode", "volumes", "tmpfs", "shm_size", "restart", "privileged", "hostname", "ports",
     "cpus", "mem_limit", "deploy", "container_name", "devices", "cap_add", "extra_hosts",
-    "links", "volumes_from",
+    "links", "volumes_from", "read_only",
 }  # fmt: skip
 
 
@@ -203,8 +203,6 @@ def _service(
     path = f"services.{name}"
     for key in raw:
         if key in _HANDLED:
-            continue
-        if key == "read_only":
             continue
         if key in _EQUIVALENT:
             c.equivalent(f"{path}.{key}", _EQUIVALENT[key])
@@ -392,11 +390,6 @@ def _scalar(v: object) -> str:
     if isinstance(v, bool):
         return "true" if v else "false"
     return str(v)
-
-
-def _split_kv(item: object) -> tuple[str, str]:
-    k, _, v = str(item).partition("=")
-    return k, v
 
 
 def _healthcheck(value: object, path: str, c: _Collector) -> tuple[Healthcheck | None, bool]:

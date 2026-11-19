@@ -225,13 +225,11 @@ async def test_spec_has_placeholder_entrypoint_labels_share_and_policy(
     platform: FakePlatform, clock: ManualClock, anchor: Anchor, reaper: Reaper, shell: Shell
 ) -> None:
     _seed_hosts(platform)
-    settings = replace(SETTINGS, extra_labels={"owner": "rl", "flotilla/trial": "spoof"})
-    ready = await clock.run(_new_trial(platform, clock, anchor, reaper, _three(), settings).start())
+    ready = await clock.run(_new_trial(platform, clock, anchor, reaper, _three()).start())
     spec = platform.spec_of(ready.handles["app"].iid)
     assert spec.entrypoint == ("/.flotilla/bin/busybox", "sleep", "2147483647")
     assert spec.labels[labels.TRIAL] == "t1" and spec.labels[labels.UNIT] == "app"
     assert spec.labels[labels.ROLE] == labels.ROLE_UNIT and spec.labels[labels.LAUNCH] == "L1"
-    assert spec.labels["x-owner"] == "rl" and spec.labels["x-flotilla/trial"] == "spoof"  # cannot be overridden
     assert spec.volumes[0].key == "share/releases/2026-09-28.1" and spec.volumes[0].read_only
     assert spec.external.mode == "any"
     assert spec.timeout_seconds == min(SETTINGS.ttl_s, platform.caps.max_ttl_seconds or SETTINGS.ttl_s)
@@ -594,16 +592,14 @@ async def test_bad_unit_label_rejected_before_any_create(
 async def test_task_slug_and_user_labels_sanitized(
     platform: FakePlatform, clock: ManualClock, anchor: Anchor, reaper: Reaper, shell: Shell
 ) -> None:
-    # Task path with "/" and too long; user label with spaces and ending in "-": all must be sanitized into values the
-    # platform accepts (the fake validates with K8s rules).
+    # A task path with "/" and too long must be sanitized into a value the platform accepts
+    # (the fake validates with K8s rules).
     _seed_hosts(platform)
     plan = replace(_three(), task="fixture-suite/cvebench/" + "y" * 100)
-    settings = replace(SETTINGS, extra_labels={"note": "hello world-"})
-    ready = await clock.run(_new_trial(platform, clock, anchor, reaper, plan, settings).start())
+    ready = await clock.run(_new_trial(platform, clock, anchor, reaper, plan).start())
     got = platform.spec_of(ready.handles["main"].iid).labels
     assert labels.is_valid_value(got[labels.TASK], platform.caps.max_label_value_len)
     assert got[labels.TASK].startswith("fixture-suite-cvebench-")
-    assert labels.is_valid_value(got["x-note"], platform.caps.max_label_value_len)
 
 
 def test_sanitize_keeps_distinct_values_distinct() -> None:

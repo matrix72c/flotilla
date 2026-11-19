@@ -179,7 +179,7 @@ async def test_management_anchor_claims_no_task_capabilities_and_leaves_no_launc
     monkeypatch.setattr(platform, "aclose", AsyncMock(), raising=False)
     deployment = Deployment.load(published[0])
     caps = deployment.config.management_capabilities()
-    assert not (caps.link or caps.shared_volume or caps.exec_auth or caps.privileged_runtime)
+    assert not (caps.link or caps.shared_volume or caps.privileged_runtime)
 
     async def use() -> str:
         async with deployment.management_anchor() as anchor:

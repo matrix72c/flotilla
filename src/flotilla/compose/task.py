@@ -31,7 +31,6 @@ class HarborTask:
     env_dir: Path
     project: Project
     findings: tuple[Finding, ...]  # `task.toml`-level findings, alongside `project.findings`
-    environment_config: Mapping[str, Any] | None = None
 
 
 def find_tasks(roots: Iterable[Path]) -> Iterator[Path]:
@@ -48,25 +47,16 @@ def find_tasks(roots: Iterable[Path]) -> Iterator[Path]:
             dirs[:] = sorted(d for d in dirs if not d.startswith("."))
 
 
-def load_task(
-    path: Path,
-    *,
-    compose_files: tuple[Path, ...] | None = None,
-    compose_environment: Mapping[str, str] | None = None,
-) -> HarborTask:
+def load_task(path: Path, *, compose_environment: Mapping[str, str] | None = None) -> HarborTask:
     try:
-        return _load_task(path, compose_files, compose_environment)
+        return _load_task(path, compose_environment)
     except TaskError:
         raise
     except (ValueError, OSError, RuntimeError) as exc:
         raise TaskError(f"task input: {exc}") from exc
 
 
-def _load_task(
-    path: Path,
-    compose_files: tuple[Path, ...] | None,
-    compose_environment: Mapping[str, str] | None,
-) -> HarborTask:
+def _load_task(path: Path, compose_environment: Mapping[str, str] | None) -> HarborTask:
     try:
         config = tomllib.loads(confined(path, TASK_FILE).read_text())
     except (OSError, tomllib.TOMLDecodeError) as exc:
@@ -77,7 +67,6 @@ def _load_task(
         env_dir,
         _table(config, "environment"),
         name=_table(config, "task").get("name") or path.name,
-        compose_files=compose_files,
         compose_environment=compose_environment,
     )
 
@@ -88,8 +77,6 @@ def load_environment(
     environment: Mapping[str, Any],
     *,
     name: str,
-    findings: tuple[Finding, ...] = (),
-    compose_files: tuple[Path, ...] | None = None,
     compose_environment: Mapping[str, str] | None = None,
 ) -> HarborTask:
     """Parse a concrete environment context without depending on Harbor's runtime."""
@@ -97,14 +84,14 @@ def load_environment(
         raise TaskError("environment context escapes task directory")
     if not isinstance(name, str) or not name:
         raise TaskError("task.name must be a nonempty string")
-    findings = (*findings, *_network_policies({"environment": environment}))
+    findings = _network_policies({"environment": environment})
     compose_path = confined(env_dir, COMPOSE_FILE)
     image = environment.get("docker_image")
     main_image = image if isinstance(image, str) and image else None
     main_build = main_image is None and (env_dir / "Dockerfile").is_file()
     project = parse.load_project(
         env_dir,
-        files=compose_files if compose_files is not None else ((compose_path,) if compose_path.is_file() else ()),
+        files=(compose_path,) if compose_path.is_file() else (),
         environment=compose_environment or {},
         main_image=main_image,
         main_build=main_build,
@@ -138,18 +125,20 @@ def load_environment(
         env_dir=env_dir,
         project=project,
         findings=findings,
-        environment_config=environment,
     )
 
 
-def _network_policies(config: Mapping[str, Any]) -> Iterator[Finding]:
+def _network_policies(config: Mapping[str, Any]) -> tuple[Finding, ...]:
     mode = _network_mode(_table(config, "environment"))
     if mode is not None and mode not in (PUBLIC, "no-network"):
-        yield Finding(
-            "task.toml:environment.network_mode",
-            "reject",
-            f"environment network mode {mode!r} is unsupported by core task loading",
+        return (
+            Finding(
+                "task.toml:environment.network_mode",
+                "reject",
+                f"environment network mode {mode!r} is unsupported by core task loading",
+            ),
         )
+    return ()
 
 
 def _network_mode(table: Mapping[str, Any]) -> str | None:

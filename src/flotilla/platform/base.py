@@ -123,14 +123,9 @@ class Capabilities:
     # External egress
     external_forms: frozenset[str]  # subset of {"none", "any", "allowlist"}
     implicit_egress: tuple[str, ...]
-    # Instance address
-    internal_address: Literal["api", "exec", "none"]
     # Shared storage
     shared_volume: bool
     volume_file: bool
-    no_auto_mount: bool  # security
-    # Exec channel authentication
-    exec_auth: bool  # security
     # Optional runtimes
     privileged_runtime: bool
     devices: frozenset[str]  # subset of `Device`

@@ -71,13 +71,10 @@ class ProbeSettings:
     image: str
     share_release: str
     endpoint: str
-    deployment: str = "deployment"
     privileged_image: str = ""
-    link_members: int = 9
     external_targets: tuple[ExternalTarget | tuple[str, int, str], ...] = ()
     dns_name: str = ""
     create_timeout_s: float = 300.0
-    hosts_recheck_s: float = 600.0
     ttl_s: int = 1800
     anchor_ttl_s: int = 600
     list_visibility_s: float = 30.0
@@ -94,15 +91,11 @@ class ProbeSettings:
             value = getattr(self, name)
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be finite and positive")
-        if not 2 <= self.link_members <= 32:
-            raise ValueError("link_members must be between 2 and 32")
         targets = tuple(
             t if isinstance(t, ExternalTarget) else ExternalTarget(t[0], t[1], cast(Literal["tcp", "udp"], t[2]))
             for t in self.external_targets
         )
         object.__setattr__(self, "external_targets", targets)
-        if not math.isfinite(self.hosts_recheck_s) or self.hosts_recheck_s < 0:
-            raise ValueError("hosts_recheck_s must be finite and nonnegative")
 
     @property
     def targets(self) -> tuple[ExternalTarget, ...]:

@@ -418,11 +418,8 @@ class PlatformFacts(_Model):
 
 
 class Probe(_Model):
-    deployment: str = "deployment"
     image: str = ""
     privileged_image: str = ""
-    link_members: Annotated[int, Field(ge=2, le=32)] = 9
-    hosts_recheck_s: Annotated[float, Field(ge=0)] = 600.0
     total_timeout_s: PositiveFloat = 3600.0
     cleanup_timeout_s: PositiveFloat = 180.0
     external_targets: tuple[ProbeTarget, ...] = ()
@@ -673,11 +670,8 @@ class FlotillaConfig(_Model):
             inbound_isolation=True,
             external_forms=frozenset({"none", "any", "allowlist"}),
             implicit_egress=facts.implicit_egress,
-            internal_address="exec",
             shared_volume=True,
             volume_file=True,
-            no_auto_mount=True,
-            exec_auth=True,
             privileged_runtime=True,
             devices=frozenset(DEVICES),
             cluster_dns=facts.cluster_dns,
@@ -700,11 +694,8 @@ class FlotillaConfig(_Model):
             inbound_isolation=False,
             external_forms=frozenset(),
             implicit_egress=(),
-            internal_address="none",
             shared_volume=False,
             volume_file=False,
-            no_auto_mount=False,
-            exec_auth=False,
             privileged_runtime=False,
             devices=frozenset(),
         )
@@ -802,7 +793,7 @@ class FlotillaConfig(_Model):
             close_timeout_s=self.timeouts.close,
         )
 
-    def trial_settings(self, *, extra_labels: Mapping[str, str] | None = None) -> TrialSettings:
+    def trial_settings(self) -> TrialSettings:
         t = self.timeouts
         return TrialSettings(
             share_release=self.share.release,
@@ -816,7 +807,6 @@ class FlotillaConfig(_Model):
             prepare_timeout_s=t.prepare,
             start_max_s=t.start_max,
             process_poll_s=self.process.poll_interval,
-            extra_labels=dict(extra_labels or {}),
         )
 
     def monitor_settings(self) -> MonitorSettings:

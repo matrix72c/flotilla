@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import queue
 import threading
@@ -15,17 +16,14 @@ class EventDispatcher:
         self.callback = callback
         self.queue: queue.Queue[RuntimeEvent] = queue.Queue(maxsize=1024)
         self.closed = threading.Event()
-        self.dropped = 0
         self.thread = threading.Thread(target=self._run, name="flotilla-events", daemon=True)
         self.thread.start()
 
     def emit(self, event: RuntimeEvent) -> None:
         if self.closed.is_set():
             return
-        try:
+        with contextlib.suppress(queue.Full):  # diagnostics are best-effort; a busy callback drops the event
             self.queue.put_nowait(event)
-        except queue.Full:
-            self.dropped += 1
 
     def close(self) -> None:
         self.closed.set()

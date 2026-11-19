@@ -50,12 +50,7 @@ _NONE = ExternalPolicy(mode="none")
 _PATH = "/usr/local/bin:/usr/bin:/bin"
 
 
-async def probe_deployment(
-    deployment: str | FlotillaConfig,
-    *,
-    image: str | None = None,
-    hosts_recheck: float | None = None,
-) -> IsolationEvidence:
+async def probe_deployment(deployment: str | FlotillaConfig, *, image: str | None = None) -> IsolationEvidence:
     """Measure isolation and enforce what this deployment accepts missing.
 
     Cleanup is part of the verdict, not best-effort work afterwards: a deployment that cannot be
@@ -68,8 +63,6 @@ async def probe_deployment(
     settings = cfg.probe_settings()
     if image is not None:
         settings = replace(settings, image=image)
-    if hosts_recheck is not None:
-        settings = replace(settings, hosts_recheck_s=hosts_recheck)
     clock = SystemClock()
     platform = cfg.build_platform(clock=clock, caps=cfg.management_capabilities())
     anchor = Anchor(platform, clock, f"probe-{uuid.uuid4().hex[:12]}", cfg.anchor_settings())

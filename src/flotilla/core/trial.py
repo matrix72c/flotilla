@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 
 from flotilla.core import hosts, labels, network, process, volumes
 from flotilla.core.anchor import Anchor
@@ -48,7 +48,6 @@ class TrialSettings:
     start_slack_s: float = 120.0
     start_max_s: float = 1800.0
     process_poll_s: float = 2.0
-    extra_labels: Mapping[str, str] = field(default_factory=dict)  # client request.labels (merged with an x- prefix)
 
 
 @dataclass(frozen=True)
@@ -58,7 +57,6 @@ class Ready:
     handles: Mapping[str, InstanceHandle]
     addresses: Mapping[str, str]
     pids: Mapping[str, str]
-    exit_codes: Mapping[str, int]
     timings: Mapping[str, float]
     recreated: frozenset[str]
 
@@ -129,7 +127,6 @@ class Trial:
             handles=dict(self._handles),
             addresses=addresses,
             pids=started.pids,
-            exit_codes=started.exit_codes,
             timings=dict(self._timings),
             recreated=frozenset(self._recreated),
         )
@@ -246,23 +243,15 @@ class Trial:
         )
 
     def _labels(self, unit: str) -> dict[str, str]:
-        """Instance labels: values used for listing are validated verbatim, task and client labels are sanitized
-        (`labels` module).
-
-        Client keys are merged with an `x-` prefix and cannot override flotilla keys.
-        """
+        """Instance labels; values used for listing are validated verbatim, the task label is sanitized."""
         limit = self._platform.caps.max_label_value_len
-        out = {f"x-{k}": labels.sanitize_value(v, limit) for k, v in self._settings.extra_labels.items()}
-        out.update(
-            {
-                labels.LAUNCH: labels.require_value(labels.LAUNCH, self._anchor.launch_id, limit),
-                labels.TRIAL: labels.require_value(labels.TRIAL, self._trial_id, limit),
-                labels.UNIT: labels.require_value(labels.UNIT, unit, limit),
-                labels.TASK: labels.sanitize_value(self._plan.task, limit),
-                labels.ROLE: labels.ROLE_UNIT,
-            }
-        )
-        return out
+        return {
+            labels.LAUNCH: labels.require_value(labels.LAUNCH, self._anchor.launch_id, limit),
+            labels.TRIAL: labels.require_value(labels.TRIAL, self._trial_id, limit),
+            labels.UNIT: labels.require_value(labels.UNIT, unit, limit),
+            labels.TASK: labels.sanitize_value(self._plan.task, limit),
+            labels.ROLE: labels.ROLE_UNIT,
+        }
 
     async def _addresses(self) -> dict[str, str]:
         names = sorted(self._plan.units)

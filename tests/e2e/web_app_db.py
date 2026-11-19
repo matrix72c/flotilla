@@ -231,10 +231,7 @@ async def run(args: argparse.Namespace) -> tuple[dict[str, object], list[Result]
         create_fields=cfg.opensandbox_settings().create_fields,
         group_extension=cfg.opensandbox_settings().group_extension,
     )
-    out: dict[str, object] = {
-        "deployment": cfg.probe.deployment,
-        "accepted_gaps": sorted(cfg.security.accept_insecure),
-    }
+    out: dict[str, object] = {"accepted_gaps": sorted(cfg.security.accept_insecure)}
     launch_id = f"e2e-{uuid.uuid4().hex[:12]}"
     trial_id = f"t{uuid.uuid4().hex[:12]}"
     anchor = Anchor(platform, clock, launch_id, cfg.anchor_settings())

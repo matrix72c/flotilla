@@ -12,7 +12,7 @@ CONFIG = SimpleNamespace(verifier=SimpleNamespace(env={"MODE": "grade"}, timeout
 def test_a_task_without_tests_has_no_verification_and_no_artifacts() -> None:
     """Nothing grades the attempt, so there is also nothing for a grader to read."""
     assert verification_of(CONFIG, roles={"main": object()}, has_tests=False) is None
-    assert artifacts_of(CONFIG, has_tests=False) == ()
+    assert artifacts_of(has_tests=False) == ()
 
 
 def test_verification_runs_in_the_verifier_role_when_the_task_declares_one() -> None:
@@ -47,5 +47,5 @@ def test_a_reward_may_be_written_as_text_or_json_and_neither_is_required_on_disk
 
 
 def test_the_agents_log_directory_is_the_one_artifact_handed_to_the_verifier() -> None:
-    artifacts = artifacts_of(CONFIG, has_tests=True)
+    artifacts = artifacts_of(has_tests=True)
     assert [(a.name, a.role, a.target) for a in artifacts] == [("agent", "main", "/logs/agent")]

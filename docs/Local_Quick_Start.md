@@ -150,9 +150,7 @@ PLATFORM = FlotillaConfig(
     resources=ResourceDefaults(default=Resource(cpu="1", memory="1Gi")),
     platform=PlatformFacts(list_visibility_s=30.0),
     probe=Probe(
-        deployment="local-docker",
         image="localhost:5000/flotilla/probe@sha256:REPLACE_WITH_PROBE_DIGEST",
-        link_members=9,
         # Use these services only if approved and reachable for your deployment; there are no
         # built-in targets.
         dns_name="pypi.org",

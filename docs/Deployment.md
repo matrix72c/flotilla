@@ -117,14 +117,4 @@ Use real native tasks covering multi-service networking, separate verifier roles
 flotilla gc --deployment myproject.deployment:PLATFORM
 ```
 
-Share releases are collected from your own code, because the caller already holds the spec:
-
-```python
-from flotilla.share.release import gc_releases, verify_release
-
-async with Deployment(PLATFORM).management_anchor() as anchor:
-    report = await verify_release(anchor, PLATFORM.share.release, expected_sha256=PLATFORM.share.release_sha256)
-    collected = await gc_releases(anchor, keep={PLATFORM.share.release, "previous"}, dry_run=True)
-```
-
-GC is explicit, not a background schedule. Use `gc --launch ID` only after confirming that owner has exited. Review `gc_releases(..., dry_run=True)` before deleting. Native releases and historical runs are not automatically migrated or deleted; old jobs retain their original code, images and evidence.
+GC is explicit, not a background schedule. Use `gc --launch ID` only after confirming that owner has exited. Releases under `share/releases/` that no deployment pins can be removed through `Deployment.management_anchor()` like any other shared-storage work. Native releases and historical runs are not automatically migrated or deleted; old jobs retain their original code, images and evidence.

@@ -22,8 +22,6 @@ SETTINGS = ProbeSettings(
     image="reg/unit@sha256:" + "b" * 64,
     share_release="r1",
     endpoint="http://os.test",
-    hosts_recheck_s=5.0,
-    link_members=2,
 )
 
 

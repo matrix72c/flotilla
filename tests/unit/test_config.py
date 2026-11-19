@@ -236,9 +236,9 @@ def test_translates_to_core_and_backend_settings() -> None:
         reaper={**config_data()["reaper"], "trial_ttl": 7200},
         opensandbox={**config_data()["opensandbox"], "execd": {"protocol": "legacy"}},
     )
-    trial = cfg.trial_settings(extra_labels={"run": "r1"})
+    trial = cfg.trial_settings()
     assert trial.share_release == "2026-10-07.1" and trial.create_timeout_s == 300 and trial.ttl_s == 7200
-    assert trial.external.mode == "allowlist" and trial.extra_labels == {"run": "r1"}
+    assert trial.external.mode == "allowlist"
     assert cfg.reaper_settings().close_timeout_s == 5
     assert cfg.monitor_settings().ttl_s == 7200
     assert cfg.anchor_settings().grace_s == 90 and cfg.anchor_settings().image.startswith("reg/flotilla@")
@@ -400,12 +400,10 @@ def test_bootstrap_grants_no_capabilities() -> None:
 
 
 def test_probe_inputs_are_config_not_capability_declarations() -> None:
-    cfg = config(probe={"image": "reg/probe@sha256:" + "1" * 64, "link_members": 9})
+    cfg = config(probe={"image": "reg/probe@sha256:" + "1" * 64})
     assert cfg.probe_settings().image == cfg.probe.image
     with pytest.raises(ValidationError):
         config(probe={"image": "reg/probe:latest"})
-    with pytest.raises(ValidationError):
-        config(probe={"link_members": 100})
     with pytest.raises(ValidationError):
         config(probe={"link": True})
 
