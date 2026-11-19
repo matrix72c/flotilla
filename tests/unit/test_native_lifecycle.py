@@ -40,7 +40,7 @@ Deployment = tuple[FlotillaConfig, FakePlatform, SharedTree]
 INPUT_KEY = "environment/input"
 
 
-def build_dataset(base: Path, *, verifier: bool = True) -> Path:
+def build_dataset(base: Path, *, verifier: bool = True, shared_verifier: bool = False) -> Path:
     """One published task: a read-only bind input, an instruction, and optionally hidden tests."""
     task = base / "dataset" / "ds" / "task-a"
     files = task / "environment" / "input"
@@ -48,9 +48,10 @@ def build_dataset(base: Path, *, verifier: bool = True) -> Path:
     (files / "data.txt").write_text("static input")
     (task / "instruction.md").write_text("Solve the task.\n")
     config = f'[environment]\ndocker_image = "{IMAGE}"\ncpus = 1\nmemory_mb = 128\n'
-    if verifier:
+    if verifier or shared_verifier:
         (task / "tests").mkdir()
         (task / "tests/test.sh").write_text("#!/bin/sh\nexit 0\n")
+    if verifier:
         config += '[verifier]\nenvironment_mode = "separate"\nenv = {TASK_TOKEN = "native"}\n'
         # Its own Compose project, so the agent's task input is not in the verifier's sandbox.
         (task / "tests/docker-compose.yaml").write_text(f"services:\n  main:\n    image: {IMAGE}\n")
@@ -165,6 +166,9 @@ class NativeHarness:
         if argv == VERIFY_COMMAND:
             self.verification_specs.append(proc)
             answer = self.platform.tree_contents.get(f"{self.workspace_key}/handoff/agent/answer.txt")
+            if answer is None:
+                # A shared verifier grades in main, where the artifact already lives.
+                answer = self.platform.tree_contents.get(f"{self.workspace_key}/artifacts/agent/answer.txt")
             assert answer is not None, "verifier did not receive the agent artifact through the handoff"
             self.unit_files[(iid, "/logs/verifier/reward.txt")] = b"reward:" + answer
             if self.with_optional:
@@ -195,10 +199,11 @@ def prepare(
     name: str = "tb1",
     *,
     verifier: bool = True,
+    shared_verifier: bool = False,
 ) -> tuple[FlotillaConfig, FakePlatform, SharedTree, NativeHarness, TaskSource]:
     """Publish a dataset, stage a separate platform copy, and install the harness."""
     cfg, platform, tree = deployment
-    root = build_dataset(tmp_path / name, verifier=verifier)
+    root = build_dataset(tmp_path / name, verifier=verifier, shared_verifier=shared_verifier)
     platform_copy = tmp_path / f"platform-copy-{name}"
     shutil.copytree(root, platform_copy, symlinks=True)
     harness = NativeHarness(deployment, monkeypatch)
@@ -343,11 +348,94 @@ async def test_verification_runs_once_and_main_stays_closed_after_handoff(
 
         with pytest.raises(RuntimeError, match="only once"):
             await attempt.verify()
-        with pytest.raises(RuntimeError, match="cannot reopen main"):
+        with pytest.raises(RuntimeError, match="agent phase has ended"):
             await attempt.open("main")
         # The verifier itself stays usable until the attempt closes.
-        assert (await attempt.open("verifier")) is attempt.environments["verifier"]
+        assert (await attempt.open_verification_role()) is attempt.environments["verifier"]
         await attempt.release("verifier")
+        await attempt.close()
+
+
+@pytest.mark.asyncio
+async def test_verification_steps_run_in_order_with_gates(
+    tmp_path: Path, deployment: Deployment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The three verification primitives are `verify` taken apart, and each refuses to run early."""
+    cfg, platform, _tree, harness, source = prepare(tmp_path, deployment, monkeypatch)
+
+    async with Flotilla(deployment=cfg) as fleet:
+        attempt = await NativeAttempt.create(fleet, source)
+        harness.workspace_key = attempt.workspace.key
+        await attempt.open("main")
+
+        with pytest.raises(RuntimeError, match="end the agent phase"):
+            await attempt.stage_verification()
+        with pytest.raises(RuntimeError, match="stage the verification"):
+            await attempt.open_verification_role()
+
+        # Ending the agent phase releases main when grading runs in a separate verifier,
+        # before any staging or verifier open -- which is the budget claim verify() relied on.
+        await attempt.end_agent_phase()
+        assert "main" not in attempt.environments
+        assert not [i for i in platform.iids() if platform.spec_of(i).labels.get(labels.ROLE) == labels.ROLE_UNIT]
+        with pytest.raises(RuntimeError, match="agent phase has ended"):
+            await attempt.open("main")
+        await attempt.end_agent_phase()  # ending twice is a no-op, not an error
+
+        await attempt.stage_verification()
+        with pytest.raises(RuntimeError, match="only once"):
+            await attempt.stage_verification()
+        assert (await attempt.open_verification_role()) is attempt.environments["verifier"]
+
+        # verify() is the same composition, so it is subject to the same gates.
+        with pytest.raises(RuntimeError, match="only once"):
+            await attempt.verify()
+
+        await attempt.release("verifier")
+        await attempt.close()
+        with pytest.raises(RuntimeError, match="closed"):
+            await attempt.end_agent_phase()
+        with pytest.raises(RuntimeError, match="closed"):
+            await attempt.stage_verification()
+        with pytest.raises(RuntimeError, match="closed"):
+            await attempt.open_verification_role()
+
+
+@pytest.mark.asyncio
+async def test_shared_verifier_grades_in_main_through_the_primitives(
+    tmp_path: Path, deployment: Deployment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A task without a separate verifier environment is graded in main, and main is kept."""
+    cfg, platform, tree, harness, source = prepare(
+        tmp_path, deployment, monkeypatch, "shared", verifier=False, shared_verifier=True
+    )
+
+    async with Flotilla(deployment=cfg) as fleet:
+        attempt = await NativeAttempt.create(fleet, source)
+        harness.workspace_key = attempt.workspace.key
+        main = await attempt.open("main")
+        answer = f"{attempt.workspace.key}/artifacts/agent/answer.txt"
+        tree.files.add(answer)
+        platform.tree_contents[answer] = b"shared-answer"
+
+        await attempt.end_agent_phase()
+        # Grading in main: the sandbox the agent used is not released at the phase boundary.
+        assert attempt.environments["main"] is main
+        await attempt.stage_verification()
+        # The workspace mount main already carries is filled only now: the tests were hidden.
+        assert platform.tree_contents.get(f"{attempt.workspace.key}/tests/test.sh") is not None
+        assert (await attempt.open_verification_role()) is main
+
+        # A consumer driving the steps itself runs the grading command on the returned handle.
+        service = main.service("main")
+        exec = await service.exec(VERIFY_COMMAND, timeout=30)
+        assert exec.exit_code == 0
+        assert await service.read_file("/logs/verifier/reward.txt") == b"reward:shared-answer"
+        (spec,) = harness.verification_specs
+        assert spec.env.get("TASK_TOKEN") is None  # no [verifier] table: nothing is passed
+
+        with pytest.raises(RuntimeError, match="agent phase has ended"):
+            await attempt.open("main")
         await attempt.close()
 
 

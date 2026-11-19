@@ -97,11 +97,15 @@ async def _create(manager: Manager, task: NativeTask) -> WorkspaceInfo:
 
 
 class NativeAttempt:
-    """One private attempt at a graded task. The caller must stop its agent before calling verify.
+    """One private attempt at a graded task, in two phases: the agent's, then grading.
 
     The task directory is never copied: each role's plan mounts it read-only, straight from
     shared storage. What this class owns is the attempt's own workspace -- the artifact
     directories, the staged tests, the verifier's output -- and the handoff between roles.
+
+    The caller must stop its agent before grading starts. `verify` is the whole second phase in
+    one call; `end_agent_phase`, `stage_verification` and `open_verification_role` are the same
+    steps individually, for a consumer that needs something between them.
     """
 
     def __init__(self, fleet: Flotilla, task: NativeTask, workspace: Workspace) -> None:
@@ -110,6 +114,7 @@ class NativeAttempt:
         self.environments: dict[str, Environment] = {}
         self._lock = asyncio.Lock()
         self._closed = False
+        self._agent_phase_ended = False
         self._verification_started = False
         self._handoff = False
 
@@ -207,7 +212,15 @@ class NativeAttempt:
         )
 
     async def open(self, role: str = "main", options: OpenOptions | None = None) -> Environment:
+        """Open a role's environment. Refused once the agent phase has ended.
+
+        An environment handle already held stays usable -- this refuses only new opens, since
+        after the agent phase there is nothing left to open except the verification role, which
+        has its own entry point.
+        """
         async with self._lock:
+            if self._agent_phase_ended:
+                raise RuntimeError("the agent phase has ended; grading opens through open_verification_role()")
             return await self._open(role, options)
 
     async def _open(self, role: str, options: OpenOptions | None) -> Environment:
@@ -216,14 +229,7 @@ class NativeAttempt:
         if role not in self.task.plans:
             raise ValueError(f"unknown native role: {role}")
         if role == "verifier" and not self._verification_started:
-            raise ValueError("open the isolated verifier through verify() after agent completion")
-        if (
-            role == "main"
-            and self._verification_started
-            and self.task.verification
-            and self.task.verification.role != "main"
-        ):
-            raise RuntimeError("cannot reopen main after verifier handoff")
+            raise ValueError("open the isolated verifier through verify() or open_verification_role()")
         if role not in self.environments:
             self.environments[role] = await self.fleet.open(self.task.plans[role], self._options(role, options))
         return self.environments[role]
@@ -270,16 +276,81 @@ class NativeAttempt:
         await self.fleet._call(stage, settle_cancel=True)
         self._handoff = True
 
+    async def end_agent_phase(self) -> None:
+        """Declare the agent done with this attempt.
+
+        The first step of grading, and the one `verify` folds into its own run. After it, `open`
+        refuses new role opens. When the task grades in a separate verifier, `main` is released
+        here -- the verifier claims the budget the agent held, and the sandbox the agent worked
+        in is not kept alive past its phase. A no-op when the phase has already ended; an error
+        on a closed attempt or a task with no verification, which has no second phase to end into.
+        """
+        async with self._lock:
+            await self._end_agent_phase()
+
+    async def _end_agent_phase(self) -> None:
+        if self._closed:
+            raise RuntimeError("native attempt is closed")
+        if self._agent_phase_ended:
+            return
+        verification = self.task.verification
+        if verification is None:
+            raise ValueError("task has no verification interface")
+        self._agent_phase_ended = True
+        if verification.role == "verifier":
+            await self._release("main")
+
+    async def stage_verification(self) -> None:
+        """Stage what grading reads: hidden tests and artifact handoffs, on the shared workspace.
+
+        Requires the agent phase to have ended -- the tests are hidden from the agent on purpose,
+        and staging them into a sandbox it can still reach would end that. Stages once per
+        attempt; a second call is the same error a second `verify` is.
+        """
+        async with self._lock:
+            if self._closed:
+                raise RuntimeError("native attempt is closed")
+            if self._verification_started:
+                raise RuntimeError("verification may run only once on an open attempt")
+            if self.task.verification is None:
+                raise ValueError("task has no verification interface")
+            if not self._agent_phase_ended:
+                raise RuntimeError("end the agent phase before staging verification")
+            self._verification_started = True
+            await self._stage_verification()
+
+    async def open_verification_role(self, options: OpenOptions | None = None) -> Environment:
+        """Open the environment grading runs in: the separate verifier, or `main` itself.
+
+        The same environment is returned on repeated calls. What `verify` execs the grading
+        command in; a consumer driving the steps itself runs it here, and its handle -- unlike
+        the one a finished agent phase leaves behind -- is the one to read grading output from.
+        """
+        async with self._lock:
+            if self._closed:
+                raise RuntimeError("native attempt is closed")
+            if not self._verification_started:
+                raise RuntimeError("stage the verification before opening its role")
+            verification = self.task.verification
+            assert verification is not None
+            return await self._open(verification.role, options)
+
     async def verify(self, options: OpenOptions | None = None, *, timeout: float | None = None) -> VerificationResult:
+        """Grade the attempt: the three verification steps and the grading command, in order.
+
+        The default composition. `end_agent_phase`, `stage_verification` and
+        `open_verification_role` are public for a consumer that needs something between them --
+        a teardown hook, a pause, its own timeout policy -- and are subject to the same gates
+        this method is: verification runs once, on an open attempt, after the agent phase.
+        """
         async with self._lock:
             if self._closed or self._verification_started:
                 raise RuntimeError("verification may run only once on an open attempt")
             verification = self.task.verification
             if verification is None:
                 raise ValueError("task has no verification interface")
+            await self._end_agent_phase()
             self._verification_started = True
-            if verification.role == "verifier":
-                await self._release("main")
             await self._stage_verification()
             environment = await self._open(verification.role, options)
             plan = self.task.plans[verification.role]
