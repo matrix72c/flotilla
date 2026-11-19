@@ -103,7 +103,7 @@ asyncio.run(main())
 
 ## 状态与贡献
 
-Flotilla 是 alpha 软件，1.0 前次版本可能改变 API。可选 Harbor 适配器需要提供 source/runtime 接口的固定 patched Harbor，原版 Harbor 0.24.0 不具备这些接口。参见 [变更日志](CHANGELOG.md)、[贡献指南](CONTRIBUTING.md) 与[行为准则](CODE_OF_CONDUCT.md)。安全漏洞按 [SECURITY.md](SECURITY.md) 私下报告。
+Flotilla 是 alpha 软件，1.0 前次版本可能改变 API。Harbor 驱动的运行使用已发布的 `harbor>=0.26.0,<0.27`，不需要 patched 构建。参见 [变更日志](CHANGELOG.md)、[贡献指南](CONTRIBUTING.md) 与[行为准则](CODE_OF_CONDUCT.md)。安全漏洞按 [SECURITY.md](SECURITY.md) 私下报告。
 
 ## 许可证
 

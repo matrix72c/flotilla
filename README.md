@@ -119,8 +119,16 @@ state and opens those roles. The task's own files are mounted read-only, straigh
 published; only a writable volume is materialized per attempt. Hidden tests are staged only for
 verification.
 
-Harbor and Voyager share this lifecycle. Harbor remains optional, using a pinned patched build for its
-source/runtime interfaces.
+Harbor drives the same lifecycle itself, in place of this loop:
+
+```sh
+harbor run --env flotilla.integrations.harbor:FlotillaTaskEnvironment \
+  --ek deployment=myproject.deployment:PLATFORM \
+  --path /srv/tasks/example/ds/demo
+```
+
+See [running harbor trials](docs/Integration_Guide.md#running-harbor-trials) for what the environment
+does per trial.
 
 ## Features
 
@@ -155,7 +163,7 @@ Then pick a path:
 |---|---|
 | One Linux machine with Docker, and want to try it | [Local quick start](docs/Local_Quick_Start.md): run OpenSandbox and Flotilla on one machine |
 | Deployment values from whoever runs your sandbox platform | [Quick start](docs/Quick_Start.md): write a task and run it from Python |
-| Harbor tasks such as Terminal-Bench | [Native tasks](docs/Native_Tasks.md): run a published Harbor-format dataset with `NativeAttempt` |
+| Harbor tasks such as Terminal-Bench | [Native tasks](docs/Native_Tasks.md): run a published Harbor-format dataset with `NativeAttempt`, or drive it with `harbor run` itself |
 | A sandbox platform to set up for your team | [Deployment guide](docs/Deployment.md) |
 
 ## Documentation
@@ -175,14 +183,14 @@ Then pick a path:
 
 **Extending Flotilla**
 
-- [SDK surface](docs/SDK.md): what may be imported from `flotilla`, `flotilla.native`, and `flotilla.testing`, and the stability commitments.
-- [Integration guide](docs/Integration_Guide.md): use Flotilla from an evaluation runner or RL framework.
+- [SDK surface](docs/SDK.md): what may be imported from `flotilla`, `flotilla.native`, `flotilla.integrations.harbor`, and `flotilla.testing`, and the stability commitments.
+- [Integration guide](docs/Integration_Guide.md): use Flotilla from an evaluation runner or RL framework, or run harbor trials directly.
 - [Writing a backend](docs/Writing_a_Backend.md): support another sandbox platform.
 - [Architecture](docs/Architecture.md): internals and terminology.
 
 ## Status
 
-Flotilla is alpha software. The supported targets are Linux x86_64, Python 3.12, the OpenSandbox `current` and `legacy` execd protocols, and a compatible patched Harbor build for the optional source/runtime adapter (stock Harbor 0.24.0 lacks those interfaces). APIs and configuration may change between minor versions before 1.0; see the [changelog](CHANGELOG.md).
+Flotilla is alpha software. The supported targets are Linux x86_64, Python 3.12, the OpenSandbox `current` and `legacy` execd protocols, and released Harbor (`harbor>=0.26.0,<0.27`) for harbor-driven trials. APIs and configuration may change between minor versions before 1.0; see the [changelog](CHANGELOG.md).
 
 ## Contributing
 

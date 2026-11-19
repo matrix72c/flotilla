@@ -2,9 +2,9 @@
 
 What a consumer, and an extension package built on Flotilla, may import -- and what each side
 may rely on. The surface is `import flotilla` for the runtime, `flotilla.native` for graded
-attempts, and `flotilla.testing` for contract tests. Modules below those are internal: the
-import contracts in `pyproject.toml` pin the layer graph, not module layouts, so deep imports
-move without notice.
+attempts, `flotilla.integrations.harbor` for running harbor trials, and `flotilla.testing` for
+contract tests. Modules below those are internal: the import contracts in `pyproject.toml` pin
+the layer graph, not module layouts, so deep imports move without notice.
 
 ## Imported from `flotilla`
 
@@ -51,6 +51,18 @@ move without notice.
 `NativeAttempt` and `VerificationResult` import lazily, so metadata-only use (datasets,
 artifacts, verification shapes) does not load the scheduler.
 
+## Imported from `flotilla.integrations.harbor`
+
+| Symbol | What it is |
+|---|---|
+| `FlotillaTaskEnvironment` | The environment a harbor trial runs on: owns the `NativeAttempt`, both grading modes, and the per-process fleet |
+| `FlotillaTaskOptions` | Its `--ek` options: `deployment` as `module:attribute` |
+| `FlotillaEnvironment` | A borrowed view over one live handle: exec, file transfer, service stops |
+| `shutdown` | Close every attempt and fleet this process opened; harbor's CLI may rely on exit instead |
+
+The module is not re-exported at the top level -- `import flotilla` stays harbor-free -- and
+its names import harbor itself, which is a required dependency of the distribution.
+
 ## `flotilla.testing`
 
 Contract-test doubles for downstreams, shipped in the wheel behind the `testing` extra:
@@ -66,7 +78,7 @@ Before 1.0, minor versions may contain breaking changes; every one of them lands
 an extension can plan around:
 
 - The tables above. Names are added without notice; a removal or a signature change is a
-  changelog entry, and the top-level table is checked against `flotilla.__all__` by a unit
+  changelog entry, and every table is checked against its package's `__all__` by a unit
   test, so the doc and the surface cannot drift apart silently.
 - The grading phase contract: `open` during the agent phase, then `end_agent_phase`,
   `stage_verification`, `open_verification_role` in that order, each once, with `verify` the

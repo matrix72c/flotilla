@@ -6,6 +6,7 @@ from pathlib import Path
 
 import flotilla
 from flotilla import native
+from flotilla.integrations import harbor
 
 SDK = Path(__file__).resolve().parents[2] / "docs" / "SDK.md"
 
@@ -31,3 +32,12 @@ def test_native_table_is_the_native_surface() -> None:
     assert documented == set(native.__all__)
     for name in documented:  # the lazily imported names resolve too
         getattr(native, name)
+
+
+def test_harbor_table_is_the_integration_surface() -> None:
+    documented = _table_symbols("Imported from `flotilla.integrations.harbor`")
+    assert documented == set(harbor.__all__)
+    for name in documented:
+        getattr(harbor, name)
+    # The top-level import must stay harbor-free; the integration is its own surface.
+    assert not documented & set(flotilla.__all__)
