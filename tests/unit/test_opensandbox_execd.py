@@ -145,7 +145,7 @@ def test_fold_exec_noninteger_error_value() -> None:
 
 
 def test_wrap_argv_env_i_names_only() -> None:
-    assert wrap_argv(("echo", "hi"), ["B", "A", "HOME"], wrapper=BUSYBOX) == [
+    assert wrap_argv(("echo", "hi"), ["B", "A", "HOME"]) == [
         BUSYBOX,
         "sh",
         "-c",
@@ -157,28 +157,7 @@ def test_wrap_argv_env_i_names_only() -> None:
 
 
 def test_wrap_argv_empty_env() -> None:
-    assert "env -i" in wrap_argv(("true",), [], wrapper=BUSYBOX)[3]
-
-
-def test_wrap_argv_uses_configured_wrapper() -> None:
-    argv = wrap_argv(("ls",), [], wrapper="/opt/bb")
-    assert argv[0] == "/opt/bb" and BUSYBOX not in argv[3]
-
-
-@pytest.mark.parametrize(
-    "bad",
-    [
-        {"protocol": "v2"},
-        {"wrapper": "busybox"},  # relative path
-        {"wrapper": "/opt/my bin/busybox"},  # spaces would be word-split by the shell in the wrapper script
-        {"wrapper": "/opt/$X/busybox"},
-        {"wrapper": "/opt/bb;id"},
-        {"wrapper": "/opt/../bb"},  # not normalized
-    ],
-)
-def test_execd_settings_rejects_bad_values(bad: dict[str, str]) -> None:
-    with pytest.raises(ValueError):
-        ExecdSettings(**bad)  # type: ignore[arg-type]
+    assert "env -i" in wrap_argv(("true",), [])[3]
 
 
 @pytest.mark.parametrize("key", ["A=B", "", "A\0B", "-u", "FLOTILLA_ENV_0"])
@@ -239,7 +218,7 @@ async def test_exec_streams_and_folds(clock: ManualClock) -> None:
     # One request; values only in envs, only names in argv; timeout in milliseconds; carries uid/gid.
     assert len(posts) == 1
     assert posts[0]["envs"] == {"K": secret}
-    assert posts[0]["argv"] == wrap_argv(("echo", "ok"), ["K"], wrapper=BUSYBOX)
+    assert posts[0]["argv"] == wrap_argv(("echo", "ok"), ["K"])
     assert secret not in json.dumps(posts[0]["argv"]) and "command" not in posts[0]
     assert posts[0]["timeout"] == 35000 and posts[0]["uid"] == 1000 and posts[0]["background"] is False
 
@@ -499,13 +478,17 @@ HOSTILE_ARGS = (
 
 
 @pytest.mark.parametrize("shell", ["/bin/sh", "/bin/bash"])
-def test_legacy_command_reproduces_argv_and_env_in_a_real_shell(shell: str, tmp_path: Path) -> None:
+def test_legacy_command_reproduces_argv_and_env_in_a_real_shell(
+    shell: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """execd's legacy mode runs `<shell> -c <command>` with the request envs layered over execd's environment:
     verify against a real shell that one round of word splitting yields the original argv, and that the
     process environment is exactly `proc.env`.
 
     The wrapper is a script forwarding sh / env / awk / id to the system tools instead of busybox.
     """
+    import flotilla.platform.opensandbox.execd as execd_module
+
     if not Path(shell).exists():
         pytest.skip(f"no {shell}")
     bb = tmp_path / "bb"
@@ -514,7 +497,8 @@ def test_legacy_command_reproduces_argv_and_env_in_a_real_shell(shell: str, tmp_
         '  awk) exec /usr/bin/awk "$@";; id) exec /usr/bin/id "$@";; esac\nexit 99\n'
     )
     bb.chmod(0o755)
-    settings = ExecdSettings(protocol="legacy", wrapper=str(bb))
+    monkeypatch.setattr(execd_module, "BUSYBOX", str(bb))
+    settings = ExecdSettings(protocol="legacy")
     for env in (
         {"K": "s3cr'et $(id) `id` value", "PATH": "/usr/bin:/bin", "HOME": "/explicit"},
         {"K": "s3cr'et", "discovery.type": "single-node $(id)", "APT::Get::X": "true", "a b'c": "v", "PATH": "/bin"},
@@ -731,9 +715,11 @@ async def test_execution_output_is_bounded_without_fabricating_exit(clock: Manua
 @pytest.mark.parametrize("protocol", ["current", "legacy"])
 @pytest.mark.parametrize("background", [False, True])
 def test_home_defaults_follow_execution_user_and_preserve_overrides(
-    protocol: str, background: bool, tmp_path: Path
+    protocol: str, background: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Execute the wire command, with passwd/id fixtures standing in for the sandbox."""
+    import flotilla.platform.opensandbox.execd as execd_module
+
     uid_file = tmp_path / "uid"
     passwd = tmp_path / "passwd"
     passwd.write_text("root:x:0:0::/root:/bin/sh\nagent:x:1000:1000::/home/agent:/bin/sh\n")
@@ -748,7 +734,8 @@ def test_home_defaults_follow_execution_user_and_preserve_overrides(
         "os.execv(exe, [exe, *args])\n"
     )
     bb.chmod(0o755)
-    settings = ExecdSettings(protocol=protocol, wrapper=str(bb))  # type: ignore[arg-type]
+    monkeypatch.setattr(execd_module, "BUSYBOX", str(bb))
+    settings = ExecdSettings(protocol=protocol)  # type: ignore[arg-type]
 
     def execute(uid: int, explicit: dict[str, str] | None = None) -> dict[str, str]:
         uid_file.write_text(str(uid))

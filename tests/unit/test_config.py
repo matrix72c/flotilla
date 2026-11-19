@@ -78,6 +78,30 @@ def test_pvc_storage_translates_to_settings() -> None:
     assert (settings.volumes, settings.claim_name, settings.root_subpath) == ("pvc", "project-data", "opt/flotilla")
 
 
+@pytest.mark.parametrize(
+    "storage",
+    [
+        {},  # host form missing host_path
+        {"host_path": " @user"},
+        {"host_path": "@user\n"},
+        {"host_path": "@user\t"},
+        {"host_path": "/mnt", "claim_name": "data"},  # host form does not take pvc fields
+        {"host_path": "@user", "root_subpath": "../other"},
+        {"volumes": "pvc"},  # pvc form missing claim_name
+        {"volumes": "pvc", "claim_name": "Bad_Claim"},
+        {"volumes": "nfs", "host_path": "/mnt"},  # unsupported volume form
+        {"volumes": "pvc", "claim_name": "data", "host_path": "/mnt"},
+        {"volumes": "pvc", "claim_name": "c", "root_subpath": "/abs"},
+        {"volumes": "pvc", "claim_name": "c", "root_subpath": "opt/../x"},
+        {"volumes": "pvc", "claim_name": "c", "root_subpath": "opt/"},
+    ],
+)
+def test_rejects_invalid_storage(storage: dict[str, Any]) -> None:
+    """The `Storage` config model validates the whole form at load; `StorageSettings` trusts it."""
+    with pytest.raises(ValidationError):
+        config(storage=storage)
+
+
 def test_endpoint_trailing_slash_normalized() -> None:
     assert config().opensandbox_settings().endpoint == "http://os.test"
 
@@ -91,8 +115,6 @@ def test_endpoint_trailing_slash_normalized() -> None:
         },  # credentials must not be in the config
         {"opensandbox": {**config_data()["opensandbox"], "credential_env": "ak:sk"}},
         {"opensandbox": {**config_data()["opensandbox"], "endpoint": "os.test"}},
-        {"storage": {"volumes": "unknown", "host_path": "/mnt"}},  # unsupported volume form
-        {"storage": {"volumes": "pvc", "host_path": "/mnt"}},  # pvc form without claim_name
         {"share": {"release": "../x", "release_sha256": SHA}},
         {"share": {"release": "r1", "release_sha256": "abc"}},
         {"network": {"external": ["0.0.0.0/0"]}},  # unrestricted egress must be written as "any"

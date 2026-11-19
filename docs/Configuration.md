@@ -49,7 +49,6 @@ A configuration contains exactly one backend table: `[opensandbox]` for the buil
 | Key | Default | Meaning |
 |---|---|---|
 | `protocol` | `"current"` | execd protocol of the deployment: `"current"` or `"legacy"`. There is no automatic fallback |
-| `wrapper` | `"/.flotilla/bin/busybox"` | BusyBox binary from the share release used to wrap commands |
 
 See the [OpenSandbox backend](backends/opensandbox.md) for the differences.
 

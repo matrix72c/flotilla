@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from flotilla.platform.base import ErrorCategory, FlotillaError, ProcessSpec
-from flotilla.platform.opensandbox.execd import Execd
+from flotilla.platform.opensandbox.execd import BUSYBOX, Execd
 
 # busybox runs no shell expansion; both commands use argv. `-o` prints one record per line for parsing.
 _ADDR_ENV: dict[str, str] = {}  # no workload env needed (busybox uses an absolute path, not PATH)
@@ -51,7 +51,7 @@ async def read_internal_address(execd: Execd, iid: str) -> str:
 
     `iid` is only used in diagnostics; `execd` already targets the instance.
     """
-    busybox = execd.settings.wrapper
+    busybox = BUSYBOX
     dev = parse_default_dev((await _run(execd, route_argv(busybox))).decode(errors="replace"))
     if dev is None:
         raise _fail(f"instance {iid} has no default route device (ip route show default has no dev)")

@@ -36,6 +36,7 @@ from flotilla.platform.network import cluster_dns_address
 from flotilla.platform.opensandbox import ExecdSettings, NetworkSettings, StorageSettings
 from flotilla.platform.opensandbox import build as build_opensandbox
 from flotilla.platform.opensandbox.filesystem import FilesystemProtocol, FilesystemSettings
+from flotilla.platform.opensandbox.storage import check_claim_name, check_host_path, check_root_subpath
 from flotilla.resources import cpu, memory
 from flotilla.share.release import BUILTIN_RELEASE, BUILTIN_RELEASE_SHA256
 
@@ -82,7 +83,6 @@ class OpenSandboxNetwork(_Model):
 
 class OpenSandboxExecd(_Model):
     protocol: Literal["current", "legacy"] = "current"
-    wrapper: str = ExecdSettings().wrapper
 
 
 class OpenSandbox(BackendSettings):
@@ -110,8 +110,18 @@ class Storage(_Model):
     root_subpath: str = ""
 
     @model_validator(mode="after")
-    def _settings(self) -> Storage:
-        self.settings()  # raises ValueError
+    def _storage(self) -> Storage:
+        if self.volumes == "host":
+            if self.claim_name:
+                raise ValueError("storage.volumes = host does not use claim_name")
+            check_host_path(self.host_path)
+        elif self.volumes == "pvc":
+            if self.host_path:
+                raise ValueError("storage.volumes = pvc does not use host_path")
+            check_claim_name(self.claim_name)
+        else:
+            raise ValueError(f"storage.volumes must be host or pvc: {self.volumes!r}")
+        check_root_subpath(self.root_subpath)
         return self
 
     def settings(self) -> StorageSettings:
@@ -833,9 +843,7 @@ class FlotillaConfig(_Model):
 
     def execd_settings(self) -> ExecdSettings:
         e = self.opensandbox_settings().execd
-        return ExecdSettings(
-            protocol=e.protocol, wrapper=e.wrapper, output_limit_bytes=self.runtime.exec_output_limit_bytes
-        )
+        return ExecdSettings(protocol=e.protocol, output_limit_bytes=self.runtime.exec_output_limit_bytes)
 
 
 def _as_network(target: str) -> ipaddress.IPv4Network | ipaddress.IPv6Network | None:

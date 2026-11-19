@@ -33,6 +33,7 @@ from flotilla.platform.base import (
     Topology,
 )
 from flotilla.platform.opensandbox import ExecdSettings, OpenSandboxPlatform, StorageSettings, build
+from flotilla.platform.opensandbox.execd import BUSYBOX
 from flotilla.platform.opensandbox.filesystem import SHM_SIZE_EXTENSION, UPSTREAM_FILESYSTEM, FilesystemSettings
 from flotilla.platform.opensandbox.network import NetworkSettings
 from flotilla.platform.opensandbox.platform import EXECD_TOKEN_HEADER, MANAGED_CREATE_FIELDS
@@ -784,9 +785,7 @@ async def test_legacy_execd_settings_reach_command_and_upload(clock: ManualClock
             return httpx.Response(200, content=b'{"type":"execution_complete"}\n\n')
         return httpx.Response(200)
 
-    platform = _platform(
-        _with_create(handler, "sb-1"), clock, caps=caps, execd=ExecdSettings(protocol="legacy", wrapper="/opt/bb")
-    )
+    platform = _platform(_with_create(handler, "sb-1"), clock, caps=caps, execd=ExecdSettings(protocol="legacy"))
     handle = await clock.run(platform.create(_spec("db")))
     proc_spec = ProcessSpec(argv=("mkdir", "-p", "/x"), uid=0, gid=0, cwd="/", env={}, timeout_s=5.0)
     await clock.run(platform.exec(handle, proc_spec))
@@ -794,7 +793,7 @@ async def test_legacy_execd_settings_reach_command_and_upload(clock: ManualClock
     prefix = "/v1/sandboxes/sb-1/proxy/44772"
     assert [path for path, _ in seen] == [f"{prefix}/command", f"{prefix}/files/upload"]
     command = seen[0][1]
-    assert command is not None and "argv" not in command and str(command["command"]).startswith("/opt/bb sh -c")
+    assert command is not None and "argv" not in command and str(command["command"]).startswith(f"{BUSYBOX} sh -c")
 
 
 # ───────────────────────────── execd access token ─────────────────────────────

@@ -99,13 +99,6 @@ def test_rule_limit_enforced_at_compile_time() -> None:
     assert len(compile_policy(ANY, peers, NET)["egress"]) < 200
 
 
-def test_bad_settings_rejected() -> None:
-    with pytest.raises(ValueError):
-        NetworkSettings(sandbox_cidrs=("not-a-cidr",))
-    with pytest.raises(ValueError, match="sandbox_cidrs"):
-        NetworkSettings()
-
-
 def test_sandbox_targets_keep_external_ip_semantics_and_deduplicate_peers() -> None:
     settings = NetworkSettings(link="sandbox", sandbox_cidrs=("10.0.0.0/16",))
     ext = ExternalPolicy(mode="allowlist", hosts=("model.example.com",), cidrs=("10.0.0.9/32",))
@@ -199,23 +192,6 @@ def test_volume_keys_and_mount_paths_are_checked_per_entry(settings: StorageSett
         settings.compile([vol])
 
 
-@pytest.mark.parametrize(
-    "kwargs",
-    [
-        {"host_path": " @user"},
-        {"host_path": "@user\n"},
-        {"volumes": "pvc", "claim_name": "Bad_Claim"},
-        {"volumes": "pvc", "claim_name": ""},
-        {"volumes": "pvc", "claim_name": "c", "root_subpath": "/abs"},
-        {"volumes": "pvc", "claim_name": "c", "root_subpath": "opt/../x"},
-        {"volumes": "pvc", "claim_name": "c", "root_subpath": "opt/"},
-    ],
-)
-def test_storage_roots_are_checked_at_construction(kwargs: dict[str, str]) -> None:
-    with pytest.raises(ValueError):
-        StorageSettings(**kwargs)  # type: ignore[arg-type]
-
-
 # ───────────────────────────── Storage settings (section 6) ─────────────────────────────
 
 
@@ -234,22 +210,6 @@ def test_storage_settings_compiles_pvc_volumes() -> None:
     assert entry["subPath"] == "opt/f/k"
     assert settings.root == "pvc:data/opt/f"
     assert StorageSettings(volumes="pvc", claim_name="data").root == "pvc:data"
-
-
-@pytest.mark.parametrize(
-    "kwargs",
-    [
-        {},  # host form missing host_path
-        {"host_path": "@user\t"},
-        {"host_path": "/mnt", "claim_name": "data"},  # host form does not take pvc fields
-        {"volumes": "pvc"},  # pvc form missing claim_name
-        {"volumes": "pvc", "claim_name": "data", "host_path": "/mnt"},
-        {"volumes": "nfs", "host_path": "/mnt"},
-    ],
-)
-def test_storage_settings_rejects_bad_combinations(kwargs: dict[str, str]) -> None:
-    with pytest.raises(ValueError):
-        StorageSettings(**kwargs)  # type: ignore[arg-type]
 
 
 # ───────────────────────────── HTTP ─────────────────────────────
@@ -453,5 +413,3 @@ def test_host_root_subpath_scopes_every_mount_including_the_anchor_root() -> Non
     ]
     assert [v["subPath"] for v in settings.compile(volumes)] == ["voyager-inputs/releases/r1", "voyager-inputs"]
     assert settings.root == "host:@user:owner/voyager-inputs"
-    with pytest.raises(ValueError, match="root_subpath"):
-        StorageSettings(host_path="@user", root_subpath="../other")

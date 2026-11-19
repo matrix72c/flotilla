@@ -48,7 +48,7 @@ PLATFORM = FlotillaConfig(
             sandbox_cidrs=["10.42.0.0/16"],
             platform_cidrs=["10.43.0.0/16", "169.254.169.254/32"],
         ),
-        execd=OpenSandboxExecd(protocol="current", wrapper="/.flotilla/bin/busybox"),
+        execd=OpenSandboxExecd(protocol="current"),
     ),
     storage=Storage(
         volumes="host",
