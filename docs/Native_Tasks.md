@@ -106,6 +106,12 @@ async with Flotilla(deployment=PLATFORM) as fleet:
             result = await attempt.verify()
 ```
 
+`verify` is the whole grading phase in one call: it declares the agent done (releasing main when
+grading uses a separate verifier), stages hidden tests and handoffs, opens the verification
+environment, and runs the grading command. A training loop that needs something between those
+steps -- a teardown hook, a pause -- runs `end_agent_phase`, `stage_verification` and
+`open_verification_role` itself, in that order, subject to the same once-only gates.
+
 `dataset.tasks()` lists the keys below the root in a stable order; `dataset.source(key)` names one on
 both sides. Which keys to run, and how often, is your selection: duplicates stay duplicate attempts.
 
