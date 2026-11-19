@@ -96,16 +96,14 @@ async def test_healthy_trial_stays_healthy_and_never_lists(
 
 
 @pytest.mark.asyncio
-async def test_probes_are_staggered_and_periodic(platform: FakePlatform, clock: ManualClock, anchor: Anchor) -> None:
+async def test_no_periodic_platform_polling(platform: FakePlatform, clock: ManualClock, anchor: Anchor) -> None:
+    """No background per-unit polling: outside check()/confirm the only platform reads are the one-time expiry
+    reads at renewal startup (voyager calls check() at acquire/turn/batch boundaries, which is enough)."""
     monitor, _, _ = await _ready(platform, clock, anchor, _plan())
     await clock.advance(0)  # let the renewal loop read initial expiries (one get per unit) before counting
-    gets0 = platform.calls["get"]
-    await clock.advance(150.0)  # two units: the first checked at 150s, the second at 300s
-    assert platform.calls["get"] - gets0 == 1
-    await clock.advance(150.0)
-    assert platform.calls["get"] - gets0 == 2
-    await clock.advance(SETTINGS.probe_interval_s * 4)
-    assert platform.calls["get"] - gets0 == 2 + 8  # once per unit every 300s
+    gets = platform.calls["get"]
+    await clock.advance(3 * SETTINGS.ttl_s)
+    assert platform.calls["get"] == gets
     await monitor.stop()
 
 
@@ -113,11 +111,10 @@ async def test_probes_are_staggered_and_periodic(platform: FakePlatform, clock: 
 async def test_instance_gone_marks_lost(platform: FakePlatform, clock: ManualClock, anchor: Anchor) -> None:
     monitor, handles, _ = await _ready(platform, clock, anchor, _plan())
     await platform.delete(handles["db"].iid)
-    await clock.advance(SETTINGS.probe_interval_s)
-    err = monitor.lost
-    assert err is not None
+    err = await clock.run(monitor.check())
+    assert isinstance(err, FlotillaError)
     assert (err.stage, err.category, err.retryable) == ("run", ErrorCategory.LOST, True)
-    assert "db" in str(err)
+    assert isinstance(err.__cause__, FlotillaError) and "not found" in str(err.__cause__)
     assert await monitor.check() is err  # returns directly once marked
     await monitor.stop()
 
@@ -129,17 +126,18 @@ async def test_non_running_status_marks_lost(
 ) -> None:
     monitor, handles, _ = await _ready(platform, clock, anchor, _plan())
     platform.set_status(handles["main"].iid, status, reason="Paused")
-    await clock.advance(SETTINGS.probe_interval_s)
-    assert monitor.lost is not None and "Paused" in str(monitor.lost)
+    err = await clock.run(monitor.check())
+    assert err is not None and "Paused" in str(monitor.lost)
     await monitor.stop()
 
 
 @pytest.mark.asyncio
-async def test_transient_probe_error_is_not_lost(platform: FakePlatform, clock: ManualClock, anchor: Anchor) -> None:
+async def test_transient_confirm_error_is_not_lost(platform: FakePlatform, clock: ManualClock, anchor: Anchor) -> None:
+    # A transient query failure during confirm leaves health unknown, not lost.
     monitor, _, _ = await _ready(platform, clock, anchor, _plan())
-    for _ in range(3):
-        platform.inject_fault("get", _transient())
-    await clock.advance(SETTINGS.probe_interval_s * 2)
+    await clock.advance(0)  # finish the renewal loop's startup reads so the fault lands on confirm's get
+    platform.inject_fault("get", _transient())
+    assert await monitor.confirm("db") is None
     assert monitor.lost is None
     await monitor.stop()
 
@@ -178,9 +176,9 @@ async def test_first_lost_reason_is_kept(platform: FakePlatform, clock: ManualCl
     monitor, handles, _ = await _ready(platform, clock, anchor, _plan())
     await platform.delete(handles["db"].iid)
     first = await monitor.confirm("db")
+    assert first is not None
     await platform.delete(handles["main"].iid)
-    await clock.advance(SETTINGS.probe_interval_s)
-    assert monitor.lost is first and "db" in str(first)
+    assert await clock.run(monitor.check()) is first and "db" in str(first)
     await monitor.stop()
 
 
@@ -422,7 +420,6 @@ async def test_business_process_exit_without_restart_is_not_lost(
     # A main process exit is in-task behavior (possibly caused by the agent), not an infrastructure failure.
     monitor, handles, pids = await _ready(platform, clock, anchor, _plan())
     platform.finish_process(handles["db"].iid, pids["db"], 139)
-    await clock.advance(SETTINGS.probe_interval_s * 3)
     assert monitor.lost is None
     assert await clock.run(monitor.check()) is None
     await monitor.stop()
