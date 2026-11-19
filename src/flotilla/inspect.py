@@ -1,9 +1,11 @@
 """Check a dataset without creating anything: plan every task and report what fails.
 
-Planning is the same code `open` runs, so a task that plans here is one that will open there. It
-reads the task directory and each image's config from the registry, and touches no sandbox. That
-makes it the cheap gate: a dataset of 60k tasks with 1% malformed is 600 runs that fail partway
-through, and finding them costs minutes here instead of GPU hours there.
+Planning is the same code `open` runs -- every environment definition the task declares, the
+deployment's agent overlay, and the same admission list the manager enforces -- so a task that
+plans here is one that will open there. It reads the task directory and each image's config
+from the registry, and touches no sandbox. That makes it the cheap gate: a dataset of 60k tasks
+with 1% malformed is 600 runs that fail partway through, and finding them costs minutes here
+instead of GPU hours.
 
 It also warms the image-config cache, because planning is what fills it.
 """
@@ -13,13 +15,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from flotilla.compose.plan_task import ImageConfigSource, PlanError, plan_task
-from flotilla.compose.task import TaskError, find_tasks, load_task
+from flotilla.compose.plan_task import ImageConfigSource, PlanError
+from flotilla.compose.task import TaskError, find_tasks
 from flotilla.config import FlotillaConfig
+from flotilla.core.admission import admission_errors
 from flotilla.core.plan import TaskSource
+from flotilla.integrations.harbor_source import task_environments
 from flotilla.native.dataset import Dataset, DatasetError
 from flotilla.registry import RegistryError
-from flotilla.scan import scan_task
+from flotilla.runtime.client import plan_for
+from flotilla.scan import scan
 
 
 @dataclass(frozen=True)
@@ -50,30 +55,41 @@ class TaskReport:
 def inspect_source(cfg: FlotillaConfig, source: TaskSource, configs: ImageConfigSource) -> TaskReport:
     """Plan one task against this deployment. Never raises: a bad task is a report, not an exception."""
     key = source.key or str(source.local)
+    caps = cfg.platform_capabilities()
     try:
-        task = load_task(source.local, compose_environment=cfg.runtime_params)
+        definitions = task_environments(source.local, compose_environment=cfg.runtime_params)
     except (TaskError, ValueError, OSError) as exc:
         return TaskReport(task=key, planned=False, error=f"{type(exc).__name__}: {exc}")
 
-    scan = scan_task(task, cfg.platform_capabilities())
-    rejected = tuple(f"{f.path}: {f.reason}" for f in scan.findings if f.kind == "reject")
-    warnings = tuple(f"{f.path}: {f.reason}" for f in scan.findings if f.kind != "reject")
-    if rejected:
-        return TaskReport(task=key, planned=False, services=scan.services, rejected=rejected, warnings=warnings)
-
-    # Only now does anything leave the machine: one registry read per image not already cached.
-    try:
-        plan = plan_task(
-            task,
-            source,
-            configs=configs,
-            resources=cfg.resources.for_services(task.name, {n: s.resources for n, s in task.project.services.items()}),
-        )
-    except (PlanError, RegistryError, ValueError, OSError) as exc:
-        return TaskReport(
-            task=key, planned=False, services=scan.services, warnings=warnings, error=f"{type(exc).__name__}: {exc}"
-        )
-    return TaskReport(task=key, planned=True, services=tuple(sorted(plan.units)), warnings=warnings)
+    rejected: list[str] = []
+    warnings: list[str] = []
+    services: tuple[str, ...] = ()
+    for definition in definitions:
+        env_name = Path(definition.env_dir).name
+        # Findings and errors name their role when the task has more than the main environment.
+        tag = "" if env_name == "environment" else f"{env_name}: "
+        findings = scan(definition.project, caps, env_dir=str(definition.env_dir), extra=definition.findings)
+        rejected.extend(f"{tag}{f.path}: {f.reason}" for f in findings if f.kind == "reject")
+        warnings.extend(f"{tag}{f.path}: {f.reason}" for f in findings if f.kind != "reject")
+        if env_name == "environment":
+            services = tuple(sorted(definition.project.services))
+        if rejected:
+            continue  # a task already known not to open costs no registry read
+        # Only now does anything leave the machine: one registry read per image not already cached.
+        try:
+            plan = plan_for(cfg, definition, source, configs)
+        except (PlanError, RegistryError, ValueError, OSError) as exc:
+            return TaskReport(
+                task=key,
+                planned=False,
+                services=services,
+                rejected=tuple(rejected),
+                warnings=tuple(warnings),
+                error=f"{tag}{type(exc).__name__}: {exc}",
+            )
+        rejected.extend(f"{tag}{error}" for error in admission_errors(plan, caps))
+    report = TaskReport(task=key, planned=not rejected, services=services, rejected=tuple(rejected))
+    return report if rejected else TaskReport(task=key, planned=True, services=services, warnings=tuple(warnings))
 
 
 def sources_of(cfg: FlotillaConfig, targets: list[str]) -> list[TaskSource]:

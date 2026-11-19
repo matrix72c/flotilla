@@ -12,12 +12,16 @@ from flotilla.compose.layout import classify
 from flotilla.compose.normalize import normalize
 from flotilla.compose.task import load_task
 from flotilla.config import FlotillaConfig
+from flotilla.core.admission import admission_errors
 from flotilla.platform.base import Capabilities, TmpfsMount
 from flotilla.platform.filesystem import memory_bytes, unsized_tmpfs_bytes
 from flotilla.platform.opensandbox.filesystem import INTERNAL_LIMITS, parse_effective
-from flotilla.scan import scan
 from flotilla.testing.config import config_data
-from flotilla.testing.planning import APP, _caps, _task, plan
+from flotilla.testing.planning import APP, _caps, _task, plan, plan_project
+
+
+def _errors(project: Any, caps: Capabilities) -> list[str]:
+    return list(admission_errors(plan_project(project), caps))
 
 
 def test_compose_filesystem_fields_roundtrip_to_the_plan(tmp_path: Path) -> None:
@@ -43,7 +47,7 @@ def test_compose_filesystem_fields_roundtrip_to_the_plan(tmp_path: Path) -> None
         )
     )
     supported = replace(_caps(), readonly_rootfs=True, native_tmpfs=True, filesystem_limits=INTERNAL_LIMITS)
-    assert scan(task.name, task.project, supported).status == "accepted"
+    assert not _errors(task.project, supported)
     unit = plan(task).units["main"]
     assert unit.readonly_rootfs
     assert unit.tmpfs_mounts == (
@@ -51,7 +55,7 @@ def test_compose_filesystem_fields_roundtrip_to_the_plan(tmp_path: Path) -> None
         TmpfsMount("/cache", 8 * 1024**2, 0o700),
     )
     # Mount points and the readonly runtime dir are runtime responsibilities: no derived image build.
-    assert not any(f.kind == "equivalent" and "tmpfs" in f.path for f in task.project.findings)
+    assert not any(f.kind == "note" and "tmpfs" in f.path for f in task.project.findings)
 
 
 @pytest.mark.parametrize(
@@ -78,10 +82,10 @@ def test_tmpfs_invalid_or_unrepresentable_options_are_rejected(fields: dict[str,
 
 def test_filesystem_admission_and_internal_limits(caps: Capabilities) -> None:
     project = normalize({"services": {"main": {"image": APP, "read_only": True, "tmpfs": ["/tmp"]}}})
-    assert scan("fs", project, caps).status == "rejected"
+    assert _errors(project, caps)
     supported = replace(caps, readonly_rootfs=True, native_tmpfs=True, filesystem_limits=INTERNAL_LIMITS)
-    assert scan("fs", project, supported).status == "accepted"
-    assert scan("fs", project, replace(supported, native_tmpfs=False)).status == "rejected"
+    assert not _errors(project, supported)
+    assert _errors(project, replace(supported, native_tmpfs=False))
     for tmpfs, memory in [
         ((TmpfsMount("/run/app"),), "1Gi"),
         ((TmpfsMount("/tmp", 64 * 1024 * 1024),), "32Mi"),
@@ -117,7 +121,7 @@ def test_scan_and_planning_agree_on_unsized_tmpfs_with_shm_size(caps: Capabiliti
     for shm, status in (("1g", "accepted"), ("1100m", "rejected")):  # unsized /tmp takes 1 GiB of 2 GiB
         raw = {"services": {"main": {"image": APP, "tmpfs": ["/tmp"], "shm_size": shm, "mem_limit": "2g"}}}
         project = normalize(raw)
-        assert scan("fs", project, supported).status == status, shm
+        assert bool(_errors(project, supported)) == (status == "rejected"), shm
         svc = project.services["main"]
         planned = tuple(
             m if m.size_bytes is not None else replace(m, size_bytes=unsized_tmpfs_bytes("2Gi")) for m in svc.tmpfs
@@ -142,9 +146,8 @@ def test_readonly_rootfs_promotes_single_writer_mounts_to_real_storage() -> None
 
 def test_unsupported_tmpfs_is_rejected_at_admission(tmp_path: Path) -> None:
     task = load_task(_task(tmp_path, "fs", compose=f"services:\n  main:\n    image: {APP}\n    tmpfs: /tmp\n"))
-    result = scan(task.name, task.project, _caps())
-    assert result.status == "rejected"
-    assert any("native_tmpfs" in f.reason for f in result.findings if f.kind == "reject")
+    errors = _errors(task.project, _caps())
+    assert errors and any("native_tmpfs" in error for error in errors)
 
 
 def test_only_the_internal_dialect_can_express_readonly_rootfs_and_tmpfs() -> None:

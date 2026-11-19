@@ -11,11 +11,15 @@ import pytest
 from flotilla.compose.normalize import normalize
 from flotilla.compose.task import load_task
 from flotilla.config import FlotillaConfig
+from flotilla.core.admission import admission_errors
 from flotilla.platform.base import Capabilities, TmpfsMount
 from flotilla.platform.opensandbox.filesystem import INTERNAL_LIMITS
-from flotilla.scan import scan
 from flotilla.testing.config import config_data
-from flotilla.testing.planning import APP, _caps, _task, plan
+from flotilla.testing.planning import APP, _caps, _task, plan, plan_project
+
+
+def _errors(project: Any, caps: Capabilities) -> list[str]:
+    return list(admission_errors(plan_project(project), caps))
 
 
 @pytest.mark.parametrize(
@@ -43,17 +47,16 @@ def test_shm_size_roundtrips_to_the_plan(tmp_path: Path) -> None:
 def test_a_deployment_without_shm_size_refuses_the_task_at_admission(tmp_path: Path) -> None:
     """Planning is deployment-independent: an unsupported field is caught by the capability scan."""
     task = load_task(_task(tmp_path, "shm", compose=f"services:\n  main:\n    image: {APP}\n    shm_size: 1g\n"))
-    result = scan(task.name, task.project, _caps())
-    assert result.status == "rejected"
-    assert any("shm_size" in finding.reason for finding in result.findings if finding.kind == "reject")
+    errors = _errors(task.project, _caps())
+    assert errors and any("shm_size" in error for error in errors)
 
 
 def test_shm_size_admission_shares_the_tmpfs_memory_budget(caps: Capabilities) -> None:
     raw: dict[str, Any] = {"services": {"main": {"image": APP, "shm_size": "1g", "mem_limit": "2g"}}}
     project = normalize(raw)
-    assert scan("shm", project, caps).status == "rejected"
+    assert _errors(project, caps)
     supported = replace(caps, shm_size=True, native_tmpfs=True, filesystem_limits=INTERNAL_LIMITS)
-    assert scan("shm", project, supported).status == "accepted"
+    assert not _errors(project, supported)
     supported.require_filesystem(False, (TmpfsMount("/tmp", 1024**3),), memory="2Gi", shm_size_bytes=1024**3)
     with pytest.raises(ValueError, match="exceed"):
         supported.require_filesystem(False, (TmpfsMount("/tmp", 1024**3),), memory="2Gi", shm_size_bytes=1024**3 + 1)

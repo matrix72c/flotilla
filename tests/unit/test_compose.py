@@ -155,8 +155,8 @@ def test_read_only_is_preserved_for_every_service() -> None:
     ("network", "path", "kind"),
     [
         ({"driver": "bridge", "internal": True, "ipam": {}}, None, None),
-        ({"driver_opts": {"com.docker.network.bridge.gateway_mode_ipv4": "isolated"}}, "driver_opts", "equivalent"),
-        ({"driver_opts": {"com.docker.network.driver.mtu": "1400"}}, "driver_opts", "equivalent"),
+        ({"driver_opts": {"com.docker.network.bridge.gateway_mode_ipv4": "isolated"}}, "driver_opts", "note"),
+        ({"driver_opts": {"com.docker.network.driver.mtu": "1400"}}, "driver_opts", "note"),
         ({"driver_opts": {"com.docker.network.bridge.enable_icc": "false"}}, "driver_opts", "reject"),
         ({"driver": "overlay"}, "driver", "reject"),
         ({"ipam": {"config": [{"subnet": "10.5.0.0/16"}]}}, "ipam", "reject"),
@@ -182,8 +182,8 @@ def test_top_level_extension_fields_are_recorded_not_rejected() -> None:
     )
     assert not project.rejected, project.findings
     assert sorted((f.path, f.kind) for f in project.findings) == [
-        ("x-common", "equivalent"),
-        ("x-harbor-bridge", "equivalent"),
+        ("x-common", "note"),
+        ("x-harbor-bridge", "note"),
     ]
 
 
@@ -213,8 +213,8 @@ def test_equivalent_fields_are_recorded() -> None:
         "services.app.ports",
         "services.app.depends_on.main.restart",
         "services.app.networks.default.gw_priority",
-    } <= _paths(p, "equivalent")
-    assert "services.app.hostname" in _paths(p, "warn")
+    } <= _paths(p, "note")
+    assert "services.app.hostname" in _paths(p, "note")
     assert not {f.path for f in p.findings if f.kind == "reject"} & {
         "services.app.init",
         "services.app.restart",
@@ -228,7 +228,7 @@ def test_equivalent_fields_are_recorded() -> None:
         (53,),
         "kafka",
     )
-    assert "services.app.tmpfs" not in _paths(p, "equivalent")
+    assert "services.app.tmpfs" not in _paths(p, "note")
 
 
 def test_unsized_tmpfs_keeps_docker_semantics_until_planning() -> None:
@@ -250,7 +250,7 @@ def test_unknown_top_level_key_rejected() -> None:
 def test_privileged_is_a_warning_on_the_privileged_runtime() -> None:
     project = normalize({"services": {"main": {"image": "r.io/app", "privileged": True}}})
     assert not project.rejected
-    assert [(f.path, f.kind) for f in project.findings] == [("services.main.privileged", "warn")]
+    assert [(f.path, f.kind) for f in project.findings] == [("services.main.privileged", "note")]
     assert project.services["main"].privileged
     off = normalize({"services": {"main": {"image": "r.io/app", "privileged": False}}})
     assert not off.findings and not off.services["main"].privileged
@@ -267,7 +267,7 @@ def test_extra_hosts_accepts_literal_addresses_in_both_syntaxes() -> None:
     for p in (mapping, listed):
         assert not p.rejected, p.findings
         assert p.services["app"].extra_hosts == {"license": "10.9.9.9", "v6": "2001:db8::1"}
-        assert "services.app.extra_hosts" in _paths(p, "equivalent")
+        assert "services.app.extra_hosts" in _paths(p, "note")
 
 
 @pytest.mark.parametrize(
@@ -331,7 +331,7 @@ def test_volumes_from_copies_the_donor_mounts_folding_read_only() -> None:
         VolumeMount("volume", "data", "/var/lib/data", read_only=True),
         VolumeMount("bind", "./conf", "/etc/conf", read_only=True),
     )
-    assert "services.app.volumes_from" in _paths(p, "equivalent")
+    assert "services.app.volumes_from" in _paths(p, "note")
 
 
 def test_volumes_from_keeps_the_donor_flags_without_ro() -> None:

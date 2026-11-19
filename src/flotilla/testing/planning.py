@@ -10,6 +10,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from flotilla.compose.model import Project
 from flotilla.compose.plan_task import plan_task
 from flotilla.compose.task import HarborTask
 from flotilla.config import FlotillaConfig, ResourceDefaults
@@ -96,6 +97,11 @@ def plan(
         resources=policy.for_services(task.name, declared),
         **kwargs,
     )
+
+
+def plan_project(project: Project, *, name: str = "t") -> TrialPlan:
+    """Plan a normalized project with the fakes above: admission checks without a task tree."""
+    return plan(HarborTask(name=name, path=Path("."), env_dir=Path("."), project=project, findings=()))
 
 
 def planned_task(

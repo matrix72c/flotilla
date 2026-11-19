@@ -12,6 +12,9 @@ from itertools import islice
 from typing import TYPE_CHECKING, Any
 
 from flotilla.core.anchor import Anchor
+from flotilla.core.waiting import finish_past_cancel
+from flotilla.native.dataset import RESERVED
+from flotilla.native.models import relative_path
 from flotilla.resources import cpu, memory
 
 if TYPE_CHECKING:
@@ -29,20 +32,8 @@ METADATA_RESULT_BYTES = 64 * 1024 * 1024
 
 
 def source_task_key(value: str) -> str:
-    value = relative_key(value)
-    if "\x7f" in value:
-        raise ValueError("task keys cannot contain control characters")
-    if value.split("/", 1)[0] in {"launches", "share"}:
+    if relative_path(value).split("/", 1)[0] in RESERVED:
         raise ValueError("task source must be an original Harbor dataset, not a runtime/publication directory")
-    return value
-
-
-def relative_key(value: str) -> str:
-    """Reject ambiguous paths rather than normalizing a reference to another task."""
-    if not isinstance(value, str) or not value or any(p in ("", ".", "..") for p in value.split("/")):
-        raise ValueError("storage paths must be nonempty canonical relative paths")
-    if "\\" in value or any(ord(c) < 32 for c in value):
-        raise ValueError("storage paths cannot contain backslashes or control characters")
     return value
 
 
@@ -123,15 +114,8 @@ class WorkspaceStore:
         except asyncio.CancelledError as primary:
             # Copy/build may have side effects. Do not delete their directory or
             # allow a caller to retry until the owned operation has terminated.
-            while not task.done():
-                try:
-                    await asyncio.shield(task)
-                except asyncio.CancelledError:
-                    continue
-                except Exception:
-                    break
             try:
-                task.result()
+                await finish_past_cancel(task)
             except Exception as exc:
                 primary.add_note(f"workspace operation failed during cancellation: {exc!r}")
             raise

@@ -80,12 +80,39 @@ async def within[T](
     raise Aborted()
 
 
+def retrieve(task: asyncio.Future[Any]) -> None:
+    """Consume a finished task's exception so asyncio does not report "never retrieved"."""
+    if not task.cancelled():
+        task.exception()
+
+
+def brief(exc: BaseException, limit: int = 300) -> str:
+    """One-line `Type: message`, truncated to `limit` characters."""
+    text = f"{type(exc).__name__}: {exc}"
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+async def finish_past_cancel[T](task: asyncio.Future[T]) -> T:
+    """Wait for a shielded `task` to truly finish after its waiter was cancelled.
+
+    Cancellation signals still aimed at the caller are swallowed -- the task keeps running through
+    its finally blocks -- and its own outcome then surfaces from the result.
+    """
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            continue
+        except Exception:
+            break
+    return task.result()
+
+
 async def settle(task: asyncio.Future[Any]) -> None:
     """Wait for `task` to finish without raising its result; nobody cares about its exception, so retrieve it to
     avoid asyncio reporting "never retrieved"."""
     await asyncio.wait({task})
-    if not task.cancelled():
-        task.exception()
+    retrieve(task)
 
 
 async def wait_all(clock: Clock, tasks: Collection[asyncio.Future[Any]], timeout: float) -> bool:
@@ -202,5 +229,4 @@ async def run_all[T](aws: Iterable[Awaitable[T]]) -> list[T]:
         if tasks:
             await asyncio.wait(tasks)
         for t in tasks:
-            if not t.cancelled():
-                t.exception()  # nobody cares about other failures; retrieve to avoid "never retrieved"
+            retrieve(t)  # nobody cares about other failures

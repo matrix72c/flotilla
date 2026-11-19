@@ -105,6 +105,7 @@ class Unit:
     tmpfs_mounts: tuple[TmpfsMount, ...] = ()
     shm_size_bytes: int | None = None
     devices: frozenset[TaskDevice] = frozenset()
+    udp_ports: tuple[int, ...] = ()  # declared UDP ports: peer UDP traffic the task expects to work
     extra_hosts: Mapping[str, str] = field(default_factory=dict)  # name -> literal address
 
     @property

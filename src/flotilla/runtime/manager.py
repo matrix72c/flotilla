@@ -12,15 +12,16 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from flotilla.config import FlotillaConfig
-from flotilla.core import labels, network
+from flotilla.core import labels
+from flotilla.core.admission import admission_errors
 from flotilla.core.anchor import Anchor
 from flotilla.core.deletion import Deleter
 from flotilla.core.plan import TrialPlan
-from flotilla.core.reaper import CleanupRecord, Reaper
+from flotilla.core.reaper import Reaper
 from flotilla.core.runtime import Monitor
 from flotilla.core.trial import Ready, Trial
 from flotilla.core.volumes import RESERVED_KEYS
-from flotilla.core.waiting import RateLimiter
+from flotilla.core.waiting import RateLimiter, retrieve
 from flotilla.platform.base import (
     WORK_ROOT,
     Clock,
@@ -42,6 +43,7 @@ from flotilla.runtime.types import (
     RunRequest,
     RuntimeEvent,
     ServiceInfo,
+    require_timeout,
 )
 from flotilla.runtime.workspace import WorkspaceStore
 from flotilla.share.release import ReleaseError, check_release, ensure_builtin_release
@@ -84,7 +86,6 @@ class Manager:
         self.reaper = Reaper(self.platform, self.clock, self.anchor, self.deleter, cfg.reaper_settings())
         self.runs: dict[str, Run] = {}
         self.reaping: dict[str, asyncio.Task[None]] = {}
-        self.failures: dict[str, CleanupRecord] = {}
         self.failed_runs: dict[str, Run] = {}
         self.cleaned = 0
         self.reserved = 1  # anchor; each task reserves two instances per service for the startup retry
@@ -165,39 +166,8 @@ class Manager:
             raise invalid("the plan's workspace root is not the workspace this attempt owns")
         if set(request.exec_env) - set(plan.units):
             raise invalid("exec_env contains unknown services")
-        members = network.link_members(plan)
-        caps = self.platform.caps
-        for name, unit in plan.units.items():
-            try:
-                caps.require_filesystem(
-                    unit.readonly_rootfs,
-                    unit.tmpfs_mounts,
-                    privileged=unit.privileged_runtime,
-                    memory=unit.resources.memory,
-                    volume_paths=tuple(m.target for m in unit.mounts)
-                    + tuple(m.mount_path for m in plan.external_mounts.get(name, ()))
-                    + tuple(m.mount_path for m in plan.workspace_mounts.get(name, ())),
-                    shm_size_bytes=unit.shm_size_bytes,
-                )
-                if unit.readonly_rootfs and not caps.shared_volume:
-                    raise ValueError("readonly_rootfs requires shared storage for framework scratch space")
-            except ValueError as exc:
-                raise invalid(f"{name}: {exc}") from exc
-        if network.topology(plan) is not None and (not caps.link or len(members) > caps.link_max_members):
-            raise invalid("deployment cannot connect this task's services")
-        if (any(plan.external_mounts.values()) or any(plan.workspace_mounts.values())) and not caps.shared_volume:
-            raise invalid("deployment does not support external shared volumes")
-        if plan.volumes and not caps.shared_volume:
-            raise invalid("deployment does not support shared trial volumes")
-        if any(unit.privileged for unit in plan.units.values()) and not caps.privileged_runtime:
-            raise invalid("deployment does not support privileged services")
-        for name, unit in plan.units.items():
-            if missing := sorted(unit.devices - caps.devices):
-                raise invalid(f"{name}: deployment does not support devices {missing}")
-        if (request.disable_internet or set(plan.units) - plan.external_units) and not caps.supports_no_network:
-            raise invalid("no-network requires deny-all egress with only declared cluster DNS exceptions")
-        if set(plan.units) - members and not caps.supports_network_none:
-            raise invalid("network_mode none requires inbound isolation or sandbox ingress enforcement")
+        for error in admission_errors(plan, self.platform.caps, disable_internet=request.disable_internet):
+            raise invalid(error)
         return plan
 
     async def open(self, eid: str, request: RunRequest, *, admission_s: float, startup_s: float) -> EnvironmentInfo:
@@ -379,7 +349,7 @@ class Manager:
 
     async def terminate(self, eid: str, service: str, timeout: float) -> None:
         """Permanently terminate a single owned sandbox, confirming deletion."""
-        _timeout(timeout)
+        require_timeout(timeout)
         run = self.get(eid)
         if service not in run.plan.units:
             raise KeyError(service)
@@ -410,7 +380,7 @@ class Manager:
                     raise
 
             task = asyncio.create_task(finish())
-            task.add_done_callback(_retrieve_termination)
+            task.add_done_callback(retrieve)
             run.terminations[service] = task
         await asyncio.shield(run.terminations[service])
 
@@ -495,12 +465,11 @@ class Manager:
         record = await self.reaper.wait(eid)
         if record.clean:
             self.reaper.completed.pop(eid)
-            self.failures.pop(eid, None)
             self.failed_runs.pop(eid, None)
             self.cleaned += 1
             self.reserved -= run.reservation
         else:
-            self.failures[eid] = record
+            # The not-clean record stays in `reaper.completed` (see `reaper.unresolved`); only the run is ours.
             self.failed_runs[eid] = run
         self.emit(
             "cleanup_finished",
@@ -515,8 +484,8 @@ class Manager:
 
     async def wait_release(self, eid: str, timeout: float) -> CleanupReport:
         """Wait only for this environment; cancellation never cancels its reaper."""
-        _timeout(timeout)
-        if eid in self.failures and eid not in self.reaping and not self.closing:
+        require_timeout(timeout)
+        if eid in self.failed_runs and eid not in self.reaping and not self.closing:
             self.reaper.retry(eid)
             self.reaping[eid] = asyncio.create_task(self._finish_release(eid, self.failed_runs[eid]))
         await self.release(eid)
@@ -531,7 +500,7 @@ class Manager:
         return report
 
     def report(self, ids: set[str] | None = None) -> CleanupReport:
-        records = dict(self.failures)
+        records = dict(self.reaper.unresolved)
         for eid in self.reaping:
             if self.reaper.is_tracking(eid) or eid in self.reaper.completed:
                 records[eid] = self.reaper.snapshot(eid)
@@ -553,15 +522,15 @@ class Manager:
         await self.workspaces.remove(wid)
 
     async def drain(self, timeout: float) -> CleanupReport:
-        _timeout(timeout)
-        ids = set(self.reaping) | set(self.failures)
+        require_timeout(timeout)
+        ids = set(self.reaping) | set(self.failed_runs)
         tasks = tuple(self.reaping.values())
         if tasks:
             await asyncio.wait(tasks, timeout=timeout)
         return self.report(ids)
 
     async def close(self, timeout: float) -> CleanupReport:
-        _timeout(timeout)
+        require_timeout(timeout)
         if self.closing_task is None:
             self.closing_task = asyncio.create_task(self._close(timeout))
         return await asyncio.shield(self.closing_task)
@@ -632,13 +601,3 @@ class Manager:
         except Exception as exc:
             # Connection closure must not replace the resource cleanup report.
             logging.getLogger(__name__).warning("platform connection close failed (%s)", type(exc).__name__)
-
-
-def _timeout(value: float) -> None:
-    if not math.isfinite(value) or value <= 0:
-        raise ValueError("timeout must be finite and positive")
-
-
-def _retrieve_termination(task: asyncio.Task[None]) -> None:
-    if not task.cancelled():
-        task.exception()

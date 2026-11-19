@@ -23,7 +23,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
-from flotilla.compose.image_meta import parse_config
+from flotilla.compose.image_meta import _identity, parse_config
 from flotilla.compose.layout import Layout, classify
 from flotilla.compose.model import MAIN, ImageMeta, Project, Service
 from flotilla.compose.task import HarborTask
@@ -81,9 +81,6 @@ def plan_task(
     configs: ImageConfigSource,
     resources: Mapping[str, Resources],
     overlay: AgentOverlay = NO_OVERLAY,
-    external_mounts: Mapping[str, tuple[Any, ...]] | None = None,
-    workspace_mounts: Mapping[str, tuple[Any, ...]] | None = None,
-    workspace_root: str | None = None,
 ) -> TrialPlan:
     """Resolve `task` into a validated `TrialPlan`. Pure apart from `configs`, which reads a registry."""
     project = task.project
@@ -128,9 +125,6 @@ def plan_task(
             for name, svc in project.services.items()
             if any(not project.networks[net].internal for net in svc.networks)
         ),
-        external_mounts={name: tuple(mounts) for name, mounts in (external_mounts or {}).items()},
-        workspace_mounts={name: tuple(mounts) for name, mounts in (workspace_mounts or {}).items()},
-        workspace_root=workspace_root,
     )
     try:
         plan.validate()
@@ -165,22 +159,24 @@ def _meta(service: str, svc: Service, configs: ImageConfigSource) -> ImageMeta:
     if svc.image is None:
         raise PlanError(f"service {service} declares no image")
     config = configs.image_config(svc.image)
-    identity = svc.user if svc.user is not None else str(config.get("User") or "0:0")
-    if identity in ROOT_USERS:
-        identity = "0:0"
-    user, _, group = identity.partition(":")
-    if not user.isdigit() or (group and not group.isdigit()):
-        raise PlanError(
-            f"service {service} runs as {identity!r}: a named user or group would have to be looked up inside "
-            "the image; declare a numeric uid[:gid] with Compose user"
-        )
     image_user = str(config.get("User") or "")
     if image_user not in ROOT_USERS:
         raise PlanError(
             f"service {service} has image USER {image_user!r}: the exec daemon is the sandbox entrypoint and "
             "needs a root image; publish it with USER 0:0 and declare the application identity with Compose user"
         )
-    return parse_config({**config, "User": identity})
+    identity = svc.user if svc.user is not None else image_user or "0:0"
+    if identity in ROOT_USERS:
+        identity = "0:0"
+    try:
+        uid, gid = _identity(identity)
+    except ValueError:
+        raise PlanError(
+            f"service {service} runs as {identity!r}: a named user or group would have to be looked up inside "
+            "the image; declare a numeric uid[:gid] with Compose user"
+        ) from None
+    # The image USER is root (checked above), so it is parsed as 0:0 and the identity replaces it.
+    return replace(parse_config({**config, "User": "0:0"}), uid=uid, gid=gid)
 
 
 def _overlay(env: Mapping[str, str], overlay: Mapping[str, str]) -> dict[str, str]:
@@ -236,6 +232,7 @@ def _unit(
         tmpfs_mounts=tmpfs,
         shm_size_bytes=svc.shm_size_bytes,
         devices=frozenset(svc.devices),
+        udp_ports=svc.udp_ports,
         extra_hosts=dict(svc.extra_hosts),
     )
 

@@ -12,7 +12,7 @@ from flotilla.core.anchor import Anchor
 from flotilla.core.deletion import Deleter, DeleteScope
 from flotilla.core.errors import at_stage
 from flotilla.core.volumes import launch_key
-from flotilla.core.waiting import Aborted, Backoff, RateLimiter, step_towards, wait_all, within
+from flotilla.core.waiting import Aborted, Backoff, RateLimiter, brief, retrieve, step_towards, wait_all, within
 from flotilla.platform.base import (
     Clock,
     ErrorCategory,
@@ -79,7 +79,6 @@ class Reaper:
         self._create_rate = RateLimiter(clock, settings.create_rate)
         self._trials: dict[str, _Trial] = {}
         self._reaping: set[asyncio.Task[None]] = set()
-        self._failed: set[str] = set()
         self._closing = False
         self.completed: dict[str, CleanupRecord] = {}
 
@@ -107,7 +106,7 @@ class Reaper:
             raise ValueError(f"spec.labels must contain {expected}, got {dict(spec.labels)}")
         task = asyncio.create_task(self._create(trial, unit, spec))
         trial.inflight.add(task)
-        task.add_done_callback(_retrieve)
+        task.add_done_callback(retrieve)
         task.add_done_callback(trial.inflight.discard)
         return await asyncio.shield(task)
 
@@ -128,6 +127,11 @@ class Reaper:
         task = asyncio.create_task(self._reap(trial))
         self._reaping.add(task)
         task.add_done_callback(self._reaping.discard)
+
+    @property
+    def unresolved(self) -> dict[str, CleanupRecord]:
+        """Finished cleanups that did not fully delete: what a retry or the close report still has to answer for."""
+        return {trial_id: record for trial_id, record in self.completed.items() if not record.clean}
 
     def is_tracking(self, trial_id: str) -> bool:
         """Whether the trial is still tracked (not released, or released but not fully reaped)."""
@@ -201,7 +205,7 @@ class Reaper:
         for trial_id in list(self._trials):
             self.release(trial_id)
         drained = await wait_all(self._clock, set(self._reaping), self._settings.close_timeout_s)
-        clean = drained and not self._failed and not self._anchor.deactivated.is_set()
+        clean = drained and not self.unresolved and not self._anchor.deactivated.is_set()
         if not drained:
             # Cancel in-flight creates too: the platform may have accepted them; leftovers carry launch labels for gc.
             leftover = set(self._reaping) | {t for trial in self._trials.values() for t in trial.inflight}
@@ -351,15 +355,11 @@ class Reaper:
             trial.cleanup.cancel()
             raise
         except Exception as exc:
-            trial.error = _brief(exc)
+            trial.error = brief(exc)
             log.exception("error reaping trial %s", trial.trial_id)
         finally:
             record = self._record(trial, finished=True)
             self.completed[trial.trial_id] = record
-            if record.clean:
-                self._failed.discard(trial.trial_id)
-            else:
-                self._failed.add(trial.trial_id)
             self._trials.pop(trial.trial_id, None)
             trial.done.set()
 
@@ -370,7 +370,7 @@ class Reaper:
                 await self._anchor.remove(key, stage="run")
                 trial.dirs.remove(key)
             except FlotillaError as exc:
-                trial.error = _brief(exc)
+                trial.error = brief(exc)
                 log.warning("failed to remove trial %s directory %s, leaving it to gc: %s", trial.trial_id, key, exc)
                 return
 
@@ -403,14 +403,3 @@ class CleanupRecord:
     @property
     def clean(self) -> bool:
         return self.finished and not (self.instances or self.directories or self.uncertain)
-
-
-def _brief(exc: BaseException, limit: int = 300) -> str:
-    text = f"{type(exc).__name__}: {exc}"
-    return text if len(text) <= limit else text[: limit - 3] + "..."
-
-
-def _retrieve(task: asyncio.Task[object]) -> None:
-    """The reaper handles or logs background task exceptions; retrieve them so asyncio won't say "never retrieved"."""
-    if not task.cancelled():
-        task.exception()
