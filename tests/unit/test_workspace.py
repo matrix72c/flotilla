@@ -13,8 +13,9 @@ import pytest
 
 from flotilla.core.anchor import Anchor, AnchorSettings
 from flotilla.core.plan import ExecContext, TrialPlan, Unit
+from flotilla.native.models import relative_path
 from flotilla.platform.base import ExecOutcomeUnknown, ExecResult, InstanceHandle, ProcessSpec, Resources, SharedVolume
-from flotilla.runtime.workspace import WorkspaceInfo, WorkspaceStore, relative_key
+from flotilla.runtime.workspace import WorkspaceInfo, WorkspaceStore
 from flotilla.testing.config import config
 from flotilla.testing.platform import FakePlatform, ManualClock, SharedTree
 
@@ -29,7 +30,7 @@ def store() -> tuple[WorkspaceStore, Mock]:
 @pytest.mark.parametrize("key", ["", "/tasks/a", "a//b", "a/../b", "a/./b", "a\\b", "a\nb", None])
 def test_relative_key_rejects_ambiguous_paths(key: str | None) -> None:
     with pytest.raises(ValueError):
-        relative_key(key)  # type: ignore[arg-type]  # Exercise invalid runtime input.
+        relative_path(key)  # type: ignore[arg-type]  # Exercise invalid runtime input.
 
 
 @pytest.mark.asyncio

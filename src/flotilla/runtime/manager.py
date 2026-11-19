@@ -17,7 +17,7 @@ from flotilla.core.admission import admission_errors
 from flotilla.core.anchor import Anchor
 from flotilla.core.deletion import Deleter
 from flotilla.core.plan import TrialPlan
-from flotilla.core.reaper import CleanupRecord, Reaper
+from flotilla.core.reaper import Reaper
 from flotilla.core.runtime import Monitor
 from flotilla.core.trial import Ready, Trial
 from flotilla.core.volumes import RESERVED_KEYS
@@ -86,7 +86,6 @@ class Manager:
         self.reaper = Reaper(self.platform, self.clock, self.anchor, self.deleter, cfg.reaper_settings())
         self.runs: dict[str, Run] = {}
         self.reaping: dict[str, asyncio.Task[None]] = {}
-        self.failures: dict[str, CleanupRecord] = {}
         self.failed_runs: dict[str, Run] = {}
         self.cleaned = 0
         self.reserved = 1  # anchor; each task reserves two instances per service for the startup retry
@@ -466,12 +465,11 @@ class Manager:
         record = await self.reaper.wait(eid)
         if record.clean:
             self.reaper.completed.pop(eid)
-            self.failures.pop(eid, None)
             self.failed_runs.pop(eid, None)
             self.cleaned += 1
             self.reserved -= run.reservation
         else:
-            self.failures[eid] = record
+            # The not-clean record stays in `reaper.completed` (see `reaper.unresolved`); only the run is ours.
             self.failed_runs[eid] = run
         self.emit(
             "cleanup_finished",
@@ -487,7 +485,7 @@ class Manager:
     async def wait_release(self, eid: str, timeout: float) -> CleanupReport:
         """Wait only for this environment; cancellation never cancels its reaper."""
         require_timeout(timeout)
-        if eid in self.failures and eid not in self.reaping and not self.closing:
+        if eid in self.failed_runs and eid not in self.reaping and not self.closing:
             self.reaper.retry(eid)
             self.reaping[eid] = asyncio.create_task(self._finish_release(eid, self.failed_runs[eid]))
         await self.release(eid)
@@ -502,7 +500,7 @@ class Manager:
         return report
 
     def report(self, ids: set[str] | None = None) -> CleanupReport:
-        records = dict(self.failures)
+        records = dict(self.reaper.unresolved)
         for eid in self.reaping:
             if self.reaper.is_tracking(eid) or eid in self.reaper.completed:
                 records[eid] = self.reaper.snapshot(eid)
@@ -525,7 +523,7 @@ class Manager:
 
     async def drain(self, timeout: float) -> CleanupReport:
         require_timeout(timeout)
-        ids = set(self.reaping) | set(self.failures)
+        ids = set(self.reaping) | set(self.failed_runs)
         tasks = tuple(self.reaping.values())
         if tasks:
             await asyncio.wait(tasks, timeout=timeout)

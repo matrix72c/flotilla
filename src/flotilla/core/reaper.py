@@ -79,7 +79,6 @@ class Reaper:
         self._create_rate = RateLimiter(clock, settings.create_rate)
         self._trials: dict[str, _Trial] = {}
         self._reaping: set[asyncio.Task[None]] = set()
-        self._failed: set[str] = set()
         self._closing = False
         self.completed: dict[str, CleanupRecord] = {}
 
@@ -128,6 +127,11 @@ class Reaper:
         task = asyncio.create_task(self._reap(trial))
         self._reaping.add(task)
         task.add_done_callback(self._reaping.discard)
+
+    @property
+    def unresolved(self) -> dict[str, CleanupRecord]:
+        """Finished cleanups that did not fully delete: what a retry or the close report still has to answer for."""
+        return {trial_id: record for trial_id, record in self.completed.items() if not record.clean}
 
     def is_tracking(self, trial_id: str) -> bool:
         """Whether the trial is still tracked (not released, or released but not fully reaped)."""
@@ -201,7 +205,7 @@ class Reaper:
         for trial_id in list(self._trials):
             self.release(trial_id)
         drained = await wait_all(self._clock, set(self._reaping), self._settings.close_timeout_s)
-        clean = drained and not self._failed and not self._anchor.deactivated.is_set()
+        clean = drained and not self.unresolved and not self._anchor.deactivated.is_set()
         if not drained:
             # Cancel in-flight creates too: the platform may have accepted them; leftovers carry launch labels for gc.
             leftover = set(self._reaping) | {t for trial in self._trials.values() for t in trial.inflight}
@@ -356,10 +360,6 @@ class Reaper:
         finally:
             record = self._record(trial, finished=True)
             self.completed[trial.trial_id] = record
-            if record.clean:
-                self._failed.discard(trial.trial_id)
-            else:
-                self._failed.add(trial.trial_id)
             self._trials.pop(trial.trial_id, None)
             trial.done.set()
 
