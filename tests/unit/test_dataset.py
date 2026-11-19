@@ -17,9 +17,9 @@ from pathlib import Path
 import pytest
 
 from flotilla.config import Storage
-from flotilla.core.plan import ExecContext, Mount, TrialPlan, TrialVolume, Unit
+from flotilla.models.plan import ExecContext, Mount, TrialPlan, TrialVolume, Unit
+from flotilla.models.verification import check_against_plans
 from flotilla.native import Artifact, Dataset, DatasetError, Verification, datasets, platform_key
-from flotilla.native.models import check_against_plans
 from flotilla.platform.base import Resources
 
 IMAGE = "example.invalid/runtime@sha256:" + "a" * 64

@@ -15,16 +15,13 @@ from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from flotilla.core.plan import TaskSource
-from flotilla.native.models import relative_path
+from flotilla.models.dataset import RESERVED as RESERVED
+from flotilla.models.paths import relative_path
+from flotilla.models.plan import TaskSource
 
 #: What makes a directory a task. Named here rather than imported from the parser, because finding
 #: tasks must not need Compose: this module also runs installed inside a sandbox.
 TASK_FILE = "task.toml"
-
-#: Storage keys a dataset may not claim: the launch tree and the shared tools are flotilla's own.
-#: Spelled out rather than imported, so finding tasks does not pull the orchestration core in.
-RESERVED = frozenset({"launches", "share"})
 
 
 class DatasetError(ValueError):

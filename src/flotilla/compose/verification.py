@@ -14,7 +14,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from flotilla.native.models import Artifact, Verification
+from flotilla.models.verification import Artifact, Verification
 
 #: Where the verification script lives inside the task directory, and where it is mounted.
 TESTS_DIR = "tests"

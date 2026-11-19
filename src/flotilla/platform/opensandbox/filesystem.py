@@ -6,8 +6,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import Any, Literal
 
+from flotilla.models.filesystem import memory_bytes
 from flotilla.platform.base import Capabilities, FilesystemLimits, FilesystemState, InstanceSpec, TmpfsMount
-from flotilla.platform.filesystem import memory_bytes
 
 FilesystemProtocol = Literal["upstream", "sandbox-system-v1"]
 #: Internal `/dev/shm` size extension (Kubernetes quantity, at most the requested memory). Managed per instance.

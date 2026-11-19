@@ -12,10 +12,10 @@ from harbor.models.task.config import TaskConfig
 
 from flotilla.compose.task import TASK_FILE
 from flotilla.compose.verification import artifacts_of, verification_of
-from flotilla.core.plan import TaskSource, TrialPlan
 from flotilla.integrations.harbor_source import task_environments
-from flotilla.native.models import Artifact, Verification, check_against_plans
-from flotilla.platform.base import SharedVolume
+from flotilla.models.plan import TaskSource, TrialPlan
+from flotilla.models.platform import SharedVolume
+from flotilla.models.verification import Artifact, Verification, check_against_plans
 from flotilla.runtime.types import OpenOptions
 from flotilla.runtime.workspace import Workspace
 

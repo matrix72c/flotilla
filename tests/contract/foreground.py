@@ -21,8 +21,8 @@ from flotilla.config import FlotillaConfig, Network
 from flotilla.core import labels
 from flotilla.core.anchor import Anchor
 from flotilla.core.deletion import Deleter
-from flotilla.core.plan import ExecContext, TrialPlan, Unit
-from flotilla.core.plan import Network as PlanNetwork
+from flotilla.models.plan import ExecContext, TrialPlan, Unit
+from flotilla.models.plan import Network as PlanNetwork
 from flotilla.platform.base import ErrorCategory, FlotillaError, Resources
 from flotilla.platform.clock import SystemClock
 from flotilla.platform.opensandbox import build

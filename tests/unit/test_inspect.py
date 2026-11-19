@@ -7,8 +7,8 @@ from pathlib import Path
 import pytest
 
 from flotilla.config import FlotillaConfig
-from flotilla.core.plan import TaskSource
 from flotilla.inspect import inspect_source, sources_of
+from flotilla.models.plan import TaskSource
 from flotilla.native.dataset import DatasetError
 from flotilla.testing.config import config
 from flotilla.testing.planning import APP, DIGEST2, FakeConfigs, _task

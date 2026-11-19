@@ -12,7 +12,9 @@ import pytest_asyncio
 from flotilla.core import labels
 from flotilla.core.anchor import Anchor, AnchorSettings
 from flotilla.core.deletion import Deleter
-from flotilla.core.plan import (
+from flotilla.core.reaper import Reaper, ReaperSettings
+from flotilla.core.trial import Trial, TrialSettings
+from flotilla.models.plan import (
     Dependency,
     ExecContext,
     Healthcheck,
@@ -22,8 +24,6 @@ from flotilla.core.plan import (
     TrialVolume,
     Unit,
 )
-from flotilla.core.reaper import Reaper, ReaperSettings
-from flotilla.core.trial import Trial, TrialSettings
 from flotilla.platform.base import (
     ErrorCategory,
     ExecResult,

@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 from flotilla.compose.plan_task import AgentOverlay, ImageConfigSource, plan_task
 from flotilla.compose.task import HarborTask, load_task
 from flotilla.config import FlotillaConfig
-from flotilla.core.plan import TaskSource, TrialPlan
+from flotilla.models.plan import TaskSource, TrialPlan
 from flotilla.platform.base import Resources
 from flotilla.registry import ImageConfigs
 from flotilla.resources import cpu, memory

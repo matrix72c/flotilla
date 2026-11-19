@@ -14,8 +14,8 @@ from flotilla.compose.model import Project
 from flotilla.compose.plan_task import plan_task
 from flotilla.compose.task import HarborTask
 from flotilla.config import FlotillaConfig, ResourceDefaults
-from flotilla.core.plan import TaskSource, TrialPlan
 from flotilla.integrations.harbor_source import task_environments
+from flotilla.models.plan import TaskSource, TrialPlan
 from flotilla.platform.base import Capabilities
 
 DIGEST = "sha256:" + "ab" * 32

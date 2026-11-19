@@ -13,8 +13,8 @@ from flotilla.compose.normalize import normalize
 from flotilla.compose.task import load_task
 from flotilla.config import FlotillaConfig
 from flotilla.core.admission import admission_errors
+from flotilla.models.filesystem import memory_bytes, unsized_tmpfs_bytes
 from flotilla.platform.base import Capabilities, TmpfsMount
-from flotilla.platform.filesystem import memory_bytes, unsized_tmpfs_bytes
 from flotilla.platform.opensandbox.filesystem import INTERNAL_LIMITS, parse_effective
 from flotilla.testing.config import config_data
 from flotilla.testing.planning import APP, _caps, _task, plan, plan_project

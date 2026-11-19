@@ -25,7 +25,7 @@ from flotilla.config import FlotillaConfig
 from flotilla.core import labels
 from flotilla.core.anchor import Anchor
 from flotilla.core.deletion import Deleter
-from flotilla.core.plan import Healthcheck, Mount, TrialPlan, TrialVolume
+from flotilla.models.plan import Healthcheck, Mount, TrialPlan, TrialVolume
 from flotilla.platform.base import ErrorCategory, FlotillaError
 from flotilla.platform.clock import SystemClock
 from flotilla.platform.opensandbox import build

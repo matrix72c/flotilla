@@ -7,7 +7,7 @@ import pytest
 from flotilla.compose.normalize import normalize
 from flotilla.config import FlotillaConfig
 from flotilla.core.anchor import Anchor
-from flotilla.core.plan import Unit
+from flotilla.models.plan import Unit
 from flotilla.platform.base import Capabilities, ExternalPolicy, Resources, SharedVolume
 from flotilla.platform.opensandbox import OpenSandboxPlatform
 from flotilla.testing.config import config, config_data

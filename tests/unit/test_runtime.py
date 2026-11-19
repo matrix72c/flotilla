@@ -10,8 +10,8 @@ import pytest_asyncio
 
 from flotilla.core import labels
 from flotilla.core.anchor import Anchor, AnchorSettings
-from flotilla.core.plan import ExecContext, RestartPolicy, TrialPlan, Unit
 from flotilla.core.runtime import Monitor, MonitorSettings
+from flotilla.models.plan import ExecContext, RestartPolicy, TrialPlan, Unit
 from flotilla.platform.base import (
     Capabilities,
     ErrorCategory,

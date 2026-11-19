@@ -8,8 +8,8 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from flotilla.core.plan import ExecContext, TrialPlan, Unit
-from flotilla.native.models import relative_path
+from flotilla.models.paths import relative_path
+from flotilla.models.plan import ExecContext, TrialPlan, Unit
 from flotilla.platform.base import Resources, SharedVolume
 from flotilla.runtime.workspace import WorkspaceInfo, WorkspaceStore
 from flotilla.testing.config import config

@@ -6,7 +6,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Literal
 
-from flotilla.platform.base import TaskDevice, TmpfsMount
+from flotilla.models.filesystem import TmpfsMount
+from flotilla.models.platform import TaskDevice
 
 Kind = Literal["note", "reject"]
 Condition = Literal["service_started", "service_healthy", "service_completed_successfully"]

@@ -25,8 +25,8 @@ from flotilla.compose.model import (
     VolumeMount,
 )
 from flotilla.compose.paths import valid_name
-from flotilla.platform.base import TASK_DEVICE_PATHS, TaskDevice, TmpfsMount
-from flotilla.platform.filesystem import memory_bytes, validate_mounts
+from flotilla.models.filesystem import TmpfsMount, memory_bytes, validate_mounts
+from flotilla.models.platform import TASK_DEVICE_PATHS, TaskDevice
 from flotilla.units import parse_duration
 
 DEFAULT_NETWORK = "default"

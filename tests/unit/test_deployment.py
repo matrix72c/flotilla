@@ -13,8 +13,8 @@ import pytest
 
 from flotilla import Flotilla, OpenOptions
 from flotilla.config import FlotillaConfig
-from flotilla.core.plan import ExecContext, TaskSource, TrialPlan, Unit
 from flotilla.deployment import Deployment, RuntimeLayers, memory_gib
+from flotilla.models.plan import ExecContext, TaskSource, TrialPlan, Unit
 from flotilla.native.runtime import NativeAttempt
 from flotilla.platform.base import Resources
 from flotilla.testing.config import importable

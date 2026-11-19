@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from flotilla.core.plan import TrialPlan
+from flotilla.models.plan import TrialPlan
 from flotilla.platform.base import ExternalPolicy, Topology
 
 _NONE = ExternalPolicy(mode="none")

@@ -6,8 +6,9 @@ Runtime exports stay lazy so CPU-side metadata use does not pull the platform in
 
 from typing import Any
 
+from flotilla.models.verification import Artifact, Verification
+
 from .dataset import Dataset, DatasetError, datasets, platform_key
-from .models import Artifact, Verification
 
 __all__ = [
     "Artifact",

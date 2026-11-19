@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from flotilla.core.plan import TrialPlan
+from flotilla.models.plan import TrialPlan
 
 BEGIN = "# BEGIN flotilla"
 END = "# END flotilla"

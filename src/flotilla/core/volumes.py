@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import posixpath
 
-from flotilla.core.plan import Mount, TrialPlan
+from flotilla.models.plan import Mount, TrialPlan
 from flotilla.platform.base import SharedVolume
 
 LAUNCHES = "launches"

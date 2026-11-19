@@ -7,7 +7,7 @@ from dataclasses import replace
 import pytest
 
 from flotilla.core import hosts, network, volumes
-from flotilla.core.plan import (
+from flotilla.models.plan import (
     Dependency,
     ExecContext,
     Healthcheck,

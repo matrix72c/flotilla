@@ -19,8 +19,8 @@ from typing import Any
 
 from flotilla.config import FlotillaConfig
 from flotilla.core.anchor import Anchor
-from flotilla.core.plan import TaskSource, TrialPlan
 from flotilla.environment import read_env_file
+from flotilla.models.plan import TaskSource, TrialPlan
 from flotilla.native.dataset import Dataset, platform_key
 from flotilla.platform.base import SharedVolume
 from flotilla.resources import memory

@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 
 from flotilla import Environment, Flotilla, OpenOptions
-from flotilla.core.plan import TrialPlan
+from flotilla.models.plan import TrialPlan
 
 
 @dataclass

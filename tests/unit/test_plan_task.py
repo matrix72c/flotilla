@@ -17,7 +17,7 @@ import pytest
 from flotilla.compose.plan_task import NO_OVERLAY, AgentOverlay, PlanError, plan_task
 from flotilla.compose.task import load_task
 from flotilla.config import ResourceDefaults
-from flotilla.core.plan import TaskSource
+from flotilla.models.plan import TaskSource
 from flotilla.platform.base import Resources
 
 APP = "r.io/ns/app@sha256:" + "a" * 64

@@ -8,16 +8,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from flotilla.platform.base import (
-    RESERVED_MOUNTS,
-    Resources,
-    SharedVolume,
-    StorageRoot,
-    TaskDevice,
-    TmpfsMount,
-    overlaps,
-    validate_mounts,
-)
+from flotilla.models.filesystem import RESERVED_MOUNTS, TmpfsMount, overlaps, validate_mounts
+from flotilla.models.platform import Resources, SharedVolume, StorageRoot, TaskDevice
 
 Condition = Literal["service_started", "service_healthy", "service_completed_successfully"]
 RestartPolicy = Literal["no", "always", "unless-stopped", "on-failure"]
