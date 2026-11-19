@@ -160,6 +160,7 @@ forbidden_modules = [
   "flotilla.inspect",
   "flotilla.testing",
   "flotilla.deployment",
+  "flotilla.native",
 ]
 
 [[tool.importlinter.contracts]]
@@ -167,6 +168,34 @@ name = "platform does not depend on core"
 type = "forbidden"
 source_modules = ["flotilla.platform"]
 forbidden_modules = ["flotilla.core"]
+
+# The shared vocabulary is the bottom of the graph: models holds the values every layer passes
+# around, so it may not depend on any of them.
+[[tool.importlinter.contracts]]
+name = "models is the bottom of the graph"
+type = "forbidden"
+source_modules = ["flotilla.models"]
+forbidden_modules = [
+  "flotilla.platform",
+  "flotilla.backends",
+  "flotilla.core",
+  "flotilla.compose",
+  "flotilla.scan",
+  "flotilla.share",
+  "flotilla.busybox",
+  "flotilla.capabilities",
+  "flotilla.config",
+  "flotilla.probe",
+  "flotilla.integrations",
+  "flotilla.cli",
+  "flotilla.runtime",
+  "flotilla.inspect",
+  "flotilla.testing",
+  "flotilla.deployment",
+  "flotilla.native",
+  "flotilla.registry",
+  "flotilla.environment",
+]
 
 # These may read capability report types from platform.base but never touch a backend; without a
 # backend they cannot construct a Platform instance.
@@ -181,7 +210,35 @@ forbidden_modules = [
   "flotilla.platform.opensandbox",
 ]
 
-# Internal packages below stay free of integrations; runtime additionally may not import prepare.
+# Compose is pure task resolution: models and leaf utilities in, plans out. It owns no state
+# and must not reach the platform, the runtime, or the layers above it, so planning stays
+# something a caller can do with no client, platform instance, or event loop.
+[[tool.importlinter.contracts]]
+name = "compose resolves tasks and nothing else"
+type = "forbidden"
+source_modules = ["flotilla.compose"]
+forbidden_modules = [
+  "flotilla.platform",
+  "flotilla.core",
+  "flotilla.runtime",
+  "flotilla.native",
+  "flotilla.backends",
+  "flotilla.scan",
+  "flotilla.share",
+  "flotilla.busybox",
+  "flotilla.capabilities",
+  "flotilla.config",
+  "flotilla.probe",
+  "flotilla.integrations",
+  "flotilla.cli",
+  "flotilla.inspect",
+  "flotilla.testing",
+  "flotilla.deployment",
+  "flotilla.registry",
+  "flotilla.environment",
+]
+
+# Internal packages below stay free of the consumer surface.
 [[tool.importlinter.contracts]]
 name = "integrations, probe, cli, and testing are outermost and not imported by internal packages"
 type = "forbidden"
@@ -193,6 +250,7 @@ source_modules = [
   "flotilla.share",
   "flotilla.capabilities",
   "flotilla.config",
+  "flotilla.native",
 ]
 forbidden_modules = [
   "flotilla.integrations",
@@ -207,6 +265,26 @@ name = "runtime does not import adapters"
 type = "forbidden"
 source_modules = ["flotilla.runtime"]
 forbidden_modules = ["flotilla.integrations", "flotilla.cli", "flotilla.probe", "flotilla.testing", "flotilla.deployment"]
+
+# The runtime opens and manages environments; it does not resolve task directories or grade
+# attempts, which is what compose and native are for. Config is allowed between them and plans
+# lazily, so only direct imports are checked here.
+[[tool.importlinter.contracts]]
+name = "runtime does not plan or grade tasks"
+type = "forbidden"
+source_modules = ["flotilla.runtime"]
+forbidden_modules = ["flotilla.compose", "flotilla.native"]
+allow_indirect_imports = true
+
+# The attempt layer composes the runtime and compose; everything platform-side goes through the
+# runtime's manager, everything shared through models. The runtime itself sits below core and
+# config, so only direct imports are checked here.
+[[tool.importlinter.contracts]]
+name = "native drives the runtime, not the platform"
+type = "forbidden"
+source_modules = ["flotilla.native"]
+forbidden_modules = ["flotilla.platform", "flotilla.core"]
+allow_indirect_imports = true
 
 # The runtime creates sandboxes; checking a dataset against a deployment is a separate job.
 [[tool.importlinter.contracts]]
