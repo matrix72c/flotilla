@@ -12,7 +12,7 @@ The extra pins [Harbor d78eb9c262e7074944106d16bff0ba6426bb2d34](https://github.
 
 ## Prepare once, publish static files
 
-Use [Quick start](Quick_Start.md) to probe the deployment and run host-side `select` then `prepare`. The preparation environment needs the pinned official Compose CLI and configured image tooling. Registry credentials belong only there. Execution requires a compatible installed Anchor and shared tools, **not** Harbor/Compose/build tooling in the Anchor.
+Use [Quick start](Quick_Start.md) to probe the deployment and run host-side `select` then `prepare`. The preparation environment needs configured image tooling; Compose files are read in-process, with no Compose CLI. Registry credentials belong only there. Execution requires a compatible installed Anchor and shared tools, **not** Harbor/Compose/build tooling in the Anchor.
 
 The output is a portable directory containing `dataset.jsonl` and `tasks/<key>/`. Publish the complete directory through your existing storage tools, preserving file modes. Bind both its local readable copy and its platform copy:
 

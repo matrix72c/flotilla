@@ -6,7 +6,6 @@ import tomllib
 from collections.abc import Mapping
 from pathlib import Path
 
-from flotilla.compose.adapter import ComposeConfigAdapter, ComposeToolError
 from flotilla.compose.paths import confined
 from flotilla.compose.task import HarborTask, TaskError, load_environment
 
@@ -14,7 +13,6 @@ from flotilla.compose.task import HarborTask, TaskError, load_environment
 def task_environments(
     path: Path,
     *,
-    compose_adapter: ComposeConfigAdapter,
     compose_files: tuple[Path, ...] | None = None,
     compose_environment: Mapping[str, str] | None = None,
 ) -> list[HarborTask]:
@@ -22,11 +20,10 @@ def task_environments(
     try:
         return _task_environments(
             path,
-            compose_adapter=compose_adapter,
             compose_files=compose_files,
             compose_environment=compose_environment,
         )
-    except (TaskError, ComposeToolError):
+    except TaskError:
         raise
     except (ValueError, OSError, RuntimeError) as exc:
         raise TaskError(f"Harbor environment definition: {exc}") from exc
@@ -35,7 +32,6 @@ def task_environments(
 def _task_environments(
     path: Path,
     *,
-    compose_adapter: ComposeConfigAdapter,
     compose_files: tuple[Path, ...] | None,
     compose_environment: Mapping[str, str] | None,
 ) -> list[HarborTask]:
@@ -51,7 +47,6 @@ def _task_environments(
             TaskPaths(path).environment_dir,
             config.environment.model_dump(mode="json", exclude_unset=True),
             name=path.name,
-            compose_adapter=compose_adapter,
             compose_files=compose_files,
             compose_environment=compose_environment,
         )
@@ -66,7 +61,6 @@ def _task_environments(
                 definition.directory,
                 definition.config.model_dump(mode="json", exclude_unset=True),
                 name=path.name,
-                compose_adapter=compose_adapter,
                 compose_files=compose_files,
                 compose_environment=compose_environment,
             )

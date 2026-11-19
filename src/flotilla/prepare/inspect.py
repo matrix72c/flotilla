@@ -6,7 +6,6 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from flotilla.compose.adapter import ComposeConfigAdapter
 from flotilla.compose.task import HarborTask, load_task
 from flotilla.config import FlotillaConfig
 from flotilla.scan import scan_task
@@ -22,8 +21,8 @@ class EnvironmentInspection:
     resources: dict[str, dict[str, str]]
 
 
-def main_only(path: Path, *, compose_adapter: ComposeConfigAdapter) -> list[HarborTask]:
-    return [load_task(path, compose_adapter=compose_adapter)]
+def main_only(path: Path) -> list[HarborTask]:
+    return [load_task(path)]
 
 
 def inspect(
@@ -36,8 +35,7 @@ def inspect(
     Loading uses the deployment's pinned Compose tool, so findings and resources
     match what preparation would compute for the same task.
     """
-    adapter = ComposeConfigAdapter(command=cfg.prepare.compose_command, expected_version=cfg.prepare.compose_version)
-    return tuple(inspect_task(cfg, task) for task in environments(Path(path).resolve(), compose_adapter=adapter))
+    return tuple(inspect_task(cfg, task) for task in environments(Path(path).resolve()))
 
 
 def inspect_task(cfg: FlotillaConfig, task: HarborTask) -> EnvironmentInspection:

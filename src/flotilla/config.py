@@ -340,12 +340,10 @@ class Prepare(_Model):
     concurrency: PositiveInt = 4
     docker_command: tuple[str, ...] = ("docker",)
     workspace_command: tuple[str, ...] = ("python3", "-I", "-m", "flotilla.integrations.workspace")
-    compose_command: tuple[str, ...] = ("docker", "compose")
-    compose_version: str = "2.39.4"
     workspace_timeout: PositiveFloat = 1800.0
     export_timeout: PositiveFloat = 600.0  # per `docker cp` of an image volume's initial content
 
-    @field_validator("docker_command", "workspace_command", "compose_command")
+    @field_validator("docker_command", "workspace_command")
     @classmethod
     def _command(cls, value: tuple[str, ...]) -> tuple[str, ...]:
         return _argv(value)

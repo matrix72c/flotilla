@@ -206,8 +206,6 @@ Host `flotilla prepare` uses these settings to create immutable native releases.
 | `prepare.management_network` | external none | Explicit management-only remote Docker/build and registry destinations; no automatic unrestricted egress |
 | `prepare.management_mounts` | `[]` | Explicit read-only shared-volume mounts for credential/config files, never baked into images or passed to task sandboxes |
 | `prepare.management_env` | `{}` | Nonsecret helper environment such as `DOCKER_HOST` and `DOCKER_CONFIG` paths; credential contents belong in mounted files |
-| `prepare.compose_command` | `["docker", "compose"]` | Official Compose argv used for normalization |
-| `prepare.compose_version` | `"2.39.4"` | Required official Compose version |
 | `prepare.export_timeout` | `600` | Seconds allowed for each Docker call that reads an image's `/etc/passwd` and `/etc/group` |
 | `build.pullable_registries` | `[]` | Registries or prefixes the platform can pull from directly; a service whose image comes from anywhere else is rejected |
 | `build.image_replacements` | `{}` | Map of image references to substitutes, e.g. to use an internal mirror. Applied before the `pullable_registries` check |
@@ -225,7 +223,7 @@ nodeSelector = { "example.com/pool" = "metadata" }
 
 These are operator-owned deployment settings, not Compose fields or task runtime parameters. The internal profile is closed (`default` or `management`); selecting it does not grant task privileged permission, and combining management with `privileged=True` is rejected. Ordinary task, probe, bootstrap and GC requests retain their existing extensions and resource allocations. Management extensions may override global deployment extensions but cannot set Flotilla-managed placement-group or shared-memory keys.
 
-The management image still comes from `reaper.anchor_image`, and the anchor retains its explicit entrypoint. Metadata and resource inspection run `compose config` only; they need no Docker daemon in the anchor.
+The management image still comes from `reaper.anchor_image`, and the anchor retains its explicit entrypoint. Metadata and resource inspection only read the task's Compose files in-process; they run no tool and need no Docker daemon in the anchor.
 
 Management-only extensions/profile/resources are excluded from the task capability fingerprint because probes do not use them. Record separate management diagnostics against the exact management image digest, extensions and resources when changing them.
 

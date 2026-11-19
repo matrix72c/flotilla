@@ -19,10 +19,10 @@ from harbor.trial.trial import Trial
 from flotilla.config import FlotillaConfig
 from flotilla.core import labels
 from flotilla.integrations.harbor import FlotillaEnvironment
+from flotilla.integrations.harbor_source import task_environments
 from flotilla.platform.base import ErrorCategory, FlotillaError, InstanceSpec
 from flotilla.prepared import PreparedEnvironment
 from flotilla.testing.build import prepared_task
-from flotilla.testing.compose import offline_environments as task_environments
 from flotilla.testing.harbor_local import attach_local_files
 from flotilla.testing.platform import FakePlatform, SharedTree
 from flotilla.testing.runtime import deployment as deployment

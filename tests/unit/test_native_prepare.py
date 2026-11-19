@@ -17,7 +17,6 @@ from flotilla.native import ReleaseReader, read_dataset
 from flotilla.platform.base import Capabilities
 from flotilla.prepare import PreparationError, prepare, select
 from flotilla.testing.build import DIGEST, FakeRegistry, _caps, _ctx
-from flotilla.testing.compose import OfflineComposeAdapter
 
 
 def harbor_task(
@@ -50,13 +49,10 @@ def harbor_task(
     return path
 
 
-ADAPTER = OfflineComposeAdapter
-
-
 def _selection(tmp_path: Path, caps: Capabilities | None = None) -> Path:
     out = tmp_path / "selected.jsonl"
     if not out.exists():
-        select(tmp_path / "harbor", caps=caps or _caps(), out=out, compose_adapter=ADAPTER())
+        select(tmp_path / "harbor", caps=caps or _caps(), out=out)
     return out
 
 
@@ -69,7 +65,7 @@ def test_select_writes_rows_and_rejects_unsupported_tasks(tmp_path: Path) -> Non
     harbor_task(root, "nested/deep")
     harbor_task(root, "multi", extra_toml='[[steps]]\nname = "one"\n')
     out, report = tmp_path / "selected.jsonl", tmp_path / "report.json"
-    result = select(root, caps=_caps(), out=out, report=report, compose_adapter=ADAPTER())
+    result = select(root, caps=_caps(), out=out, report=report)
     assert [row.task_key for row in result.rows] == ["nested/deep", "plain"]
     rows = [json.loads(line) for line in out.read_text().splitlines()]
     assert [row["task_key"] for row in rows] == ["nested/deep", "plain"]
@@ -87,12 +83,12 @@ def test_select_zero_selection_and_input_failures_are_fatal(tmp_path: Path) -> N
     root = tmp_path / "harbor"
     harbor_task(root, "multi", extra_toml='[[steps]]\nname = "one"\n')
     with pytest.raises(PreparationError, match="zero tasks"):
-        select(root, caps=_caps(), compose_adapter=ADAPTER())
+        select(root, caps=_caps())
     harbor_task(root, "plain")
     broken = harbor_task(root, "broken")
     (broken / "task.toml").write_text("[[[not toml")  # parser failure, not an unsupported feature
     with pytest.raises(PreparationError, match="selection failed"):
-        select(root, caps=_caps(), report=tmp_path / "r.json", compose_adapter=ADAPTER())
+        select(root, caps=_caps(), report=tmp_path / "r.json")
     reports = json.loads((tmp_path / "r.json").read_text())
     assert next(r for r in reports if r["task_key"] == "broken")["code"] == "input_or_tool_error"
 
@@ -103,7 +99,7 @@ def test_select_rejects_dockerfile_tasks_as_out_of_scope(tmp_path: Path) -> None
     harbor_task(root, "src", image=None, Dockerfile="FROM r.io/base:1\n")
     report = tmp_path / "r.json"
     with pytest.raises(PreparationError, match="zero tasks"):
-        select(root, caps=_caps(), report=report, compose_adapter=ADAPTER())
+        select(root, caps=_caps(), report=report)
     entry = json.loads(report.read_text())[0]
     assert entry["status"] == "rejected"
     assert "building an image is a different job" in entry["reason"]
@@ -114,7 +110,7 @@ def test_select_rejects_multi_step_tasks_as_a_protocol_constraint(tmp_path: Path
     harbor_task(root, "multi", extra_toml='[[steps]]\nname = "one"\n')
     report = tmp_path / "r.json"
     with pytest.raises(PreparationError, match="zero tasks"):  # rejection empties the selection
-        select(root, caps=_caps(), report=report, compose_adapter=ADAPTER())
+        select(root, caps=_caps(), report=report)
     reason = json.loads(report.read_text())[0]["reason"]
     assert "multi-step" in reason and "native protocol" in reason
 
@@ -146,7 +142,6 @@ volumes:
         name="rel",
         report=report,
         context=_ctx(),
-        compose_adapter=ADAPTER(),
     )
     # Complete release layout published by a single rename; staging is gone.
     assert sorted(p.name for p in out.iterdir()) == ["dataset.jsonl", "tasks"]
@@ -212,7 +207,6 @@ def test_prepare_leaves_out_failed_rows_and_reports_every_row(tmp_path: Path) ->
         name="rel",
         report=report,
         context=_ctx(),
-        compose_adapter=ADAPTER(),
     )
     assert (result.prepared, result.failed) == (1, 1)
     assert [row.task for row in read_dataset(out / "dataset.jsonl")] == ["alpha"]
@@ -228,7 +222,7 @@ def test_prepare_publishes_nothing_when_every_row_fails(tmp_path: Path) -> None:
     (broken / "tests" / "test.sh").unlink()
     out, report = tmp_path / "release", tmp_path / "report.json"
     with pytest.raises(PreparationError, match="no release published"):
-        prepare(_selection(tmp_path), out=out, name="rel", report=report, context=_ctx(), compose_adapter=ADAPTER())
+        prepare(_selection(tmp_path), out=out, name="rel", report=report, context=_ctx())
     assert not out.exists() and not list(tmp_path.glob(f".{out.name}-*"))
     assert json.loads(report.read_text())["rows"][0]["status"] == "failed"
 
@@ -243,14 +237,14 @@ def test_prepare_output_collision_and_identical_row_dedup(tmp_path: Path) -> Non
         annotations={"split": "train"},
         parameters={"SEED": "7"},
     )
-    result = prepare([row, row], out=out, name="rel", context=_ctx(), compose_adapter=ADAPTER())
+    result = prepare([row, row], out=out, name="rel", context=_ctx())
     assert len(list((out / "tasks").iterdir())) == 1  # identical rows share one task entry
     rows = read_dataset(out / "dataset.jsonl")
     assert len(rows) == 2
     assert all(r.annotations == {"split": "train"} and r.parameters == {"SEED": "7"} for r in rows)
     assert all(r["status"] == "prepared" for r in result.report)
     with pytest.raises(FileExistsError):
-        prepare([row], out=out, name="rel", context=_ctx(), compose_adapter=ADAPTER())
+        prepare([row], out=out, name="rel", context=_ctx())
 
 
 # ───────────────────────────── non-root source images ─────────────────────────────
@@ -267,7 +261,6 @@ def test_prepare_rejects_a_nonroot_image_instead_of_adapting_it(tmp_path: Path) 
             name="rel",
             report=report,
             context=_ctx(registry=FakeRegistry(user="1000:1001")),
-            compose_adapter=ADAPTER(),
         )
     assert not out.exists()
     reason = next(r for r in json.loads(report.read_text())["rows"] if r["status"] == "failed")["reason"]
@@ -298,7 +291,6 @@ def test_prepare_keeps_tmpfs_mount_paths(tmp_path: Path) -> None:
         out=tmp_path / "release",
         name="rel",
         context=_ctx(caps=enhanced),
-        compose_adapter=ADAPTER(),
     )
     reader = ReleaseReader(result.output)
     task = reader.read_task(read_dataset(result.output / "dataset.jsonl")[0].task)
@@ -306,30 +298,22 @@ def test_prepare_keeps_tmpfs_mount_paths(tmp_path: Path) -> None:
     assert [m.mount_path for m in unit.tmpfs_mounts] == ["/cache", "/scratch"]
 
 
-class _RefusingAdapter(OfflineComposeAdapter):
-    def __init__(self, error: Exception) -> None:
-        super().__init__()
-        object.__setattr__(self, "error", error)
-
-    def load(self, project_dir: Path, **kwargs: Any) -> Any:
-        if project_dir.parent.name == "refused":
-            raise self.error  # type: ignore[attr-defined]
-        return super().load(project_dir, **kwargs)
-
-
-def test_select_reports_tasks_compose_refuses_and_stops_on_tool_failure(tmp_path: Path) -> None:
-    from flotilla.compose.adapter import ComposeToolError
-
+def test_select_reports_the_task_whose_compose_is_refused_and_keeps_the_rest(tmp_path: Path) -> None:
+    """One unreadable task is its own verdict, not a reason to abandon the selection."""
     root = tmp_path / "harbor"
     harbor_task(root, "plain")
-    harbor_task(root, "refused")
-    invalid = _RefusingAdapter(ValueError("official Compose config failed: services.db.volumes must be a array"))
-    result = select(root, caps=_caps(), compose_adapter=invalid)
+    harbor_task(root, "refused", compose="services:\n  db:\n    image: r.io/db:1\n    volumes:\n")
+    result = select(root, caps=_caps())
     assert [row.task_key for row in result.rows] == ["plain"]
     refused = next(r for r in result.report if r["task_key"] == "refused")
     assert (refused["status"], refused["code"]) == ("rejected", "invalid_task")
+
+
+def test_select_fails_when_no_task_is_selectable(tmp_path: Path) -> None:
+    root = tmp_path / "harbor"
+    harbor_task(root, "refused", compose="services:\n  db:\n    image: r.io/db:1\n    volumes:\n")
     with pytest.raises(PreparationError, match="selection failed"):
-        select(root, caps=_caps(), compose_adapter=_RefusingAdapter(ComposeToolError("Compose unavailable")))
+        select(root, caps=_caps())
 
 
 # ───────────────────────────── cache across runs ─────────────────────────────
@@ -364,7 +348,6 @@ def test_prepare_cache_serves_a_second_run_without_reading_images(tmp_path: Path
             name="rel",
             cache=cache,
             context=_ctx(registry=registry, image_accounts=accounts),
-            compose_adapter=ADAPTER(),
         )
         return result, registry
 
@@ -394,7 +377,6 @@ def test_concurrent_tasks_read_a_shared_image_once_and_keep_row_order(tmp_path: 
         name="rel",
         concurrency=len(names),
         context=_ctx(registry=registry),
-        compose_adapter=ADAPTER(),
     )
     assert [row.task for row in read_dataset(tmp_path / "release" / "dataset.jsonl")] == list(names)
     reader = ReleaseReader(tmp_path / "release")

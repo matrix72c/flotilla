@@ -33,10 +33,10 @@ from typing import Any
 
 import pytest
 
-from flotilla.compose.adapter import ComposeConfigAdapter
 from flotilla.compose.model import Finding, Project, Service
 from flotilla.compose.parse import load_project
 from flotilla.compose.task import COMPOSE_FILE, ENV_DIR, TASK_FILE
+from tests.contract.official_compose import load_project as official_load_project
 
 BINARY = os.environ.get("FLOTILLA_TEST_COMPOSE")
 CORPUS = os.environ.get("FLOTILLA_TEST_CORPUS")
@@ -120,13 +120,17 @@ def _finding_differences(official: tuple[Finding, ...], own: tuple[Finding, ...]
 
 
 def compare(label: str, env_dir: Path, **arguments: Any) -> None:
-    """Read `env_dir` both ways and assert the two agree, on the verdict and then on every field."""
+    """Read `env_dir` both ways and assert the two agree, on the verdict and then on every field.
+
+    An `OfficialComposeError` is not caught: a missing or wrong-version executable is a broken
+    comparison, not a disagreement, and must not read as the two paths both refusing the input.
+    """
     assert BINARY is not None
     official_error: Exception | None = None
     own_error: Exception | None = None
     official = own = None
     try:
-        official = ComposeConfigAdapter(command=(BINARY,)).load(env_dir, **arguments)
+        official = official_load_project(env_dir, binary=BINARY, **arguments)
     except (ValueError, OSError) as exc:
         official_error = exc
     try:
@@ -401,6 +405,6 @@ def test_the_dialect_refuses_what_compose_would_resolve_silently(
     }
     # Compose reads it, so this is a choice, not a limitation. If Compose ever starts refusing
     # one of these, the stricter rule has become redundant and the case belongs above.
-    ComposeConfigAdapter(command=(BINARY,)).load(tmp_path, **arguments)
+    official_load_project(tmp_path, binary=BINARY, **arguments)
     with pytest.raises(ValueError):
         load_project(tmp_path, **arguments)

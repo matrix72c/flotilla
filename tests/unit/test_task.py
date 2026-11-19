@@ -9,13 +9,10 @@ from pathlib import Path
 import pytest
 
 from flotilla.cli import main
-from flotilla.compose.task import TaskError, find_tasks
+from flotilla.compose.task import TaskError, find_tasks, load_task
 from flotilla.config import FlotillaConfig
 from flotilla.platform.base import Capabilities
-from flotilla.prepare import inspect as inspect_module
 from flotilla.scan import scan_task
-from flotilla.testing.compose import OfflineComposeAdapter
-from flotilla.testing.compose import offline_task as load_task
 from flotilla.testing.reports import report
 
 COMPOSE = """
@@ -163,7 +160,6 @@ def test_scan_task_merges_task_and_deployment_findings(tmp_path: Path, caps: Cap
 def test_scan_cli_writes_one_line_per_task(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(inspect_module, "ComposeConfigAdapter", OfflineComposeAdapter)
     caps = tmp_path / "caps.json"
     tasks = tmp_path / "tasks"
     _task(tasks, "solo")

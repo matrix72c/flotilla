@@ -15,9 +15,9 @@ import pytest
 
 from flotilla.build.driver import BuildOutcome, build_task
 from flotilla.build.files import ExportError, export_task_files
+from flotilla.compose.task import load_task
 from flotilla.manifest import Manifest
 from flotilla.testing.build import DIGEST, DIGEST2, FakeRegistry, _ctx, _task
-from flotilla.testing.compose import offline_task as load_task
 
 # ───────────────────────────── Exporting task files ─────────────────────────────
 

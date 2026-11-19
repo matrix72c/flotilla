@@ -19,7 +19,6 @@ import pytest
 pytest.importorskip("harbor")
 
 from flotilla.build.driver import build_task
-from flotilla.compose.adapter import COMPOSE_VERSION
 from flotilla.integrations import workspace as compiler
 from flotilla.testing.build import _ctx
 
@@ -61,8 +60,6 @@ def test_stale_native_reads_recover_without_changing_metadata(
     request = {
         "storage_root": str(tmp_path),
         "task_keys": [key],
-        "compose_command": ["unused"],
-        "compose_version": COMPOSE_VERSION,
     }
     expected = compiler.describe_tasks_request(request, resources=resources)
     parse = Mock(wraps=TaskConfig.model_validate_toml)
@@ -255,8 +252,6 @@ def test_batch_rejects_invalid_coordinates_but_defers_unused_payload_validation(
     request = {
         "storage_root": str(tmp_path),
         "task_keys": [source.relative_to(tmp_path).as_posix()],
-        "compose_command": ["unused"],
-        "compose_version": COMPOSE_VERSION,
     }
     expected = compiler.describe_tasks_request(request, resources=resources)
     if kind == "escape":
@@ -317,8 +312,6 @@ def batch_request(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resources: bo
                 "storage_root": str(tmp_path),
                 "workspace": str(workspace),
                 "task_keys": [key],
-                "compose_command": ["docker", "compose"],
-                "compose_version": COMPOSE_VERSION,
             }
         )
     )
@@ -390,7 +383,7 @@ async def test_resource_reader_matches_compiled_reservations(
     from unittest.mock import AsyncMock
 
     from flotilla import Flotilla
-    from flotilla.compose.adapter import ComposeConfigAdapter
+    from flotilla.compose import parse as parse_module
     from flotilla.config import ResourceDefaults
     from flotilla.integrations.harbor_source import task_environments
     from flotilla.manifest import Manifest
@@ -413,28 +406,22 @@ async def test_resource_reader_matches_compiled_reservations(
         if mode == "separate":
             (source / "tests/docker-compose.yaml").write_text("services:\n  main:\n    image: r.io/verifier:1\n")
     calls: list[Path] = []
+    original_parse = parse_module.load_project
 
-    def normalize(args: list[str], cwd: Path, env: dict[str, str]) -> str:
-        # Mock only the official CLI output, not the task/native resource rules.
-        calls.append(cwd)
-        if not cwd.is_relative_to(source):
-            assert not (cwd.parent / "instruction.md").exists()
+    def record(project_dir: Path, **kwargs: Any) -> Any:
+        """Observe which directory each project is read from; the parse itself is the real one."""
+        calls.append(project_dir)
+        if not project_dir.is_relative_to(source):
+            # The private copy holds the environment and nothing the agent authored.
+            assert not (project_dir.parent / "instruction.md").exists()
             if mode == "shared":
-                assert not (cwd.parent / "tests").exists()
-            if cwd.name == "environment":
-                assert (cwd / "settings.env").read_text() == "X=env-file\n"
-        if args[-2:] == ["version", "--short"]:
-            return COMPOSE_VERSION
-        assert args[-4:] == ["config", "--format", "json", "--no-path-resolution"]
-        assert env["CPU"] == "2"
-        services: dict[str, Any] = {"main": {"image": "r.io/main:1"}}
-        if (cwd / "settings.env").exists():
-            services["main"].update(cpus="2", mem_limit="1Gi")
-            services["db"] = {"image": "r.io/db:1", "cpus": "2", "mem_limit": "5Gi"}
-            services["other"] = {"image": "r.io/other:1"}
-        return json.dumps({"services": services})
+                assert not (project_dir.parent / "tests").exists()
+            if project_dir.name == "environment":
+                assert (project_dir / "settings.env").read_text() == "X=env-file\n"
+        assert kwargs["environment"]["CPU"] == "2"
+        return original_parse(project_dir, **kwargs)
 
-    monkeypatch.setattr(ComposeConfigAdapter, "_run", staticmethod(normalize))
+    monkeypatch.setattr(parse_module, "load_project", record)
     policy = ResourceDefaults.model_validate(
         {
             "default": {"cpu": "1", "memory": "2Gi"},
@@ -443,7 +430,7 @@ async def test_resource_reader_matches_compiled_reservations(
         }
     )
     fleet = Flotilla(deployment=config().model_copy(update={"resources": policy}))
-    environments = task_environments(source, compose_adapter=ComposeConfigAdapter(), compose_environment={"CPU": "2"})
+    environments = task_environments(source, compose_environment={"CPU": "2"})
     roles = ["main"] if mode == "shared" else ["main", "verifier"]
     expected = {}
     for role, environment in zip(roles, environments, strict=True):
@@ -452,7 +439,7 @@ async def test_resource_reader_matches_compiled_reservations(
         expected[role] = fleet.reservation(PreparedEnvironment(Manifest.load_json(outcome.manifest_path.read_bytes())))
     before = source_snapshot(source)
     calls.clear()
-    forbidden = Mock(side_effect=AssertionError("resource inspection must not build/export/copy tests"))
+    forbidden = Mock(side_effect=AssertionError("resource inspection must not build, export or run a tool"))
     monkeypatch.setattr(subprocess, "run", forbidden)
     if not compose:
         monkeypatch.setattr(shutil, "copytree", forbidden)
@@ -461,17 +448,17 @@ async def test_resource_reader_matches_compiled_reservations(
         "storage_root": str(tmp_path),
         "task_keys": [key, key],
         "runtime_params": {"CPU": "2"},
-        "compose_command": ["docker", "compose"],
-        "compose_version": COMPOSE_VERSION,
     }
     raw = json.loads(compiler.describe_tasks_request(request, resources=True))
     assert set(raw) == {key}
     assert raw[key]["main"]["main"] == {"cpu": "3", "memory": "768Mi"}
     if compose:
         assert raw[key]["main"]["db"] == {"cpu": "2", "memory": "5Gi"}
+        # Read from a private copy that is gone afterwards, never from the canonical source.
         assert calls and all(not path.is_relative_to(source) and not path.exists() for path in calls)
     else:
-        assert calls == []  # No Compose subprocess, even for a separate verifier.
+        # Nothing to copy without a Compose file, so the task is read where it lies.
+        assert calls and all(path.is_relative_to(source) for path in calls)
     assert source_snapshot(source) == before
     forbidden.assert_not_called()
     manager = SimpleNamespace(workspaces=SimpleNamespace(describe_task_resources=AsyncMock(return_value=raw)))
@@ -487,7 +474,7 @@ async def test_resource_reader_matches_compiled_reservations(
 def test_resource_private_copy_preserves_internal_relative_links(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from flotilla.compose.adapter import ComposeConfigAdapter
+    from flotilla.compose import parse as parse_module
 
     _, source = task_copy(tmp_path)
     (source / "payload").write_text("linked payload")
@@ -495,25 +482,22 @@ def test_resource_private_copy_preserves_internal_relative_links(
     (source / "environment/docker-compose.yaml").write_text("services:\n  main:\n    image: r.io/main:1\n")
     before = source_snapshot(source)
     roots = []
+    original_parse = parse_module.load_project
 
-    def run(args: list[str], cwd: Path, env: dict[str, str]) -> str:
-        roots.append(cwd)
-        assert (cwd / "alias").is_symlink()
-        assert os.readlink(cwd / "alias") == "../payload"
-        assert (cwd / "alias").read_text() == "linked payload"
-        if args[-2:] == ["version", "--short"]:
-            return COMPOSE_VERSION
-        return json.dumps({"services": {"main": {"image": "r.io/main:1"}}})
+    def record(project_dir: Path, **kwargs: Any) -> Any:
+        roots.append(project_dir)
+        assert (project_dir / "alias").is_symlink()
+        assert os.readlink(project_dir / "alias") == "../payload"
+        assert (project_dir / "alias").read_text() == "linked payload"
+        return original_parse(project_dir, **kwargs)
 
-    monkeypatch.setattr(ComposeConfigAdapter, "_run", staticmethod(run))
+    monkeypatch.setattr(parse_module, "load_project", record)
     key = source.relative_to(tmp_path).as_posix()
     assert json.loads(
         compiler.describe_tasks_request(
             {
                 "storage_root": str(tmp_path),
                 "task_keys": [key],
-                "compose_command": ["docker", "compose"],
-                "compose_version": COMPOSE_VERSION,
             },
             resources=True,
         )
@@ -523,16 +507,18 @@ def test_resource_private_copy_preserves_internal_relative_links(
 
 
 @pytest.mark.parametrize(
-    "failure", ["cli", "invalid-resource", "include", "extends", "env-escape", "copy", "copy-stale"]
+    "failure", ["unreadable", "invalid-resource", "include", "extends", "env-escape", "copy", "copy-stale"]
 )
 def test_resource_compose_failure_cleans_private_tree_and_preserves_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
-    from flotilla.compose.adapter import ComposeConfigAdapter
-
     _, source = task_copy(tmp_path)
     text = "services:\n  main:\n    image: r.io/main:1\n"
-    if failure == "include":
+    if failure == "unreadable":
+        text = "services: [unclosed\n"
+    elif failure == "invalid-resource":
+        text += "    cpus: bad\n"
+    elif failure == "include":
         text += "include: [extra.yaml]\n"
     elif failure == "extends":
         text += "    extends: {file: extra.yaml, service: main}\n"
@@ -551,22 +537,12 @@ def test_resource_compose_failure_cleans_private_tree_and_preserves_source(
             raise OSError(errno.ESTALE if failure == "copy-stale" else errno.EIO, "copy failure")
         return Path(original_copy(src, dst, *args, **kwargs))
 
-    def run(args: list[str], cwd: Path, env: dict[str, str]) -> str:
-        if failure == "cli":
-            raise ValueError("CLI failure")
-        if args[-2:] == ["version", "--short"]:
-            return COMPOSE_VERSION
-        return json.dumps({"services": {"main": {"image": "r.io/main:1", "cpus": "bad"}}})
-
     monkeypatch.setattr(shutil, "copytree", copy)
-    monkeypatch.setattr(ComposeConfigAdapter, "_run", staticmethod(run))
     with pytest.raises((ValueError, OSError)):
         compiler.describe_tasks_request(
             {
                 "storage_root": str(tmp_path),
                 "task_keys": [source.relative_to(tmp_path).as_posix()],
-                "compose_command": ["docker", "compose"],
-                "compose_version": COMPOSE_VERSION,
             },
             resources=True,
         )
