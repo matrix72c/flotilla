@@ -32,6 +32,7 @@ from flotilla.runtime.types import (
     ResourceReservation,
     RunRequest,
     RuntimeEvent,
+    require_timeout,
 )
 from flotilla.runtime.worker import Worker
 
@@ -328,9 +329,7 @@ class Flotilla:
             return self._worker.submit(lambda: manager.release(eid))
 
     async def _release_environment(self, eid: str, timeout: float) -> CleanupReport:
-        from flotilla.runtime.manager import _timeout
-
-        _timeout(timeout)
+        require_timeout(timeout)
         with self._lock:
             closing = self._closed
             if not closing:
@@ -361,10 +360,8 @@ class Flotilla:
         return await self._call(lambda manager: manager.drain(timeout))
 
     async def close(self, timeout: float | None = None) -> CleanupReport:
-        from flotilla.runtime.manager import _timeout
-
         timeout = self._deployment.timeouts.close if timeout is None else timeout
-        _timeout(timeout)
+        require_timeout(timeout)
         with self._lock:
             if self.cleanup_report is not None:
                 return self.cleanup_report

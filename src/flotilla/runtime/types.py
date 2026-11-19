@@ -113,10 +113,16 @@ class OpenOptions:
 
     def __post_init__(self) -> None:
         for value in (self.admission_timeout, self.startup_timeout, self.lifetime):
-            if value is not None and (not math.isfinite(value) or value <= 0):
-                raise ValueError("timeouts must be finite and positive")
+            if value is not None:
+                require_timeout(value)
         if self.request_id == "":
             raise ValueError("request_id must be nonempty")
+
+
+def require_timeout(value: float, name: str = "timeout") -> None:
+    """The one check every caller-supplied duration passes through."""
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{name} must be finite and positive")
 
 
 class AdmissionTimeout(TimeoutError):

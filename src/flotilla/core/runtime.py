@@ -35,8 +35,6 @@ class MonitorSettings:
     def __post_init__(self) -> None:
         if self.probe_interval_s <= 0 or self.check_timeout_s <= 0:
             raise ValueError("probe_interval_s and check_timeout_s must be > 0")
-        if not 0 < self.renew_margin_s < self.renew_before_s < self.ttl_s:
-            raise ValueError("must satisfy 0 < renew_margin_s < renew_before_s < ttl_s")
 
 
 class Monitor:

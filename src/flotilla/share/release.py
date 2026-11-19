@@ -88,7 +88,10 @@ def release_entries(root: Path) -> list[tuple[str, os.stat_result]]:
 
 
 def _release_json(
-    release: str, root: Path, components: Mapping[str, str], entries: Sequence[tuple[str, os.stat_result]]
+    release: str,
+    components: Mapping[str, str],
+    entries: Sequence[tuple[str, os.stat_result]],
+    contents: Mapping[str, bytes],
 ) -> tuple[bytes, str]:
     """Content of `RELEASE.json` and its own sha256 (the latter is pinned in the deployment config).
 
@@ -98,8 +101,8 @@ def _release_json(
     for rel, info in entries:
         files[rel] = {
             "mode": f"{stat.S_IMODE(info.st_mode):04o}",
-            "sha256": _sha256(root / rel),
-            "size": info.st_size,
+            "sha256": hashlib.sha256(contents[rel]).hexdigest(),
+            "size": len(contents[rel]),
         }
     document = {"components": dict(components), "files": files, "release": release}
     blob = json.dumps(document, sort_keys=True, ensure_ascii=False, indent=2).encode() + b"\n"
@@ -120,7 +123,8 @@ async def publish_release(
     an external `ln`, but real releases have few files, so reuse gains nothing).
     """
     entries = await owned_io(release_entries, root)
-    blob, digest = await owned_io(_release_json, release, root, components, entries)
+    contents = {rel: await owned_io((root / rel).read_bytes) for rel, _ in entries}
+    blob, digest = await owned_io(_release_json, release, components, entries, contents)
     target = f"{RELEASES}/{release}"
     if await anchor.exists(f"{target}/{RELEASE_JSON}", stage="prepare"):
         if hashlib.sha256(await anchor.download(f"{target}/{RELEASE_JSON}", stage="prepare")).hexdigest() == digest:
@@ -132,7 +136,7 @@ async def publish_release(
     staging = f"{STAGING}/{release}.{int(time.time())}.{uuid.uuid4().hex[:12]}"
     await anchor.mkdir(staging, stage="prepare")
     try:
-        uploaded = await _upload_tree(anchor, root, staging, entries, json.loads(blob)["files"])
+        uploaded = await _upload_tree(anchor, staging, entries, contents)
         await anchor.upload(f"{staging}/{RELEASE_JSON}", blob, mode=0o644, uid=0, gid=0, stage="prepare")
         await anchor.mkdir(RELEASES, stage="prepare")
         await anchor.rename(staging, target, stage="prepare")
@@ -148,25 +152,15 @@ async def publish_release(
 
 async def _upload_tree(
     anchor: Anchor,
-    root: Path,
     staging: str,
     entries: Sequence[tuple[str, os.stat_result]],
-    manifest_files: Mapping[str, Mapping[str, object]],
+    contents: Mapping[str, bytes],
 ) -> int:
     """Upload the tree: create directories first, then files. `upload` requires an existing parent."""
     uploaded = 0
     created: set[str] = set()
     for rel, info in entries:
-        path = root / rel
-        # Manifest and upload share entries; reject local changes in between rather than publish a mismatched tree.
-        if await owned_io(path.is_symlink):
-            raise ReleaseError(f"release source {rel} became a symlink after scanning")
-        data = await owned_io(path.read_bytes)
-        if (
-            len(data) != manifest_files[rel]["size"]
-            or hashlib.sha256(data).hexdigest() != manifest_files[rel]["sha256"]
-        ):
-            raise ReleaseError(f"release source {rel} changed after the manifest was generated")
+        data = contents[rel]
         parent = posixpath.dirname(rel)
         if parent and parent not in created:
             await anchor.mkdir(f"{staging}/{parent}", stage="prepare")
@@ -241,11 +235,3 @@ async def ensure_builtin_release(anchor: Anchor) -> bool:
     if result.release_sha256 != BUILTIN_RELEASE_SHA256:
         raise ReleaseError(f"built-in share published with unexpected {RELEASE_JSON} sha256 {result.release_sha256}")
     return not result.skipped
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while chunk := handle.read(1 << 20):
-            digest.update(chunk)
-    return digest.hexdigest()

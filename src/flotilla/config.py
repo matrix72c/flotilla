@@ -265,9 +265,6 @@ class Timeouts(_Model):
             object.__setattr__(self, "pending", None)
         return self
 
-    def pending_limit(self) -> float | None:
-        return self.pending if self.pending is not None and self.pending < self.create else None
-
 
 class Process(_Model):
     poll_interval: PositiveFloat = 2.0
@@ -800,7 +797,7 @@ class FlotillaConfig(_Model):
             external=self.network.policy(),
             ttl_s=self.reaper.trial_ttl,
             create_timeout_s=t.create,
-            pending_timeout_s=t.pending_limit(),
+            pending_timeout_s=t.pending,
             address_timeout_s=t.address,
             wire_timeout_s=t.wire,
             hosts_timeout_s=t.hosts,
@@ -810,13 +807,12 @@ class FlotillaConfig(_Model):
         )
 
     def monitor_settings(self) -> MonitorSettings:
-        ttl = self.reaper.trial_ttl
-        before = min(self.reaper.renew_before_s, ttl / 2)
+        # Renewal timing is clamped to the TTL cap once, in the Monitor.
         return MonitorSettings(
             check_timeout_s=self.runtime.check_timeout_s,
-            ttl_s=ttl,
-            renew_before_s=before,
-            renew_margin_s=min(self.reaper.renew_margin_s, before / 2),
+            ttl_s=self.reaper.trial_ttl,
+            renew_before_s=self.reaper.renew_before_s,
+            renew_margin_s=self.reaper.renew_margin_s,
         )
 
     def network_settings(self) -> NetworkSettings:

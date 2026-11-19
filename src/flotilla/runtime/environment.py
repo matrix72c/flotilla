@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import io
-import math
 import os
 import stat
 import tarfile
@@ -28,7 +27,7 @@ from flotilla.platform.base import (
     ProcessStatus,
 )
 from flotilla.runtime.manager import Manager, Run
-from flotilla.runtime.types import CleanupReport, EnvironmentInfo
+from flotilla.runtime.types import CleanupReport, EnvironmentInfo, require_timeout
 
 if TYPE_CHECKING:
     from flotilla.runtime.client import Flotilla
@@ -63,10 +62,8 @@ class Environment:
 
     async def release(self, timeout: float | None = None) -> CleanupReport:
         """Release and confirm this environment, retaining cleanup ownership on cancellation."""
-        from flotilla.runtime.manager import _timeout
-
         budget = self._client.config.timeouts.close if timeout is None else timeout
-        _timeout(budget)
+        require_timeout(budget)
         if self._cleanup_report is None:
             self._cleanup_report = await self._client._release_environment(self.id, budget)
         return self._cleanup_report
@@ -314,10 +311,9 @@ class Process:
 
     async def wait(self, *, timeout: float | None = None, poll_interval: float = 0.2) -> ProcessStatus:
         """Wait for exit. A waiter timeout does not terminate the remote process."""
-        if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
-            raise ValueError("timeout must be finite and positive")
-        if not math.isfinite(poll_interval) or poll_interval <= 0:
-            raise ValueError("poll_interval must be finite and positive")
+        if timeout is not None:
+            require_timeout(timeout)
+        require_timeout(poll_interval, "poll_interval")
         async with asyncio.timeout(timeout):
             while True:
                 result = await self.status()
@@ -355,8 +351,7 @@ class Process:
 def _args(argv: Sequence[str], timeout: float, env: Mapping[str, str] | None) -> tuple[str, ...]:
     if isinstance(argv, str) or not argv or any(not isinstance(a, str) or "\0" in a for a in argv):
         raise ValueError("argv must be a nonempty sequence of strings without NUL")
-    if not math.isfinite(timeout) or timeout <= 0:
-        raise ValueError("timeout must be finite and positive")
+    require_timeout(timeout)
     if env and any(not k or "=" in k or "\0" in k or "\0" in v for k, v in env.items()):
         raise ValueError("invalid execution environment")
     return tuple(argv)

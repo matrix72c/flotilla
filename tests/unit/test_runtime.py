@@ -13,6 +13,7 @@ from flotilla.core.anchor import Anchor, AnchorSettings
 from flotilla.core.plan import ExecContext, RestartPolicy, TrialPlan, Unit
 from flotilla.core.runtime import Monitor, MonitorSettings
 from flotilla.platform.base import (
+    Capabilities,
     ErrorCategory,
     ExecOutcomeUnknown,
     ExecResult,
@@ -436,11 +437,21 @@ async def test_stop_ends_background_calls(platform: FakePlatform, clock: ManualC
     assert platform.calls["get"] == gets
 
 
-def test_settings_validation() -> None:
-    with pytest.raises(ValueError):
-        MonitorSettings(renew_before_s=7200, ttl_s=3600)
-    with pytest.raises(ValueError):
-        MonitorSettings(renew_margin_s=1800, renew_before_s=1800)
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "settings",
+    [
+        MonitorSettings(ttl_s=3600, renew_before_s=7200, renew_margin_s=7300),
+        MonitorSettings(ttl_s=3600, renew_margin_s=1800, renew_before_s=1800),
+    ],
+    ids=["renew-past-ttl", "margin-past-renew"],
+)
+async def test_renewal_timing_is_clamped_to_the_ttl(
+    caps: Capabilities, clock: ManualClock, anchor: Anchor, settings: MonitorSettings
+) -> None:
+    """Out-of-order renewal values are clamped, not rejected: the config passes reaper values through raw."""
+    monitor = Monitor(FakePlatform(caps, clock=clock), clock, anchor, _plan(), {}, {}, settings)
+    assert 0 < monitor._renew_margin < monitor._renew_before < monitor._ttl
 
 
 @pytest.mark.asyncio

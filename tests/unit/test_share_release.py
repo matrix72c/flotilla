@@ -48,6 +48,10 @@ async def anchor(platform: FakePlatform, clock: ManualClock, tree: SharedTree) -
     await a.close()
 
 
+def _contents(root: Path) -> dict[str, bytes]:
+    return {rel: (root / rel).read_bytes() for rel, _ in release_entries(root)}
+
+
 def _tree(root: Path, *, mode: int = 0o755) -> Path:
     """Content shaped like a real release: bin/busybox plus one top-level file."""
     (root / "bin").mkdir(parents=True)
@@ -61,7 +65,8 @@ def _tree(root: Path, *, mode: int = 0o755) -> Path:
 
 def test_release_json_shape_and_entries(tmp_path: Path) -> None:
     root = _tree(tmp_path / "src")
-    blob, digest = _release_json("r1", root, {"busybox": "1.36.1"}, release_entries(root))
+    contents = _contents(root)
+    blob, digest = _release_json("r1", {"busybox": "1.36.1"}, release_entries(root), contents)
     document = json.loads(blob)
     assert document["release"] == "r1"
     assert document["components"] == {"busybox": "1.36.1"}
@@ -72,7 +77,7 @@ def test_release_json_shape_and_entries(tmp_path: Path) -> None:
     assert entry["sha256"] == hashlib.sha256(b"\x00busybox-bytes").hexdigest()
     assert digest == hashlib.sha256(blob).hexdigest()
     # Byte-for-byte reproducible: the same content hashed twice gives the same digest.
-    assert _release_json("r1", root, {"busybox": "1.36.1"}, release_entries(root)) == (blob, digest)
+    assert _release_json("r1", {"busybox": "1.36.1"}, release_entries(root), contents) == (blob, digest)
 
 
 def test_matches_real_release(tmp_path: Path) -> None:
@@ -100,7 +105,7 @@ def test_matches_real_release(tmp_path: Path) -> None:
     (root / "bin" / "busybox").write_bytes(b"x")
     (root / "bin" / "busybox").chmod(0o755)
     components = {"busybox": "1.36.1 (alpine busybox-static 1.36.1-r31)"}
-    blob, _ = _release_json("2026-10-07.1", root, components, release_entries(root))
+    blob, _ = _release_json("2026-10-07.1", components, release_entries(root), _contents(root))
     assert blob.decode().splitlines()[:4] == real.decode().splitlines()[:4]
     assert blob.endswith(b"\n")
 
@@ -253,9 +258,14 @@ async def test_unreadable_directory_is_not_silently_skipped(
 
 
 @pytest.mark.asyncio
-async def test_changed_source_does_not_publish_an_inconsistent_manifest(
+async def test_source_changed_after_the_scan_publishes_the_scanned_snapshot(
     anchor: Anchor, tree: SharedTree, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Bytes are read once and carried from scan to manifest to upload.
+
+    A file rewritten after the scan is published as scanned, manifest and upload matching each other;
+    the published release is a consistent snapshot, not a mix of two reads.
+    """
     root = _tree(tmp_path / "src")
     original = anchor.mkdir
 
@@ -265,10 +275,12 @@ async def test_changed_source_does_not_publish_an_inconsistent_manifest(
             (root / "bin/busybox").write_bytes(b"changed")
 
     monkeypatch.setattr(anchor, "mkdir", mkdir)
-    with pytest.raises(ReleaseError, match="changed after the manifest was generated"):
-        await publish_release(anchor, "changed", root, components={})
-    assert f"{RELEASES}/changed" not in tree.dirs
-    assert not any(p.startswith(f"{STAGING}/changed.") for p in tree.dirs)
+    result = await publish_release(anchor, "snapshot", root, components={})
+    assert not result.skipped
+    manifest = json.loads(await anchor.download(f"{RELEASES}/snapshot/{RELEASE_JSON}", stage="prepare"))
+    entry = manifest["files"]["bin/busybox"]
+    assert entry["sha256"] == hashlib.sha256(b"\x00busybox-bytes").hexdigest()
+    assert await anchor.download(f"{RELEASES}/snapshot/bin/busybox", stage="prepare") == b"\x00busybox-bytes"
 
 
 # ───────────────────────────── built-in share ─────────────────────────────
@@ -293,7 +305,7 @@ def _pin_fake_busybox(monkeypatch: pytest.MonkeyPatch, anchor: Anchor, tmp_path:
     (root / "bin").mkdir(parents=True)
     (root / "bin" / "busybox").write_bytes(data)
     (root / "bin" / "busybox").chmod(0o755)
-    _, digest = _release_json(BUILTIN_RELEASE, root, {"busybox": BUILTIN_COMPONENT}, release_entries(root))
+    _, digest = _release_json(BUILTIN_RELEASE, {"busybox": BUILTIN_COMPONENT}, release_entries(root), _contents(root))
     monkeypatch.setattr(share_release, "BUILTIN_RELEASE_SHA256", digest)
     reads: list[str] = []
 

@@ -289,13 +289,12 @@ def test_anchor_image_required_for_anchor_settings() -> None:
 
 
 @pytest.mark.parametrize("ttl", [1, 180, 1800, 21600])
-def test_configured_trial_ttl_can_start_monitor(ttl: int) -> None:
+def test_configured_trial_ttl_reaches_the_monitor_verbatim(ttl: int) -> None:
     cfg = config(reaper={**config_data()["reaper"], "trial_ttl": ttl})
     settings = cfg.monitor_settings()
     assert settings.ttl_s == cfg.trial_settings().ttl_s == ttl
-    assert 0 < settings.renew_margin_s < settings.renew_before_s < ttl
-    if ttl == 21600:
-        assert (settings.renew_before_s, settings.renew_margin_s) == (600, 120)
+    # Values pass through raw: the Monitor clamps renewal timing to the capped TTL itself.
+    assert (settings.renew_before_s, settings.renew_margin_s) == (600, 120)
 
 
 @pytest.mark.parametrize(

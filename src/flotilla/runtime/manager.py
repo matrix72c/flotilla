@@ -43,6 +43,7 @@ from flotilla.runtime.types import (
     RunRequest,
     RuntimeEvent,
     ServiceInfo,
+    require_timeout,
 )
 from flotilla.runtime.workspace import WorkspaceStore
 from flotilla.share.release import ReleaseError, check_release, ensure_builtin_release
@@ -349,7 +350,7 @@ class Manager:
 
     async def terminate(self, eid: str, service: str, timeout: float) -> None:
         """Permanently terminate a single owned sandbox, confirming deletion."""
-        _timeout(timeout)
+        require_timeout(timeout)
         run = self.get(eid)
         if service not in run.plan.units:
             raise KeyError(service)
@@ -485,7 +486,7 @@ class Manager:
 
     async def wait_release(self, eid: str, timeout: float) -> CleanupReport:
         """Wait only for this environment; cancellation never cancels its reaper."""
-        _timeout(timeout)
+        require_timeout(timeout)
         if eid in self.failures and eid not in self.reaping and not self.closing:
             self.reaper.retry(eid)
             self.reaping[eid] = asyncio.create_task(self._finish_release(eid, self.failed_runs[eid]))
@@ -523,7 +524,7 @@ class Manager:
         await self.workspaces.remove(wid)
 
     async def drain(self, timeout: float) -> CleanupReport:
-        _timeout(timeout)
+        require_timeout(timeout)
         ids = set(self.reaping) | set(self.failures)
         tasks = tuple(self.reaping.values())
         if tasks:
@@ -531,7 +532,7 @@ class Manager:
         return self.report(ids)
 
     async def close(self, timeout: float) -> CleanupReport:
-        _timeout(timeout)
+        require_timeout(timeout)
         if self.closing_task is None:
             self.closing_task = asyncio.create_task(self._close(timeout))
         return await asyncio.shield(self.closing_task)
@@ -602,11 +603,6 @@ class Manager:
         except Exception as exc:
             # Connection closure must not replace the resource cleanup report.
             logging.getLogger(__name__).warning("platform connection close failed (%s)", type(exc).__name__)
-
-
-def _timeout(value: float) -> None:
-    if not math.isfinite(value) or value <= 0:
-        raise ValueError("timeout must be finite and positive")
 
 
 def _retrieve_termination(task: asyncio.Task[None]) -> None:
