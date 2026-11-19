@@ -15,10 +15,13 @@ from flotilla.core.waiting import Backoff, Expired, describe, run_all, within
 from flotilla.platform.base import (
     Clock,
     ErrorCategory,
+    ExecResult,
     FlotillaError,
     InstanceHandle,
+    InstanceState,
     InstanceStatus,
     Platform,
+    ProcessStatus,
 )
 
 log = logging.getLogger(__name__)
@@ -26,15 +29,24 @@ log = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class MonitorSettings:
-    probe_interval_s: float = 300.0  # one get per unit
     renew_before_s: float = 1800.0  # renew when remaining TTL drops below this (30 minutes)
     ttl_s: int = 6 * 3600  # renewal sets expiry to now + ttl_s (capped at the deployment max_ttl_seconds)
     check_timeout_s: float = 10.0  # check() timeout
     renew_margin_s: float = 120.0  # on renewal failure retry with backoff; lost once remaining TTL drops below this
 
     def __post_init__(self) -> None:
-        if self.probe_interval_s <= 0 or self.check_timeout_s <= 0:
-            raise ValueError("probe_interval_s and check_timeout_s must be > 0")
+        if self.check_timeout_s <= 0:
+            raise ValueError("check_timeout_s must be > 0")
+
+
+@dataclass(frozen=True)
+class UnitProbe:
+    """One unit's readings in a single check pass. `noop` is present only when the instance is `RUNNING`
+    (exec is not attempted otherwise); `process` only when the unit has a main-process pid."""
+
+    state: InstanceState
+    noop: ExecResult | None = None
+    process: ProcessStatus | None = None
 
 
 class Monitor:
@@ -67,7 +79,8 @@ class Monitor:
         self._retired: set[str] = set()
 
     def retire(self, unit: str) -> None:
-        """Stop monitoring a service deliberately terminated by its resource owner."""
+        """Stop monitoring a service deliberately terminated by its resource owner: its disappearance must not
+        mark the trial `lost`. Checks and renewals drop retired units after their in-flight reads return."""
         if unit not in self._handles:
             raise KeyError(unit)
         self._retired.add(unit)
@@ -80,11 +93,6 @@ class Monitor:
     def start(self) -> None:
         if self._tasks:
             raise RuntimeError("monitor can only be started once")
-        units = sorted(self._handles.keys() - self._retired)
-        step = self._settings.probe_interval_s / max(1, len(units))
-        for i, unit in enumerate(units):
-            # Stagger: unit i first probes after (i + 1) * step so units in a trial don't probe at once.
-            self._tasks.append(asyncio.create_task(self._probe_loop(unit, offset=(i + 1) * step)))
         self._tasks.append(asyncio.create_task(self._renew_loop()))
         self._tasks.append(asyncio.create_task(self._watch_launch()))
 
@@ -109,8 +117,18 @@ class Monitor:
         Return the `lost` error or None."""
         if self._lost is not None:
             return self._lost
-        await self._probe(unit)
-        return self._lost
+        try:
+            state = await self._platform.get(self._handles[unit].iid)
+        except FlotillaError as exc:
+            if unit in self._retired:  # deliberately terminated while this query was in flight: expected, not lost
+                return None
+            if exc.category is ErrorCategory.NOT_FOUND:
+                return self.mark_lost(f"unit {unit} instance no longer exists", cause=exc)
+            log.warning("failed to query unit %s, health unknown: %s", unit, exc)
+            return None
+        if unit not in self._retired and state.status is not InstanceStatus.RUNNING:
+            return self.mark_lost(f"unit {unit} status is {describe(state)}")
+        return None
 
     async def check(self) -> BaseException | None:
         """Time-bounded health check; never raises. None if healthy, else an error with stage/category/retryable."""
@@ -144,68 +162,79 @@ class Monitor:
         if self._anchor.deactivated.is_set():
             return self.mark_lost(f"launch {self._anchor.launch_id} was deactivated")
         units = sorted(self._handles)
-        await run_all(self._check_unit(u) for u in units)
+        readings = dict(zip(units, await run_all(self._probe_one(u) for u in units), strict=True))
         if self._lost is not None:
             return self._lost
-        for unit in units:
-            if (err := await self._check_restart(unit)) is not None:
+        # The check-side retirement drop point: a unit retired before or while its probe was in flight is
+        # skipped entirely (see retire()). A failed query of a live unit is raised: health is unconfirmed.
+        probes: dict[str, UnitProbe] = {}
+        failure: FlotillaError | None = None
+        for unit, reading in readings.items():
+            if unit in self._retired:
+                continue
+            if isinstance(reading, FlotillaError):
+                if failure is None:
+                    failure = reading
+            else:
+                probes[unit] = reading
+        if failure is not None:
+            raise failure
+        for unit, probe in probes.items():  # liveness first: `lost` outranks a voided restart
+            if (err := self._liveness(unit, probe)) is not None:
+                return err
+        for unit, probe in probes.items():
+            if (err := self._restart(unit, probe)) is not None:
                 return err
         return None
 
-    async def _check_unit(self, unit: str) -> None:
-        if unit in self._retired:
-            return
-        try:
-            await self._check_active_unit(unit)
-        except FlotillaError:
-            if unit not in self._retired:
-                raise
-
-    async def _check_active_unit(self, unit: str) -> None:
+    async def _probe_one(self, unit: str) -> UnitProbe | FlotillaError:
+        """One unit's readings, each read once (the restart verdict reuses the process status): instance state,
+        a no-op exec, and the main-process status. A failed query is returned as the error rather than raised
+        so retirement can still drop the unit afterwards. The exec and process reads are skipped when the
+        instance is not `RUNNING`."""
         handle = self._handles[unit]
-        state = await self._platform.get(handle.iid)
-        if unit in self._retired:
-            return
-        if state.status is not InstanceStatus.RUNNING:
-            self.mark_lost(f"unit {unit} is not running: {describe(state)}")
-            return
-        result = await self._platform.exec(handle, process.own_spec((process.BUSYBOX, "true"), timeout_s=5.0))
-        if unit in self._retired:
-            return
-        if result.timed_out:
-            # The backend confirmed this read-only probe stopped. A single slow
-            # request is not proof that the exec channel is dead; retry within
-            # check()'s existing overall deadline, just like transport failures.
+        try:
+            state = await self._platform.get(handle.iid)
+            if state.status is not InstanceStatus.RUNNING:
+                return UnitProbe(state=state)
+            noop = await self._platform.exec(handle, process.own_spec((process.BUSYBOX, "true"), timeout_s=5.0))
+            pid = self._pids.get(unit)
+            main = await self._platform.process_status(handle, pid) if pid is not None else None
+        except FlotillaError as exc:
+            return exc
+        return UnitProbe(state=state, noop=noop, process=main)
+
+    def _liveness(self, unit: str, probe: UnitProbe) -> FlotillaError | None:
+        """The unit's health verdict: `lost` when the instance, the exec channel, or the main process is gone.
+
+        Raises when health is unconfirmed: the recorded query error, or a timed-out no-op probe (the backend
+        confirmed that read-only probe stopped — a single slow request is not proof that the exec channel is
+        dead, so `check()` retries it within its overall deadline, just like transport failures).
+        """
+        if probe.state.status is not InstanceStatus.RUNNING:
+            return self.mark_lost(f"unit {unit} is not running: {describe(probe.state)}")
+        assert probe.noop is not None
+        if probe.noop.timed_out:
             raise FlotillaError(
                 f"unit {unit} no-op probe timed out",
                 stage="run",
                 category=ErrorCategory.TRANSIENT,
                 retryable=True,
             )
-        if result.exit_code != 0:
-            self.mark_lost(f"unit {unit} exec channel unavailable (no-op {result.exit_code})")
-            return
-        pid = self._pids.get(unit)
-        if pid is not None:
-            status = await self._platform.process_status(handle, pid)
-            if not status.found and unit not in self._retired:
-                self.mark_lost(f"unit {unit} main process {pid} not found (exec daemon may have restarted)")
+        if probe.noop.exit_code != 0:
+            return self.mark_lost(f"unit {unit} exec channel unavailable (no-op {probe.noop.exit_code})")
+        if probe.process is not None and not probe.process.found:
+            pid = self._pids[unit]
+            return self.mark_lost(f"unit {unit} main process {pid} not found (exec daemon may have restarted)")
+        return None
 
-    async def _check_restart(self, unit: str) -> FlotillaError | None:
+    def _restart(self, unit: str, probe: UnitProbe) -> FlotillaError | None:
         """If a service with a non-`no` restart policy exited and Docker would restart it, the sample is void."""
         policy = self._plan.units[unit].restart
-        pid = self._pids.get(unit)
-        if policy == "no" or pid is None or unit in self._retired:
+        main = probe.process
+        if policy == "no" or main is None or main.running:
             return None
-        try:
-            status = await self._platform.process_status(self._handles[unit], pid)
-        except FlotillaError:
-            if unit in self._retired:
-                return None
-            raise
-        if status.running or unit in self._retired:
-            return None
-        code = status.exit_code
+        code = main.exit_code
         if policy in ("always", "unless-stopped") or (policy == "on-failure" and code != 0):
             return FlotillaError(
                 f"{unit}: service with restart={policy} exited (exit code {code}) and Docker would restart it; "
@@ -216,30 +245,6 @@ class Monitor:
                 service=unit,
             )
         return None
-
-    async def _probe_loop(self, unit: str, *, offset: float) -> None:
-        await self._clock.sleep(offset)
-        while self._lost is None and unit not in self._retired:
-            await self._probe(unit)
-            await self._clock.sleep(self._settings.probe_interval_s)
-
-    async def _probe(self, unit: str) -> None:
-        """One `get`: `lost` if the instance is gone or not `RUNNING` (`UNKNOWN` counts as terminated at runtime);
-        transient query errors don't count."""
-        if unit in self._retired:
-            return
-        try:
-            state = await self._platform.get(self._handles[unit].iid)
-        except FlotillaError as exc:
-            if unit in self._retired:
-                return
-            if exc.category is ErrorCategory.NOT_FOUND:
-                self.mark_lost(f"unit {unit} instance no longer exists", cause=exc)
-            else:
-                log.warning("failed to query unit %s, will retry next round: %s", unit, exc)
-            return
-        if unit not in self._retired and state.status is not InstanceStatus.RUNNING:
-            self.mark_lost(f"unit {unit} status is {describe(state)}")
 
     async def _renew_loop(self) -> None:
         """Renew units with less than `renew_before_s` TTL left to now + ttl. Retry failures with backoff; still failing
