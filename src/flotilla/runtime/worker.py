@@ -9,6 +9,8 @@ import threading
 from collections.abc import Callable, Coroutine
 from typing import Any
 
+from flotilla.core.waiting import finish_past_cancel
+
 
 class Worker:
     def __init__(self) -> None:
@@ -77,15 +79,8 @@ class Worker:
             return await asyncio.shield(result)
         except asyncio.CancelledError as primary:
             self.loop.call_soon_threadsafe(cancel)
-            while not result.done():
-                try:
-                    await asyncio.shield(result)
-                except asyncio.CancelledError:
-                    pass
-                except Exception:
-                    break
             try:
-                value = result.result()
+                value = await finish_past_cancel(result)
             except asyncio.CancelledError:
                 pass
             except Exception as exc:
@@ -95,10 +90,5 @@ class Worker:
                 # Its result still needs an owner even though it was never delivered.
                 if cancel_result is not None:
                     cleanup = asyncio.wrap_future(self.submit(lambda: cancel_result(value)))
-                    while not cleanup.done():
-                        try:
-                            await asyncio.shield(cleanup)
-                        except asyncio.CancelledError:
-                            continue
-                    cleanup.result()
+                    await finish_past_cancel(cleanup)
             raise

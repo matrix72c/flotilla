@@ -21,7 +21,7 @@ from flotilla.core.reaper import CleanupRecord, Reaper
 from flotilla.core.runtime import Monitor
 from flotilla.core.trial import Ready, Trial
 from flotilla.core.volumes import RESERVED_KEYS
-from flotilla.core.waiting import RateLimiter
+from flotilla.core.waiting import RateLimiter, retrieve
 from flotilla.platform.base import (
     WORK_ROOT,
     Clock,
@@ -381,7 +381,7 @@ class Manager:
                     raise
 
             task = asyncio.create_task(finish())
-            task.add_done_callback(_retrieve_termination)
+            task.add_done_callback(retrieve)
             run.terminations[service] = task
         await asyncio.shield(run.terminations[service])
 
@@ -603,8 +603,3 @@ class Manager:
         except Exception as exc:
             # Connection closure must not replace the resource cleanup report.
             logging.getLogger(__name__).warning("platform connection close failed (%s)", type(exc).__name__)
-
-
-def _retrieve_termination(task: asyncio.Task[None]) -> None:
-    if not task.cancelled():
-        task.exception()

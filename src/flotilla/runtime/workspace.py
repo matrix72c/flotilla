@@ -12,6 +12,7 @@ from itertools import islice
 from typing import TYPE_CHECKING, Any
 
 from flotilla.core.anchor import Anchor
+from flotilla.core.waiting import finish_past_cancel
 from flotilla.resources import cpu, memory
 
 if TYPE_CHECKING:
@@ -123,15 +124,8 @@ class WorkspaceStore:
         except asyncio.CancelledError as primary:
             # Copy/build may have side effects. Do not delete their directory or
             # allow a caller to retry until the owned operation has terminated.
-            while not task.done():
-                try:
-                    await asyncio.shield(task)
-                except asyncio.CancelledError:
-                    continue
-                except Exception:
-                    break
             try:
-                task.result()
+                await finish_past_cancel(task)
             except Exception as exc:
                 primary.add_note(f"workspace operation failed during cancellation: {exc!r}")
             raise

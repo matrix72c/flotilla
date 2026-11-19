@@ -12,7 +12,7 @@ from flotilla.core.anchor import Anchor
 from flotilla.core.deletion import Deleter, DeleteScope
 from flotilla.core.errors import at_stage
 from flotilla.core.volumes import launch_key
-from flotilla.core.waiting import Aborted, Backoff, RateLimiter, step_towards, wait_all, within
+from flotilla.core.waiting import Aborted, Backoff, RateLimiter, brief, retrieve, step_towards, wait_all, within
 from flotilla.platform.base import (
     Clock,
     ErrorCategory,
@@ -107,7 +107,7 @@ class Reaper:
             raise ValueError(f"spec.labels must contain {expected}, got {dict(spec.labels)}")
         task = asyncio.create_task(self._create(trial, unit, spec))
         trial.inflight.add(task)
-        task.add_done_callback(_retrieve)
+        task.add_done_callback(retrieve)
         task.add_done_callback(trial.inflight.discard)
         return await asyncio.shield(task)
 
@@ -351,7 +351,7 @@ class Reaper:
             trial.cleanup.cancel()
             raise
         except Exception as exc:
-            trial.error = _brief(exc)
+            trial.error = brief(exc)
             log.exception("error reaping trial %s", trial.trial_id)
         finally:
             record = self._record(trial, finished=True)
@@ -370,7 +370,7 @@ class Reaper:
                 await self._anchor.remove(key, stage="run")
                 trial.dirs.remove(key)
             except FlotillaError as exc:
-                trial.error = _brief(exc)
+                trial.error = brief(exc)
                 log.warning("failed to remove trial %s directory %s, leaving it to gc: %s", trial.trial_id, key, exc)
                 return
 
@@ -403,14 +403,3 @@ class CleanupRecord:
     @property
     def clean(self) -> bool:
         return self.finished and not (self.instances or self.directories or self.uncertain)
-
-
-def _brief(exc: BaseException, limit: int = 300) -> str:
-    text = f"{type(exc).__name__}: {exc}"
-    return text if len(text) <= limit else text[: limit - 3] + "..."
-
-
-def _retrieve(task: asyncio.Task[object]) -> None:
-    """The reaper handles or logs background task exceptions; retrieve them so asyncio won't say "never retrieved"."""
-    if not task.cancelled():
-        task.exception()

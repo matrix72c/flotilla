@@ -6,7 +6,7 @@ import asyncio
 import logging
 from collections.abc import Iterable, Mapping
 
-from flotilla.core.waiting import Backoff, step_towards
+from flotilla.core.waiting import Backoff, brief, retrieve, step_towards
 from flotilla.platform.base import Clock, ErrorCategory, FlotillaError, Platform
 
 log = logging.getLogger(__name__)
@@ -47,7 +47,7 @@ class Deleter:
                 if exc.category is ErrorCategory.NOT_FOUND:
                     self.errors.pop(iid, None)
                     return True
-                self.errors[iid] = _brief(exc)
+                self.errors[iid] = brief(exc)
                 if not exc.retryable:
                     log.error("Deletion of %s was rejected; cleanup remains unconfirmed: %s", iid, exc)
                     return False
@@ -73,7 +73,7 @@ class DeleteScope:
         task = self._tasks.get(iid)
         if task is None:
             task = asyncio.create_task(self._deleter.delete(iid))
-            task.add_done_callback(_retrieve)
+            task.add_done_callback(retrieve)
             self._tasks[iid] = task
         return task
 
@@ -135,15 +135,3 @@ class DeleteScope:
     def cancel(self) -> None:
         for task in self._tasks.values():
             task.cancel()
-
-
-def _brief(exc: BaseException, limit: int = 300) -> str:
-    text = f"{type(exc).__name__}: {exc}"
-    return text if len(text) <= limit else text[: limit - 3] + "..."
-
-
-def _retrieve(task: asyncio.Task[bool]) -> None:
-    """Waiters consume deletion results; when nobody waits (e.g. discarded old instances), retrieve the exception
-    so asyncio does not report "never retrieved"."""
-    if not task.cancelled():
-        task.exception()
