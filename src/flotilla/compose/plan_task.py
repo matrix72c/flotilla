@@ -81,9 +81,6 @@ def plan_task(
     configs: ImageConfigSource,
     resources: Mapping[str, Resources],
     overlay: AgentOverlay = NO_OVERLAY,
-    external_mounts: Mapping[str, tuple[Any, ...]] | None = None,
-    workspace_mounts: Mapping[str, tuple[Any, ...]] | None = None,
-    workspace_root: str | None = None,
 ) -> TrialPlan:
     """Resolve `task` into a validated `TrialPlan`. Pure apart from `configs`, which reads a registry."""
     project = task.project
@@ -128,9 +125,6 @@ def plan_task(
             for name, svc in project.services.items()
             if any(not project.networks[net].internal for net in svc.networks)
         ),
-        external_mounts={name: tuple(mounts) for name, mounts in (external_mounts or {}).items()},
-        workspace_mounts={name: tuple(mounts) for name, mounts in (workspace_mounts or {}).items()},
-        workspace_root=workspace_root,
     )
     try:
         plan.validate()

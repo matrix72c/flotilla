@@ -80,7 +80,6 @@ def plan_for(
     The one place a task directory becomes a trial plan: `Flotilla.plan_environment` and `flotilla
     inspect` both land here, so a task that plans for one plans for the other.
     """
-    options = options or OpenOptions()
     declared = {name: svc.resources for name, svc in task.project.services.items()}
     overlay = cfg.agent_overlay
     plan = plan_task(
@@ -92,11 +91,8 @@ def plan_for(
             env=overlay.env,
             services=None if overlay.services is None else frozenset(overlay.services),
         ),
-        external_mounts=options.external_mounts,
-        workspace_mounts=options.workspace_mounts,
-        workspace_root=options.workspace_root,
     )
-    return with_resources(plan, options.resources)
+    return with_options(plan, options or OpenOptions())
 
 
 def with_resources(plan: TrialPlan, overrides: Mapping[str, Mapping[str, str]]) -> TrialPlan:

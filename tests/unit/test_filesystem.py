@@ -55,7 +55,7 @@ def test_compose_filesystem_fields_roundtrip_to_the_plan(tmp_path: Path) -> None
         TmpfsMount("/cache", 8 * 1024**2, 0o700),
     )
     # Mount points and the readonly runtime dir are runtime responsibilities: no derived image build.
-    assert not any(f.kind == "equivalent" and "tmpfs" in f.path for f in task.project.findings)
+    assert not any(f.kind == "note" and "tmpfs" in f.path for f in task.project.findings)
 
 
 @pytest.mark.parametrize(

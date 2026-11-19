@@ -124,14 +124,13 @@ _HANDLED = {
 
 
 class _Collector:
+    """Findings so far: what the dialect rejected outright, and what it recorded as non-effecting notes."""
+
     def __init__(self) -> None:
         self.findings: list[Finding] = []
 
-    def equivalent(self, path: str, reason: str) -> None:
-        self.findings.append(Finding(path, "equivalent", reason))
-
-    def warn(self, path: str, reason: str) -> None:
-        self.findings.append(Finding(path, "warn", reason))
+    def note(self, path: str, reason: str) -> None:
+        self.findings.append(Finding(path, "note", reason))
 
     def reject(self, path: str, reason: str) -> None:
         self.findings.append(Finding(path, "reject", reason))
@@ -149,7 +148,7 @@ def normalize(compose: Mapping[str, Any]) -> Project:
             # The config adapter resolves anchors before this point, so a surviving
             # extension field is leftover metadata. Compose strips the service-,
             # network- and volume-level ones, which is why only the top level needs this.
-            c.equivalent(key, "extension field; recorded only, nothing here reads it")
+            c.note(key, "extension field; recorded only, nothing here reads it")
         elif key not in ("services", "networks", "volumes", "name", "version"):
             c.reject(key, "unsupported top-level field")
     raw_services = compose.get("services")
@@ -205,14 +204,14 @@ def _service(
         if key in _HANDLED:
             continue
         if key in _EQUIVALENT:
-            c.equivalent(f"{path}.{key}", _EQUIVALENT[key])
+            c.note(f"{path}.{key}", _EQUIVALENT[key])
         elif key in _REJECT:
             c.reject(f"{path}.{key}", _REJECT[key][1])
         else:
             c.reject(f"{path}.{key}", "unsupported field")
 
     if raw.get("privileged") is True:
-        c.warn(
+        c.note(
             f"{path}.privileged",
             "runs on the privileged runtime: root holds all capabilities in its own user namespace, not on the host",
         )
@@ -313,7 +312,7 @@ def _cap_add(value: object, path: str, devices: frozenset[TaskDevice], c: _Colle
     elif "tun" not in devices:
         c.reject(path, "NET_ADMIN is supported only together with /dev/net/tun")
     else:
-        c.equivalent(path, "root in the privileged runtime holds NET_ADMIN in the sandbox network namespace")
+        c.note(path, "root in the privileged runtime holds NET_ADMIN in the sandbox network namespace")
 
 
 def _boolean(value: object, path: str, c: _Collector) -> bool:
@@ -461,7 +460,7 @@ def _depends_on(value: object, path: str, c: _Collector) -> dict[str, Dependency
         for key in spec:
             if key == "restart":
                 if spec[key]:
-                    c.equivalent(f"{path}.{dep}.restart", "services are never restarted during a run")
+                    c.note(f"{path}.{dep}.restart", "services are never restarted during a run")
             elif key not in ("condition", "required"):
                 c.reject(f"{path}.{dep}.{key}", "unsupported depends_on field")
         out[str(dep)] = Dependency(
@@ -498,9 +497,7 @@ def _service_networks(raw: Mapping[str, Any], path: str, c: _Collector) -> dict[
         for key in spec:
             if key in ("gw_priority", "priority"):
                 if spec[key] != 0:
-                    c.equivalent(
-                        f"{path}.networks.{net}.{key}", "egress follows the sandbox policy, not a gateway choice"
-                    )
+                    c.note(f"{path}.networks.{net}.{key}", "egress follows the sandbox policy, not a gateway choice")
             elif key in ("ipv4_address", "ipv6_address"):
                 c.reject(f"{path}.networks.{net}.{key}", "addresses are platform-assigned; fixed-IP access cannot hold")
             elif key != "aliases":
@@ -566,9 +563,7 @@ def _volumes(value: object, path: str, named: set[str], c: _Collector) -> tuple[
         if _boolean(volume_opts.get("nocopy", False), f"{p}.volume.nocopy", c):
             # `nocopy` only opts out of Docker's copy-up, which flotilla does not do:
             # a named volume always starts empty, so the option is already the behavior.
-            c.equivalent(
-                f"{p}.volume.nocopy", "a named volume always starts empty, so nothing is copied out of the image"
-            )
+            c.note(f"{p}.volume.nocopy", "a named volume always starts empty, so nothing is copied out of the image")
         bind_opts = _mapping(v.get("bind"), f"{p}.bind", c)
         for key in bind_opts:
             if key not in ("create_host_path",):
@@ -695,7 +690,7 @@ def _restart(value: object, path: str, c: _Collector) -> RestartPolicy:
         text = "on-failure"
     if text in _RESTART:
         if text != "no":
-            c.equivalent(path, "services are not restarted; an exit Docker would restart voids the sample")
+            c.note(path, "services are not restarted; an exit Docker would restart voids the sample")
         return _RESTART[text]
     c.reject(path, f"unknown restart policy: {text!r}")
     return "no"
@@ -744,7 +739,7 @@ def _extra_hosts(value: object, path: str, c: _Collector) -> dict[str, str]:
             continue
         out[str(name)] = address
     if out:
-        c.equivalent(path, "written into the sandbox's hosts file; reachability still follows the egress policy")
+        c.note(path, "written into the sandbox's hosts file; reachability still follows the egress policy")
     return out
 
 
@@ -755,9 +750,9 @@ def _hostname(value: object, path: str, c: _Collector, *, field: str) -> str | N
         c.reject(path, "must be a valid hostname")
         return None
     if field == "hostname":
-        c.warn(path, "added as a name peers resolve; gethostname() in the sandbox returns the platform's name")
+        c.note(path, "added as a name peers resolve; gethostname() in the sandbox returns the platform's name")
     else:
-        c.equivalent(path, "added as a name peers resolve")
+        c.note(path, "added as a name peers resolve")
     return str(value)
 
 
@@ -768,7 +763,7 @@ def _ports(value: object, path: str, c: _Collector) -> tuple[int, ...]:
         c.reject(path, f"unrecognized syntax: {value!r}")
         return ()
     if value:
-        c.equivalent(path, "nothing is published; peers on a shared network reach every port")
+        c.note(path, "nothing is published; peers on a shared network reach every port")
     udp: list[int] = []
     for index, port in enumerate(value):
         field = f"{path}[{index}]"
@@ -817,7 +812,7 @@ def _networks(value: object, c: _Collector) -> dict[str, NetworkDef]:
             elif key == "driver_opts":
                 for opt in _mapping(v, f"{path}.driver_opts", c):
                     if opt in _BRIDGE_OPTIONS:
-                        c.equivalent(f"{path}.driver_opts.{opt}", "no effect on platform networks")
+                        c.note(f"{path}.driver_opts.{opt}", "no effect on platform networks")
                     else:
                         c.reject(f"{path}.driver_opts.{opt}", "Docker bridge driver options are not implemented")
             elif key == "external":
@@ -888,7 +883,7 @@ def _apply_links(services: dict[str, Service], links: Mapping[str, tuple[tuple[s
             shared = sorted(set(services[name].networks) & set(services[target].networks))
             net = shared[0] if shared else DEFAULT_NETWORK
             if not shared:
-                c.equivalent(path, f"linked services share a network: both joined {DEFAULT_NETWORK}")
+                c.note(path, f"linked services share a network: both joined {DEFAULT_NETWORK}")
                 for end in (name, target):
                     attachments = dict(services[end].networks)
                     attachments.setdefault(net, NetworkAttachment())
@@ -898,7 +893,7 @@ def _apply_links(services: dict[str, Service], links: Mapping[str, tuple[tuple[s
             if alias not in attachment.aliases:
                 attachments[net] = replace(attachment, aliases=(*attachment.aliases, alias))
                 services[target] = replace(services[target], networks=attachments)
-            c.equivalent(
+            c.note(
                 f"{path}.{target}",
                 f"{alias} resolves to {target} on network {net}, for every service on it, not only {name}",
             )
@@ -955,7 +950,7 @@ def _apply_volumes_from(
                 added.append(replace(mount, read_only=mount.read_only or read_only))
             if added:
                 services[name] = replace(services[name], volumes=(*services[name].volumes, *added))
-                c.equivalent(path, f"mounts {', '.join(m.target for m in added)} from {donor}")
+                c.note(path, f"mounts {', '.join(m.target for m in added)} from {donor}")
 
 
 def _check_references(services: Mapping[str, Service], networks: Mapping[str, NetworkDef], c: _Collector) -> None:

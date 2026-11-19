@@ -64,7 +64,7 @@ def test_kvm_and_tun_are_normalized(devices: list[object]) -> None:
     project = normalize(_service(devices=devices, cap_add=["NET_ADMIN"]))
     assert not project.rejected, project.findings
     assert project.services["main"].devices == {"kvm", "tun"}
-    assert [(f.path, f.kind) for f in project.findings] == [("services.main.cap_add", "equivalent")]
+    assert [(f.path, f.kind) for f in project.findings] == [("services.main.cap_add", "note")]
 
 
 @pytest.mark.parametrize(

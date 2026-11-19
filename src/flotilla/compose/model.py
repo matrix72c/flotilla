@@ -8,7 +8,7 @@ from typing import Literal
 
 from flotilla.platform.base import TaskDevice, TmpfsMount
 
-Kind = Literal["equivalent", "warn", "reject"]
+Kind = Literal["note", "reject"]
 Condition = Literal["service_started", "service_healthy", "service_completed_successfully"]
 RestartPolicy = Literal["no", "always", "unless-stopped", "on-failure"]
 
