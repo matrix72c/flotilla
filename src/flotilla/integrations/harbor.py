@@ -677,3 +677,6 @@ class FlotillaTaskEnvironment(FlotillaEnvironment):
             self._open_options(attempt.task.plans[verification.role])
         )
         self._grading_entered = True
+
+
+__all__ = ["FlotillaEnvironment", "FlotillaTaskEnvironment", "FlotillaTaskOptions", "shutdown"]

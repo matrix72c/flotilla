@@ -1,6 +1,6 @@
 # Integrating Flotilla into a framework
 
-This guide is for authors of evaluation runners, RL rollout workers, and agent frameworks that want to run their environments on Flotilla. The [Harbor adapter](../src/flotilla/integrations/harbor.py) is a complete example.
+This guide is for authors of evaluation runners, RL rollout workers, and agent frameworks that want to run their environments on Flotilla. The [Harbor adapter](../src/flotilla/integrations/harbor.py) is a complete example; if your framework is Harbor itself, see [running harbor trials](#running-harbor-trials) -- the loop already exists.
 
 ## Who owns what
 
@@ -13,6 +13,46 @@ Two consequences follow:
 
 - One `NativeAttempt` owns its private workspace and roles. Your framework stops the agent before `attempt.verify()`, which stages hidden tests and declared artifact handoffs, then closes the attempt.
 - A score never makes a cleanup failure acceptable. Check `CleanupReport.clean` separately and treat an unclean report as an infrastructure problem.
+
+## Running harbor trials
+
+`FlotillaTaskEnvironment` is a harbor environment that runs one trial on a `NativeAttempt`. Nothing is
+written between the two sides: harbor drives the trial, the attempt owns the workspace, and both
+grading modes of a harbor task map onto the attempt's phases.
+
+```sh
+harbor run \
+  --env flotilla.integrations.harbor:FlotillaTaskEnvironment \
+  --ek deployment=myproject.deployment:PLATFORM \
+  --path /srv/tasks/example/ds/demo
+```
+
+`deployment` names the deployment the way every flotilla command does, as `module:attribute`;
+credentials stay in that spec and never pass through `--ek`. `--path` must land inside a directory the
+deployment declares as a dataset -- published tasks are mounted in place, so a task harbor copied into
+its own workspace (hub and git tasks) is rejected at startup, with that reason named. Preflight loads
+the deployment and resolves its datasets before the trial is queued, so a mistyped option or a bad
+import fails fast.
+
+What the environment does with one trial:
+
+- The agent environment resolves the task, creates the attempt, and opens the main role. CPU and
+  memory overrides fold into the trial; there is no storage, GPU, or TPU knob to fold, and those flags
+  are rejected with the reason. A baseline network policy of NO_NETWORK disables internet; phase
+  policies broader than the baseline are refused by harbor itself before the trial starts.
+- Grading follows the task's own declaration. Tests with their own Compose, or
+  `[verifier].environment.docker_image`, grade in a separate verifier environment; anything else
+  grades inside the agent environment. Harbor's tests upload is the handoff into grading -- staging
+  supersedes the copy, so harbor's `file_filter` on the tests is not replayed -- and published test
+  scripts must carry their own execute bits, since chmod on the read-only mount is best-effort.
+- Whichever environment ends the trial closes the attempt. If harbor never grades (verifier disabled,
+  an agent failure), the agent environment's stop closes it; in separate mode the workspace outlives
+  the agent environment for the verifier that follows, and is released at process exit if none does.
+
+One process runs one fleet per deployment, closed at interpreter exit; a process embedding harbor
+should call `flotilla.integrations.harbor.shutdown()` instead of relying on exit. Regrades and grading
+in another process are rejected with the reason named: verification runs on a trial the same process
+opened, because the attempt's state lives in that process.
 
 ## Loading a deployment
 
