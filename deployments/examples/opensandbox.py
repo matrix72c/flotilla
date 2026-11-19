@@ -24,7 +24,7 @@ from flotilla.config import (
     Timeouts,
 )
 
-#: Replace with the image digest produced by images/anchor/build.sh.
+#: Replace with the anchor_pin returned by flotilla.anchor_build.build_anchor(..., push=True).
 ANCHOR = "registry.example.com/flotilla@sha256:" + "0" * 64
 PROBE = "registry.example.com/team/probe@sha256:" + "0" * 64
 

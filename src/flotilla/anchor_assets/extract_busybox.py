@@ -1,6 +1,6 @@
 """Isolated APK reader; invoke with python -I, outside the download directory.
 
-Reuses images/anchor/build.sh's pinned control -> data -> binary verification.
+Reuses the pinned control -> data -> binary verification from `flotilla.busybox`.
 Only a named regular member is read; no archive paths are extracted to disk.
 """
 
