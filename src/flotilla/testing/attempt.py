@@ -181,13 +181,44 @@ class AttemptHarness:
             if argv[1:3] == ("tar", "-cf"):
                 source = argv[5]
                 volume = next((v for v in spec.volumes if v.mount_path == source), None)
-                assert volume is not None, f"download source {source} is not a mounted volume"
-                self.unit_files[(iid, argv[3])] = self._tar_of(volume.key)
+                if volume is not None:
+                    self.unit_files[(iid, argv[3])] = self._tar_of(volume.key)
+                else:
+                    # Directories outside the mounts carry no modeled content; the snapshot of a
+                    # plain bookkeeping directory downloads a valid archive with no entries.
+                    empty = io.BytesIO()
+                    with tarfile.open(fileobj=empty, mode="w"):
+                        pass
+                    self.unit_files[(iid, argv[3])] = empty.getvalue()
                 return ExecResult(0, b"", b"")
-            if argv[1] in ("rm", "mkdir", "sh"):
-                # sh -c covers the runtime's own start-up bookkeeping (log file, ownership).
+            if argv[1] == "id":
+                # The Harbor adapter resolves its role identities through the id applet.
+                return ExecResult(0, b"0\n", b"")
+            if argv[1] in ("rm", "mkdir", "chmod", "sh", "true"):
+                # sh -c covers the runtime's own start-up bookkeeping (log file, ownership);
+                # chmod/mkdir is the Harbor adapter preparing its log directories; true is the
+                # environment's liveness probe.
                 return ExecResult(0, b"", b"")
             raise AssertionError(f"unexpected busybox command: {argv!r}")
+        if len(argv) == 3 and argv[1] == "-c" and argv[0].endswith(("bash", "sh")):
+            # The Harbor adapter shells every command. Grading is the one that must run end to
+            # end, so a shell-wrapped test invocation gets the full VERIFY_COMMAND treatment.
+            command = argv[2]
+            if "/tests/test.sh" in command and "/logs/verifier" in command:
+                self.verification_specs.append(proc)
+                answer = self.platform.tree_contents.get(f"{self.workspace_key}/handoff/agent/answer.txt")
+                if answer is None:
+                    # A shared verifier grades in main, where the artifact already lives.
+                    answer = self.platform.tree_contents.get(f"{self.workspace_key}/artifacts/agent/answer.txt")
+                assert answer is not None, "grading did not receive the agent artifact through the handoff"
+                reward = b"reward:" + answer
+                self.unit_files[(iid, "/logs/verifier/reward.txt")] = reward
+                output = f"{self.workspace_key}/verification/reward.txt"
+                self.tree.files.add(output)
+                self.platform.tree_contents[output] = reward
+                return ExecResult(0, b"checked\n", b"")
+            # Everything else is Harbor's own bookkeeping (reward cleanup, chmod as root).
+            return ExecResult(0, b"", b"")
         if argv == VERIFY_COMMAND:
             self.verification_specs.append(proc)
             answer = self.platform.tree_contents.get(f"{self.workspace_key}/handoff/agent/answer.txt")
