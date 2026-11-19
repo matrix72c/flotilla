@@ -154,7 +154,7 @@ Then pick a path:
 |---|---|
 | One Linux machine with Docker, and want to try it | [Local quick start](docs/Local_Quick_Start.md): run OpenSandbox and Flotilla on one machine |
 | Deployment values from whoever runs your sandbox platform | [Quick start](docs/Quick_Start.md): write a task and run it from Python |
-| Harbor tasks such as Terminal-Bench | [Harbor quick start](docs/Harbor_Quick_Start.md) |
+| Harbor tasks such as Terminal-Bench | [Native tasks](docs/Native_Tasks.md): run a published Harbor-format dataset with `NativeAttempt` |
 | A sandbox platform to set up for your team | [Deployment guide](docs/Deployment.md) |
 
 ## Documentation
@@ -164,7 +164,6 @@ Then pick a path:
 - [Quick start](docs/Quick_Start.md): write a multi-service task and run it.
 - [Runtime API](docs/Runtime_API.md): execution, files, background processes, timeouts, cancellation, and errors.
 - [Compose support](docs/Compose_Support.md): which Compose keys are supported, approximated, or rejected.
-- [Harbor quick start](docs/Harbor_Quick_Start.md): run Harbor evaluations on Flotilla.
 
 **Operating a deployment**
 

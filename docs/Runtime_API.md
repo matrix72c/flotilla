@@ -19,7 +19,7 @@ Import public types from `flotilla`. Configuration is loaded locally at construc
 
 For production tasks use `NativeAttempt.create(fleet, source)` from `flotilla.native`, where `source = config.resolve_datasets()[name].source(key)`. The task is resolved into one plan per role, plus how it is graded, before any role is opened. Call `await attempt.open("main", options)`, stop the agent, then `await attempt.verify()`. Verification stages hidden tests and declared artifact handoffs; a separate verifier is used only when the task defines one. Always `await attempt.close()` in `finally`; it closes roles before deleting their private workspace.
 
-`TrialPlan` is the in-memory boundary for `fleet.open`: everything one trial runs, resolved from the task directory in this process. `open` also takes a `TaskSource` and resolves it for you; resolve it yourself when you want to check a dataset first, or run one plan several times. [Native tasks](Native_Tasks.md) documents datasets and path binding; [Harbor quick start](Harbor_Quick_Start.md) documents the optional consumer adapter.
+`TrialPlan` is the in-memory boundary for `fleet.open`: everything one trial runs, resolved from the task directory in this process. `open` also takes a `TaskSource` and resolves it for you; resolve it yourself when you want to check a dataset first, or run one plan several times. [Native tasks](Native_Tasks.md) documents datasets and path binding.
 
 The native Anchor requires installed Flotilla and filesystem helpers, not Harbor, Compose, Docker or push credentials. Actual platform acceptance remains separate from package/unit checks.
 

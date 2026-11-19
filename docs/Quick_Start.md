@@ -116,6 +116,5 @@ Only use writable paths declared by the task: readonly-rootfs tasks do not impli
 ## Next steps
 
 - [Native tasks](Native_Tasks.md): protocol, installed Anchor builder and path binding.
-- [Harbor quick start](Harbor_Quick_Start.md): the optional Harbor evaluation consumer.
 - [Configuration](Configuration.md): every field of a deployment spec.
 - [Compose support](Compose_Support.md): which Compose keys are supported.
