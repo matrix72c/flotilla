@@ -21,7 +21,6 @@ from flotilla.integrations.harbor_source import task_environments
 from flotilla.platform.base import ExecResult, FlotillaError, ProcessSpec
 from flotilla.testing.planning import planned_task
 from flotilla.testing.platform import FakePlatform, SharedTree
-from flotilla.testing.reports import report
 from flotilla.testing.runtime import deployment as runtime_deployment
 
 deployment = runtime_deployment
@@ -47,13 +46,10 @@ def test_scan_checks_verifier_context_and_continues_after_invalid_harbor_input(
     )
     with pytest.raises(TaskError, match="Harbor environment definition"):
         task_environments(tasks / "bad-config")
-    caps = tmp_path / "caps.json"
-    caps.write_text(report().dump_json())
     output = tmp_path / "scan.jsonl"
     from flotilla.testing.config import config_data
 
     config = config_data()
-    config["opensandbox"]["capabilities"] = str(caps)
     deployment_path = tmp_path / "inspect.toml"
     deployment_path.write_text(toml.dumps(config))
     assert main(["inspect", str(tasks / "valid"), "--deployment", str(deployment_path), "--out", str(output)]) == 0
@@ -196,12 +192,12 @@ def test_harbor_advertises_no_network_only_for_declared_dns(
     extra: bool,
 ) -> None:
     cfg, _, _ = deployment
-    data = cfg.load_report().model_dump(mode="json", by_alias=True)
-    data["network"]["cluster_dns"] = ["10.96.0.10"]
-    data["network"]["implicit_egress"] = ["10.96.0.10:53/tcp,udp"]
-    if extra:
-        data["network"]["implicit_egress"].append("10.0.0.1:443/tcp")
-    cfg.capabilities_path().write_text(json.dumps(data))
+    implicit = ("10.96.0.10:53/tcp,udp",) + (("10.0.0.1:443/tcp",) if extra else ())
+    cfg = cfg.model_copy(
+        update={
+            "platform": cfg.platform.model_copy(update={"cluster_dns": ("10.96.0.10",), "implicit_egress": implicit})
+        }
+    )
     env = adapter(tmp_path, cfg, Flotilla(deployment=cfg))
     assert env.capabilities.disable_internet is not extra
 
@@ -212,15 +208,14 @@ async def test_harbor_no_network_overrides_deployment_egress_with_dns_exception(
     deployment: tuple[FlotillaConfig, FakePlatform, SharedTree],
 ) -> None:
     cfg, platform, _ = deployment
-    cfg = cfg.model_copy(update={"network": cfg.network.model_copy(update={"external": "any"})})
-    data = (
-        cfg.load_report()
-        .model_copy(update={"evidence_profile": cfg.evidence_profile()})
-        .model_dump(mode="json", by_alias=True)
+    cfg = cfg.model_copy(
+        update={
+            "network": cfg.network.model_copy(update={"external": "any"}),
+            "platform": cfg.platform.model_copy(
+                update={"cluster_dns": ("10.96.0.10",), "implicit_egress": ("10.96.0.10:53/udp,tcp",)}
+            ),
+        }
     )
-    data["network"]["cluster_dns"] = ["10.96.0.10"]
-    data["network"]["implicit_egress"] = ["10.96.0.10:53/udp,tcp"]
-    cfg.capabilities_path().write_text(json.dumps(data))
     platform.caps = cfg.platform_capabilities()
     async with Flotilla(deployment=cfg) as fleet:
         env = adapter(tmp_path, cfg, fleet, network_policy=NetworkPolicy(network_mode="no-network"))

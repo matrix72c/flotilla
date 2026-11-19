@@ -6,7 +6,7 @@ import json
 from collections.abc import Sequence
 from typing import Any
 
-from flotilla.capabilities import Item
+from flotilla.capabilities import Evidence
 from flotilla.platform.base import ExternalPolicy, InstanceHandle, Platform
 from flotilla.platform.opensandbox.execd import command_body, multipart_upload
 from flotilla.platform.opensandbox.lifecycle import metadata_filter, sandbox_path
@@ -59,9 +59,10 @@ async def unmounted_mountinfo(platform: Platform, handle: InstanceHandle) -> str
     return result.stdout.decode()
 
 
-async def authentication(platform: Platform, handle: InstanceHandle, *, run_id: str, scope: str = "ordinary") -> Item:
+async def authentication(platform: Platform, handle: InstanceHandle, *, run_id: str) -> Evidence:
+    """Whether the exec channel checks its token, and whether the token leaks through lifecycle reads."""
     if not isinstance(platform, OpenSandboxPlatform):
-        return Item(status="skipped", evidence="backend has no authentication probe", scope=scope)
+        return Evidence(False, "backend has no authentication probe")
     from flotilla.probe import _sh
 
     unit = await platform._unit_of(handle.iid, stage="run")
@@ -89,23 +90,17 @@ async def authentication(platform: Platform, handle: InstanceHandle, *, run_id: 
             code = response.status_code
             observed.append({"route": path, "credential": kind, "status": code})
             if kind == "valid" and not 200 <= code < 300:
-                return Item(
-                    status="error",
-                    evidence="valid-token positive control failed",
-                    measurements={"requests": observed},
-                    scope=scope,
-                )
+                return Evidence(False, f"valid-token positive control failed on {path} (HTTP {code})")
             if kind != "valid" and code not in (401, 403):
-                return Item(
-                    status="failed" if 200 <= code < 300 else "error",
-                    evidence="missing/wrong token was not explicitly rejected",
-                    measurements={"requests": observed},
-                    scope=scope,
+                return Evidence(
+                    False,
+                    f"a {kind} token was not rejected on {path}: HTTP {code}"
+                    + (" (the channel served it)" if 200 <= code < 300 else ""),
                 )
     lifecycle = platform._lifecycle
     leaked = lifecycle.probe_token_disclosure.get(handle.iid)
     if leaked is None:
-        return Item(status="error", evidence="create response disclosure observation unavailable", scope=scope)
+        return Evidence(False, "create response disclosure observation unavailable")
     disclosure_routes: tuple[tuple[str, dict[str, str | int] | None], ...] = (
         (sandbox_path(handle.iid), None),
         ("/sandboxes", {"metadata": metadata_filter({"flotilla/probe": run_id}), "pageSize": 200}),
@@ -114,11 +109,11 @@ async def authentication(platform: Platform, handle: InstanceHandle, *, run_id: 
         response = await lifecycle._http.request("GET", path, params=params, stage="run", idempotent=True)
         items = response.get("items", []) if path == "/sandboxes" else [response]
         if not any(item.get("id") == handle.iid for item in items):
-            return Item(status="error", evidence="disclosure check did not observe the probed instance", scope=scope)
+            return Evidence(False, "disclosure check did not observe the probed instance")
         leaked = leaked or unit.token in json.dumps(response)
-    return Item(
-        status="failed" if leaked else "passed",
-        evidence="exec/file valid, missing and wrong token checks; create/get/list token disclosure",
-        measurements={"requests": observed, "token_disclosed": leaked},
-        scope=scope,
+    return Evidence(
+        not leaked,
+        "exec and file routes rejected missing and wrong tokens, and no lifecycle read disclosed one"
+        if not leaked
+        else "a lifecycle response disclosed the sandbox's execd token",
     )

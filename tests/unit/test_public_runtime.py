@@ -216,9 +216,6 @@ async def test_failed_share_verification_reclaims_anchor(
 ) -> None:
     cfg, platform, _ = deployment
     cfg = cfg.model_copy(update={"share": cfg.share.model_copy(update={"release_sha256": "f" * 64})})
-    cfg.load_report().model_copy(update={"evidence_profile": cfg.evidence_profile()}).write_json(
-        cfg.capabilities_path()
-    )
     fleet = Flotilla(deployment=cfg)
     with pytest.raises(FlotillaError):
         await fleet.start()
@@ -247,13 +244,9 @@ async def test_cancelling_one_start_waiter_does_not_cancel_shared_start(
 async def test_explicit_development_acceptance_allows_operations_and_records_gaps(
     deployment: tuple[FlotillaConfig, FakePlatform, SharedTree],
 ) -> None:
-    cfg, platform, _ = deployment
-    capability_data = cfg.load_report().model_dump(mode="json", by_alias=True)
+    """A waived isolation property is reported as waived, never as one this run verified."""
+    cfg, _platform, _ = deployment
     gaps = {"inbound_isolation", "exec_auth", "no_auto_mount"}
-    for section, name in [("network", "inbound_isolation"), ("runtime", "exec_auth"), ("storage", "no_auto_mount")]:
-        capability_data[section][name] = {"status": "failed", "evidence": "known development gap"}
-    cfg.capabilities_path().write_text(json.dumps(capability_data))
-    platform.caps = cfg.load_report().to_capabilities()
     cfg = cfg.model_copy(update={"security": cfg.security.model_copy(update={"accept_insecure": frozenset(gaps)})})
     from dataclasses import replace
 
@@ -267,7 +260,6 @@ async def test_explicit_development_acceptance_allows_operations_and_records_gap
     )
     async with Flotilla(deployment=cfg) as fleet, environment(fleet, RunRequest(connected, "development")) as env:
         info = await env.info()
-        assert set(info.security_gaps) == gaps
         assert set(info.accepted_security_gaps) == gaps
         assert (await env.agent.exec(["true"])).exit_code == 0
     assert fleet.cleanup_report is not None and fleet.cleanup_report.clean

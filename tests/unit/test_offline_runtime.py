@@ -1,6 +1,5 @@
 """Offline policy survives planning, caller overrides, and service wiring at open."""
 
-import json
 from pathlib import Path
 
 import pytest
@@ -13,15 +12,14 @@ from flotilla.testing.platform import FakePlatform, SharedTree
 from flotilla.testing.runtime import deployment as deployment
 
 
-def _dns_report(cfg: FlotillaConfig, platform: FakePlatform, *, extra: bool = False) -> None:
-    data = cfg.load_report().model_dump(mode="json", by_alias=True)
-    data["evidence_profile"] = cfg.evidence_profile()
-    data["network"]["cluster_dns"] = ["10.96.0.10"]
-    data["network"]["implicit_egress"] = ["10.96.0.10:53/udp,tcp"]
-    if extra:
-        data["network"]["implicit_egress"].append("169.254.169.254:80/tcp")
-    cfg.capabilities_path().write_text(json.dumps(data))
+def _with_cluster_dns(cfg: FlotillaConfig, platform: FakePlatform, *, extra: bool = False) -> FlotillaConfig:
+    """A deployment whose resolver reaches out, plus optionally one address nobody declared."""
+    egress = ["10.96.0.10:53/udp,tcp"] + (["169.254.169.254:80/tcp"] if extra else [])
+    cfg = cfg.model_copy(
+        update={"platform": cfg.platform.model_copy(update={"cluster_dns": ["10.96.0.10"], "implicit_egress": egress})}
+    )
     platform.caps = cfg.platform_capabilities()
+    return cfg
 
 
 @pytest.mark.asyncio
@@ -35,7 +33,7 @@ async def test_no_network_keeps_peers_and_none_keeps_no_peers(
 ) -> None:
     cfg, platform, _ = deployment
     cfg = cfg.model_copy(update={"network": cfg.network.model_copy(update={"external": "any"})})
-    _dns_report(cfg, platform)
+    cfg = _with_cluster_dns(cfg, platform)
     source = tmp_path / "offline"
     (source / "environment").mkdir(parents=True)
     policy = {"task": 'network_mode = "no-network"', "legacy": "allow_internet = false", "option": ""}[mode]
@@ -66,7 +64,7 @@ async def test_unknown_implicit_egress_rejects_each_offline_entrypoint(
     mode: str,
 ) -> None:
     cfg, platform, _ = deployment
-    _dns_report(cfg, platform, extra=True)
+    cfg = _with_cluster_dns(cfg, platform, extra=True)
     source = tmp_path / "offline"
     (source / "environment").mkdir(parents=True)
     policy = 'network_mode = "no-network"' if mode == "task" else ""

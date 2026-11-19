@@ -1,4 +1,10 @@
-"""Nine-member coverage and network controls cannot manufacture isolation success."""
+"""Network isolation controls cannot manufacture their own success.
+
+Every check here allows the traffic, denies it, then allows it again. A single blocked exchange
+proves nothing, so a missing positive control or a missing restore leaves the restriction
+undemonstrated rather than passing -- and anything that arrives during the deny step is a leak no
+matter what the other samples did.
+"""
 
 import os
 import socket
@@ -12,9 +18,9 @@ from typing import Any
 import pytest
 
 from flotilla import probe_network
-from flotilla.capabilities import ExternalTarget, Item
+from flotilla.capabilities import Evidence, ExternalTarget
 from flotilla.core.anchor import Anchor, AnchorSettings
-from flotilla.platform.base import ExecResult, InstanceHandle, Platform, ProcessSpec
+from flotilla.platform.base import InstanceHandle, Platform
 from flotilla.probe import ProbeSettings, _Run
 from flotilla.testing.platform import FakePlatform, ManualClock
 
@@ -22,126 +28,31 @@ SETTINGS = ProbeSettings(
     image="r/probe@sha256:" + "1" * 64,
     share_release="r1",
     endpoint="http://os.test",
-    evidence_profile="test",
     link_members=9,
     hosts_recheck_s=0,
 )
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("control_failure", [False, True])
-async def test_nine_members_all_directed_protocol_pairs_and_controls(
-    platform: FakePlatform, clock: ManualClock, monkeypatch: pytest.MonkeyPatch, control_failure: bool
-) -> None:
-    anchor = Anchor(platform, clock, "Lp", AnchorSettings(image="anchor"))
-    await clock.run(anchor.start())
-    run = _Run(platform, clock, anchor, SETTINGS, "p1")
-    pairs = set()
-    policies = []
-
-    async def exchange(_run: _Run, source: InstanceHandle, host: str, port: int, protocol: str, token: str) -> str:
-        if ":" in token:
-            pairs.add((protocol, token.split("/", 1)[-1]))
-        if token.endswith("restore") and control_failure:
-            return "blocked"
-        return "blocked" if token.endswith(("deny", "unlinked")) else "received"
-
-    async def policy(_platform: Platform, target: InstanceHandle, **kwargs: Any) -> None:
-        policies.append((target.iid, kwargs))
-
-    monkeypatch.setattr(probe_network, "exchange", exchange)
-    monkeypatch.setattr(probe_network, "policy", policy)
-    tcp, udp, inbound = await clock.run(probe_network.links(run))
-    assert tcp.ok and udp.ok
-    assert tcp.measurements["members"] == 9
-    assert tcp.measurements["outcomes"] == udp.measurements["outcomes"] == {"received": 72}
-    assert tcp.measurements["failed_pairs"] == udp.measurements["failed_pairs"] == []
-    assert len(pairs) == 9 * 8 * 2
-    assert inbound.status == ("error" if control_failure else "passed")
-    denied = [kwargs for _, kwargs in policies if kwargs["ingress"] == ()]
-    assert denied and all(kwargs["egress"] for kwargs in denied)
-    await clock.run(run.cleanup())
-    await anchor.close()
-
-
-@pytest.mark.asyncio
-async def test_listener_unavailable_cannot_prove_any_isolation(
-    platform: FakePlatform, clock: ManualClock, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    anchor = Anchor(platform, clock, "Lp", AnchorSettings(image="anchor"))
-    await clock.run(anchor.start())
-    run = _Run(platform, clock, anchor, replace(SETTINGS, link_members=2), "p1")
-
-    async def exchange(*_args: object) -> str:
-        return "blocked"
-
-    monkeypatch.setattr(probe_network, "exchange", exchange)
-    results = await clock.run(probe_network.links(run))
-    assert all(item.status == "error" for item in results)
-    await clock.run(run.cleanup())
-    await anchor.close()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("outcome", ["blocked", "error", "wrong-content"])
-async def test_failed_peer_pairs_retain_bounded_nonsecret_evidence(
-    platform: FakePlatform, clock: ManualClock, monkeypatch: pytest.MonkeyPatch, outcome: str
-) -> None:
-    anchor = Anchor(platform, clock, "Lp", AnchorSettings(image="anchor"))
-    await clock.run(anchor.start())
-    run = _Run(platform, clock, anchor, replace(SETTINGS, link_members=2), "p1")
-
-    async def exchange(_run: _Run, source: InstanceHandle, host: str, port: int, protocol: str, token: str) -> str:
-        if token.endswith(":0:1:udp"):
-            return outcome
-        return "blocked" if token.endswith(("deny", "unlinked")) else "received"
-
-    async def policy(*args: object, **kwargs: object) -> None:
-        pass
-
-    monkeypatch.setattr(probe_network, "exchange", exchange)
-    monkeypatch.setattr(probe_network, "policy", policy)
-    tcp, udp, inbound = await clock.run(probe_network.links(run))
-    assert tcp.status == "passed"  # independent protocol and inbound controls still run
-    assert tcp.measurements["outcomes"] == {"received": 2}
-    assert udp.status == ("error" if outcome == "error" else "failed")
-    assert udp.measurements["outcomes"] == {outcome: 1, "received": 1}
-    assert udp.measurements["failed_pairs"] == [{"source": "0", "target": "1", "outcome": outcome}]
-    assert "p1" not in udp.model_dump_json()
-    assert udp.measurements["samples"][0]["outcomes"] == [outcome] * 3
-    assert inbound.status == "passed"
-    await clock.run(run.cleanup())
-    await anchor.close()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "fault", ["packet-miss", "command-error", "inbound-leak", "inbound-leak-restore", "disconnect-leak-restore"]
-)
-async def test_fixed_udp_samples_retain_misses_errors_and_any_deny_leak(
+@pytest.mark.parametrize("fault", ["none", "listener", "leak-tcp", "leak-udp", "no-positive", "no-restore"])
+async def test_inbound_isolation_needs_allow_deny_and_restore(
     platform: FakePlatform, clock: ManualClock, monkeypatch: pytest.MonkeyPatch, fault: str
 ) -> None:
     anchor = Anchor(platform, clock, "Lp", AnchorSettings(image="anchor"))
     await clock.run(anchor.start())
     run = _Run(platform, clock, anchor, replace(SETTINGS, link_members=2), "p1")
-    calls: dict[str, list[str]] = {}
 
     async def exchange(_run: _Run, source: InstanceHandle, host: str, port: int, protocol: str, token: str) -> str:
         if host == "127.0.0.1":
-            return "received"
-        index, phase = token.split("/", 1)
-        calls.setdefault(protocol + phase, []).append(index)
-        if protocol == "udp" and index == "0" and phase.endswith(":0:1:udp"):
-            return "error" if fault == "command-error" else "blocked"
-        if phase.endswith(("deny", "unlinked")):
-            leak = (fault.startswith("inbound-leak") and phase.endswith("deny")) or (
-                fault == "disconnect-leak-restore" and phase.endswith("unlinked")
-            )
-            return "received" if protocol == "udp" and index == "1" and leak else "blocked"
-        if protocol == "udp" and (
-            (fault == "inbound-leak-restore" and phase.endswith("restore"))
-            or (fault == "disconnect-leak-restore" and phase.endswith("linked"))
-        ):
+            # The listener positive control: without it nothing downstream means anything.
+            return "blocked" if fault == "listener" else "received"
+        if token.endswith("deny"):
+            if fault == f"leak-{protocol}":
+                return "received"
+            return "blocked"
+        if token.endswith("allow") and fault == "no-positive":
+            return "blocked"
+        if token.endswith("restore") and fault == "no-restore":
             return "blocked"
         return "received"
 
@@ -150,77 +61,12 @@ async def test_fixed_udp_samples_retain_misses_errors_and_any_deny_leak(
 
     monkeypatch.setattr(probe_network, "exchange", exchange)
     monkeypatch.setattr(probe_network, "policy", policy)
-    tcp, udp, inbound = await clock.run(probe_network.links(run))
-    assert tcp.ok
-    expected = "error" if fault == "command-error" else "failed" if fault == "disconnect-leak-restore" else "passed"
-    assert udp.status == expected
-    assert inbound.status == ("failed" if fault.startswith("inbound-leak") else "passed")
-    assert udp.measurements["samples"][0]["outcomes"] == [
-        "error" if fault == "command-error" else "blocked",
-        "received",
-        "received",
-    ]
-    assert all(indices == (["0", "1", "2"] if key.startswith("udp") else ["0"]) for key, indices in calls.items())
-    assert inbound.measurements["controls"][1]["denied"] == (
-        ["blocked", "received", "blocked"] if fault.startswith("inbound-leak") else ["blocked"] * 3
-    )
-    await clock.run(run.cleanup())
-    await anchor.close()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("resolver_controls", [False, True])
-@pytest.mark.parametrize("dns_exceptions", [(), ("192.0.2.53:53/tcp", "192.0.2.53:53/udp")])
-@pytest.mark.parametrize(
-    ("external_item", "dns_item"),
-    [
-        (Item(status="passed"), Item(status="passed")),
-        (Item(status="skipped"), Item(status="passed")),
-        (Item(status="error"), Item(status="passed")),
-        (Item(status="failed"), Item(status="passed")),
-        (Item(status="passed"), Item(status="skipped")),
-        (Item(status="passed"), Item(status="error")),
-        (Item(status="passed"), Item(status="failed")),
-    ],
-)
-async def test_external_acceptance_allows_measured_dns_but_requires_external_controls(
-    platform: FakePlatform,
-    clock: ManualClock,
-    monkeypatch: pytest.MonkeyPatch,
-    resolver_controls: bool,
-    dns_exceptions: tuple[str, ...],
-    external_item: Item,
-    dns_item: Item,
-) -> None:
-    anchor = Anchor(platform, clock, "Lp", AnchorSettings(image="anchor"))
-    await clock.run(anchor.start())
-    targets: tuple[tuple[str, int, str], ...] = (("192.0.2.1", 48080, "tcp"), ("192.0.2.1", 48080, "udp"))
-    if resolver_controls:
-        targets += (("192.0.2.53", 48080, "tcp"), ("192.0.2.53", 48080, "udp"))
-    run = _Run(platform, clock, anchor, replace(SETTINGS, external_targets=targets), "p1")
-    unit = await clock.run(run._create(run._spec("unit")))
-    passed = Item(status="passed")
-
-    async def links(_run: _Run) -> tuple[Item, Item, Item]:
-        return passed, passed, passed
-
-    async def egress(_run: _Run) -> tuple[Item, Item]:
-        return external_item, external_item
-
-    async def dns(_run: _Run, _handle: InstanceHandle) -> tuple[Item, tuple[str, ...], tuple[str, ...]]:
-        return dns_item, ("192.0.2.53",), dns_exceptions
-
-    monkeypatch.setattr(probe_network, "links", links)
-    monkeypatch.setattr(probe_network, "egress", egress)
-    monkeypatch.setattr(probe_network, "dns", dns)
-    network = await clock.run(probe_network.measure_network(run, unit))
-    assert network.network_acceptance.ok is (external_item.ok and dns_item.ok)
-    assert network.implicit_egress == dns_exceptions
-    assert network.cluster_dns == ("192.0.2.53",)
-    expected = ("passed" if external_item.ok else "error") if resolver_controls else "skipped"
-    assert network.resolver_non_dns.status == expected
-    if network.network_acceptance.ok:
-        assert "not complete network disconnection" in network.network_acceptance.evidence
+    inbound = await clock.run(probe_network.inbound_isolation(run))
+    assert inbound.held is (fault == "none")
+    if fault == "listener":
+        assert "positive control" in inbound.observed
+    if fault.startswith("leak-"):
+        assert "stayed reachable" in inbound.observed
     await clock.run(run.cleanup())
     await anchor.close()
 
@@ -229,7 +75,7 @@ async def test_external_acceptance_allows_measured_dns_but_requires_external_con
 @pytest.mark.parametrize(
     "fault", ["none", "missing", "tcp-only", "tcp-only-leak", "positive", "deny", "restore", "leak-restore"]
 )
-async def test_external_echo_controls_still_require_both_protocols_and_policy_transitions(
+async def test_egress_requires_both_protocols_and_every_policy_transition(
     platform: FakePlatform, clock: ManualClock, monkeypatch: pytest.MonkeyPatch, fault: str
 ) -> None:
     anchor = Anchor(platform, clock, "Lp", AnchorSettings(image="anchor"))
@@ -252,40 +98,83 @@ async def test_external_echo_controls_still_require_both_protocols_and_policy_tr
 
     monkeypatch.setattr(probe_network, "exchange", exchange)
     monkeypatch.setattr(probe_network, "policy", policy)
-    none, _allow = await clock.run(probe_network.egress(run))
-    assert none.ok is (fault == "none")
+    none, _worked = await clock.run(probe_network.egress(run))
+    assert none.held is (fault == "none")
     if fault in ("deny", "tcp-only-leak", "leak-restore"):
-        assert none.status == "failed"
+        assert "stayed reachable under a deny policy" in none.observed
+    if fault == "tcp-only":
+        assert "both TCP and UDP" in none.observed
+    if fault == "missing":
+        assert "not configured" in none.observed
     await clock.run(run.cleanup())
     await anchor.close()
 
 
 @pytest.mark.asyncio
-async def test_later_any_mode_deny_leak_cannot_enable_network_acceptance(
+@pytest.mark.parametrize("egress_held", [True, False])
+@pytest.mark.parametrize("dns_held", [True, False])
+async def test_acceptance_needs_both_egress_enforcement_and_measured_dns(
+    platform: FakePlatform,
+    clock: ManualClock,
+    monkeypatch: pytest.MonkeyPatch,
+    egress_held: bool,
+    dns_held: bool,
+) -> None:
+    anchor = Anchor(platform, clock, "Lp", AnchorSettings(image="anchor"))
+    await clock.run(anchor.start())
+    run = _Run(platform, clock, anchor, SETTINGS, "p1")
+    unit = await clock.run(run._create(run._spec("unit")))
+    implicit = ("192.0.2.53:53/tcp", "192.0.2.53:53/udp")
+
+    async def inbound(_run: _Run) -> Evidence:
+        return Evidence(True, "test")
+
+    async def egress(_run: _Run, *, mode: str = "allowlist") -> tuple[Evidence, bool]:
+        return Evidence(egress_held, "test"), True
+
+    async def resolvers_of(_run: _Run, _handle: InstanceHandle) -> tuple[Evidence, tuple[str, ...], tuple[str, ...]]:
+        return Evidence(dns_held, "test"), ("192.0.2.53",), implicit
+
+    monkeypatch.setattr(probe_network, "inbound_isolation", inbound)
+    monkeypatch.setattr(probe_network, "egress", egress)
+    monkeypatch.setattr(probe_network, "resolvers_of", resolvers_of)
+    network = await clock.run(probe_network.measure_isolation(run, unit))
+    assert network.network_acceptance.held is (egress_held and dns_held)
+    # Cluster DNS answering under a deny policy is recorded, not treated as a leak.
+    assert network.implicit_egress == implicit
+    assert network.cluster_dns == ("192.0.2.53",)
+    if network.network_acceptance.held:
+        assert "not complete network disconnection" in network.network_acceptance.observed
+    await clock.run(run.cleanup())
+    await anchor.close()
+
+
+@pytest.mark.asyncio
+async def test_a_leak_under_any_mode_cannot_be_hidden_by_the_allowlist_controls(
     platform: FakePlatform, clock: ManualClock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     anchor = Anchor(platform, clock, "Lp", AnchorSettings(image="anchor"))
     await clock.run(anchor.start())
     run = _Run(platform, clock, anchor, replace(SETTINGS, test_external_any=True), "p1")
     unit = await clock.run(run._create(run._spec("unit")))
-    passed = Item(status="passed")
-    leak = Item(status="failed", evidence="deny response")
 
-    async def links(_run: _Run) -> tuple[Item, Item, Item]:
-        return passed, passed, passed
+    async def inbound(_run: _Run) -> Evidence:
+        return Evidence(True, "test")
 
-    async def egress(_run: _Run, *, mode: str = "allowlist") -> tuple[Item, Item]:
-        return (leak if mode == "any" else passed), passed
+    async def egress(_run: _Run, *, mode: str = "allowlist") -> tuple[Evidence, bool]:
+        if mode == "any":
+            return Evidence(False, "an external target stayed reachable under a deny policy over ['tcp']"), True
+        return Evidence(True, "test"), True
 
-    async def dns(_run: _Run, _handle: InstanceHandle) -> tuple[Item, tuple[str, ...], tuple[str, ...]]:
-        return passed, ("192.0.2.53",), ()
+    async def resolvers_of(_run: _Run, _handle: InstanceHandle) -> tuple[Evidence, tuple[str, ...], tuple[str, ...]]:
+        return Evidence(True, "test"), ("192.0.2.53",), ()
 
-    monkeypatch.setattr(probe_network, "links", links)
+    monkeypatch.setattr(probe_network, "inbound_isolation", inbound)
     monkeypatch.setattr(probe_network, "egress", egress)
-    monkeypatch.setattr(probe_network, "dns", dns)
-    network = await clock.run(probe_network.measure_network(run, unit))
-    assert network.external_none.status == "failed"
-    assert not network.network_acceptance.ok
+    monkeypatch.setattr(probe_network, "resolvers_of", resolvers_of)
+    network = await clock.run(probe_network.measure_isolation(run, unit))
+    assert not network.external_none.held
+    assert not network.network_acceptance.held
     await clock.run(run.cleanup())
     await anchor.close()
 
@@ -293,71 +182,6 @@ async def test_later_any_mode_deny_leak_cannot_enable_network_acceptance(
 def test_legacy_direct_settings_targets_normalize_to_echo() -> None:
     settings = replace(SETTINGS, external_targets=(("192.0.2.1", 48080, "udp"),))
     assert settings.external_targets == (ExternalTarget("192.0.2.1", 48080, "udp"),)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["allowlist", "any"])
-@pytest.mark.parametrize(
-    "fault", ["none", "resolve", "positive", "wrong-positive", "deny", "wrong-deny", "restore", "cert"]
-)
-async def test_standard_services_pin_address_and_require_all_phases(
-    platform: FakePlatform, clock: ManualClock, monkeypatch: pytest.MonkeyPatch, mode: str, fault: str
-) -> None:
-    anchor = Anchor(platform, clock, "Lp", AnchorSettings(image="anchor"))
-    await clock.run(anchor.start())
-    targets = (
-        ExternalTarget("https.example.com", 443, "tcp", "https"),
-        ExternalTarget("ntp.example.com", 123, "udp", "ntp"),
-    )
-    run = _Run(platform, clock, anchor, replace(SETTINGS, external_targets=targets), "p1")
-    resolutions: list[str] = []
-    exchanges: dict[str, list[tuple[str, ...]]] = {"https": [], "ntp": []}
-    policies = []
-
-    def execute(_iid: str, proc: ProcessSpec) -> ExecResult:
-        script, *args = proc.argv[3:]
-        if script == probe_network._RESOLVE:
-            resolutions.append(args[0])
-            return ExecResult(0, b"bad-address" if fault == "resolve" else b"192.0.2.1", b"")
-        assert script == probe_network._STANDARD_CLIENT
-        _ip, _port, service, _host = args
-        exchanges[service].append(tuple(args))
-        phase = len(exchanges[service])
-        value = "blocked" if phase == 2 else "received"
-        if service == "https":
-            if (fault == "positive" and phase == 1) or (fault == "restore" and phase == 3):
-                value = "blocked"
-            elif fault == "wrong-positive" and phase == 1:
-                value = "wrong-content"
-            elif fault == "cert":
-                value = "error"
-            elif fault in ("deny", "wrong-deny") and phase == 2:
-                value = "received" if fault == "deny" else "wrong-content"
-        return ExecResult(0, value.encode(), b"")
-
-    async def policy(_platform: Platform, target: InstanceHandle, **kwargs: Any) -> None:
-        policies.append(kwargs["external"])
-
-    platform.set_exec_handler(execute)
-    monkeypatch.setattr(probe_network, "policy", policy)
-    none, allow = await clock.run(probe_network.egress(run, mode=mode))
-    assert none.ok is (fault == "none")
-    assert allow.ok is (fault in ("none", "deny", "wrong-deny"))
-    assert none.status == ("passed" if fault == "none" else "failed" if fault in ("deny", "wrong-deny") else "error")
-    assert len(resolutions) == len(set(resolutions))  # No DNS retry or re-resolution on deny/restore.
-    for service, calls in exchanges.items():
-        if calls:
-            assert len(set(calls)) == 1
-            assert calls[0] == ("192.0.2.1", "443" if service == "https" else "123", service, service + ".example.com")
-    if fault == "none":
-        assert all(len(calls) == 3 for calls in exchanges.values())
-        assert [item["service"] for item in none.measurements["targets"]] == ["https", "ntp"]
-        assert all(item["address"] == "192.0.2.1" for item in none.measurements["targets"])
-        assert [item.mode for item in policies].count("none") == 2
-        if mode == "allowlist":
-            assert all(item.cidrs == ("192.0.2.1",) for item in policies if item.mode == "allowlist")
-    await clock.run(run.cleanup())
-    await anchor.close()
 
 
 def _run_service_client(

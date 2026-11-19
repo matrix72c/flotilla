@@ -230,11 +230,14 @@ class ExternalPolicy:
 
 # Internal creation profile selected by trusted deployment wiring, never task data.
 InstanceProfile = Literal["default", "management"]
-#: Host devices a capability report can record.
+#: A host device a deployment may expose to a sandbox.
 Device = Literal["fuse", "kvm", "tun"]
-#: Devices a task may request, by the device node it declares. They need the privileged runtime.
-#: The platform does not require a special runtime for FUSE, but the probe only measures it on a
-#: privileged instance, so admitting it elsewhere would claim a configuration nothing verified.
+#: Every one of them. A runtime that cannot host a device refuses the create request carrying its
+#: extension, so a deployment is assumed to offer all three rather than measured for them.
+DEVICES: frozenset[Device] = frozenset({"fuse", "kvm", "tun"})
+#: Devices a task may request, by the device node it declares. They need the privileged runtime --
+#: including FUSE, for which the platform asks no special runtime, because flotilla writes the
+#: device extension per instance and only the privileged create path carries it.
 TaskDevice = Literal["fuse", "kvm", "tun"]
 TASK_DEVICE_PATHS: Mapping[str, TaskDevice] = {
     "/dev/fuse": "fuse",

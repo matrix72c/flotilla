@@ -69,7 +69,6 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
     cfg = FlotillaConfig.load(args.deployment)
     # Test-only TTL: force renewal in minutes without modifying the deployment file.
     cfg = cfg.model_copy(update={"reaper": cfg.reaper.model_copy(update={"trial_ttl": 180})})
-    cfg.check_against(cfg.load_report())
     clock = SystemClock()
     observer = build(
         endpoint=cfg.opensandbox_settings().endpoint,
@@ -77,7 +76,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         clock=clock,
         settings=cfg.network_settings(),
         storage=cfg.storage_settings(),
-        caps=cfg.load_report().to_capabilities(),
+        caps=cfg.platform_capabilities(),
         execd=cfg.execd_settings(),
         extensions=cfg.opensandbox_settings().extensions,
         create_fields=cfg.opensandbox_settings().create_fields,

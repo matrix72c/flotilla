@@ -65,7 +65,10 @@ class EnvironmentInfo:
     services: tuple[ServiceInfo, ...]
     timings: tuple[tuple[str, float], ...]
     state: str
-    security_gaps: tuple[str, ...] = ()
+    #: Isolation properties this deployment is configured to run without
+    #: (`security.accept_insecure`). What a deployment actually lacks is measured by
+    #: `flotilla probe`, in another process, so a running environment can only report what was
+    #: accepted -- never claim the rest were verified here.
     accepted_security_gaps: tuple[str, ...] = ()
 
 

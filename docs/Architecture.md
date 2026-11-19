@@ -15,8 +15,8 @@
 | Dataset | A directory of task directories, declared by name and bound to a local and a platform root |
 | Task source | Where one task's files are, on the client and on the platform; both, because neither side can infer the other |
 | Attempt workspace | Launch-owned private role state, verification staging and artifact handoff directories |
-| Capability report | `capabilities.json`, written by `flotilla probe`: what the deployment supports, each item `passed`, `failed`, `skipped`, or `error` |
-| Security gap / waiver | A security capability the deployment lacks; startup refuses unless it is listed in `security.accept_insecure` |
+| Isolation evidence | What `flotilla probe` measured, in memory for the length of the run: seven properties a deployment can lack silently, plus what was observed for each |
+| Waiver | An isolation property the operator accepts running without, named in `security.accept_insecure`; the probe exits nonzero on any gap not named there |
 | execd | The OpenSandbox daemon inside each sandbox that runs commands and transfers files |
 | GC | Explicit collection of resources left by crashed launches (`flotilla gc`) |
 

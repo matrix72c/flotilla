@@ -217,7 +217,6 @@ CHECKS: tuple[Callable[[Checks], Awaitable[Result]], ...] = (
 
 async def run(args: argparse.Namespace) -> tuple[dict[str, object], list[Result]]:
     cfg = FlotillaConfig.load(args.deployment)
-    report = cfg.load_report()
     clock = SystemClock()
     platform = build(
         endpoint=cfg.opensandbox_settings().endpoint,
@@ -225,7 +224,7 @@ async def run(args: argparse.Namespace) -> tuple[dict[str, object], list[Result]
         clock=clock,
         settings=cfg.network_settings(),
         storage=cfg.storage_settings(),
-        caps=report.to_capabilities(),
+        caps=cfg.platform_capabilities(),
         execd=cfg.execd_settings(),
         extensions=cfg.opensandbox_settings().extensions,
         privileged_extensions=cfg.opensandbox_settings().privileged_extensions,
@@ -233,9 +232,8 @@ async def run(args: argparse.Namespace) -> tuple[dict[str, object], list[Result]
         group_extension=cfg.opensandbox_settings().group_extension,
     )
     out: dict[str, object] = {
-        "deployment": report.deployment,
-        "missing_required": report.missing_required(),
-        "security_gaps": report.security_gaps(),
+        "deployment": cfg.probe.deployment,
+        "accepted_gaps": sorted(cfg.security.accept_insecure),
     }
     launch_id = f"e2e-{uuid.uuid4().hex[:12]}"
     trial_id = f"t{uuid.uuid4().hex[:12]}"
@@ -283,10 +281,7 @@ async def _leftover(platform: Platform, launch_id: str) -> list[str]:
 
 
 def _print(out: dict[str, object], results: list[Result]) -> None:
-    print(
-        f"deployment {out['deployment']}; capability gaps: "
-        f"required {out['missing_required']}, security {out['security_gaps']}"
-    )
+    print(f"deployment {out['deployment']}; isolation gaps accepted by config: {out['accepted_gaps']}")
     if "error" in out:
         print(f"trial startup failed: {out['error']}")
     else:

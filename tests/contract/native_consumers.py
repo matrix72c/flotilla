@@ -260,7 +260,6 @@ async def run(deployment: Path, image: str, runtime_file: Path, output: Path) ->
 
     deployment = deployment.expanduser().resolve(strict=True)
     cfg = FlotillaConfig.load(deployment)
-    cfg.check_against(cfg.load_report())
     runtime = AgentRuntimeConfig.model_validate_json(runtime_file.read_text())
     if runtime.storage_root_identity != cfg.storage.settings().root:
         raise ValueError("agent runtime storage identity differs from deployment")

@@ -6,21 +6,19 @@ from types import SimpleNamespace
 import pytest
 
 from flotilla.anchor_build import AnchorBuildOptions, AnchorBuildResult
-from flotilla.capabilities import CapabilityReport
+from flotilla.capabilities import ISOLATION_PROPERTIES, UNMEASURED, IsolationEvidence
 from flotilla.cli import _build_parser, main
 from flotilla.config import ConfigError, FlotillaConfig
 from flotilla.environment import load_env_file
 from flotilla.native.dataset import DatasetError
 from flotilla.testing.config import config
-from flotilla.testing.reports import no, report
+from flotilla.testing.reports import evidence, no, ok
 
 
 def test_probe_cleanup_is_required() -> None:
-    cfg = config()
-    evidence = report(cleanup=no())
-    assert "confirmed cleanup" in evidence.missing_required()
-    with pytest.raises(ConfigError, match="confirmed cleanup"):
-        cfg.check_against(evidence)
+    """A deployment whose resources cannot be confirmed deleted is refused, waivers or not."""
+    with pytest.raises(ConfigError, match="cleanup"):
+        config().check_isolation(evidence(cleanup=no()))
 
 
 def test_deployment_loading_does_not_open_datasets(tmp_path: Path) -> None:
@@ -82,7 +80,7 @@ async def test_probe_anchor_cleanup_failure_is_persisted_not_admitted(
 
     module = importlib.import_module("flotilla.probe")
     cfg = config(probe={"image": "reg/probe@sha256:" + "a" * 64}).model_copy(update={"base_dir": tmp_path})
-    evidence = report(evidence_profile=cfg.evidence_profile())
+    measured_evidence = evidence()
 
     class FakeAnchor:
         launch_id = "probe-test"
@@ -108,26 +106,67 @@ async def test_probe_anchor_cleanup_failure_is_persisted_not_admitted(
         if broken == "platform":
             raise RuntimeError("private details must not enter evidence")
 
-    async def measured(*args: object) -> CapabilityReport:
-        return evidence
+    async def measured(*args: object) -> IsolationEvidence:
+        return measured_evidence
 
     monkeypatch.setattr(module, "Anchor", FakeAnchor)
     monkeypatch.setattr(module, "probe", measured)
     monkeypatch.setattr(FlotillaConfig, "build_platform", lambda *a, **k: SimpleNamespace(aclose=close_platform))
-    with pytest.raises(ConfigError, match="confirmed cleanup"):
+    with pytest.raises(ConfigError) as failure:
         await module.probe_deployment(cfg)
-    text = cfg.capabilities_path().read_text()
-    assert "unconfirmed" in text
-    assert "private details" not in text
+    assert "cleanup" in str(failure.value)
+    assert "private details" not in str(failure.value)
+
+
+@pytest.mark.parametrize("waived", [False, True])
+def test_probe_reports_each_property_and_never_claims_a_waived_one_held(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], waived: bool
+) -> None:
+    """Every measured property reaches the operator, and a waiver reads as accepted, not as held."""
+    from flotilla import cli
+
+    security = {"accept_insecure": ["exec_auth"]} if waived else {}
+    cfg = config(probe={"image": "reg/probe@sha256:" + "a" * 64}, security=security)
+    path = tmp_path / "deployment.toml"
+    path.write_text("")
+    measured = evidence(
+        exec_auth=no() if waived else ok(),
+        # The privileged phase only ran far enough to measure the network.
+        privileged_storage=UNMEASURED,
+        privileged_no_auto_mount=UNMEASURED,
+        privileged_exec_auth=UNMEASURED,
+        privileged_inbound_isolation=UNMEASURED,
+        external_forms=frozenset({"none", "allowlist"}),
+        implicit_egress=("10.96.0.10:53/udp",),
+    )
+
+    async def probed(*args: object, **kwargs: object) -> IsolationEvidence:
+        return measured
+
+    monkeypatch.setattr(FlotillaConfig, "load", classmethod(lambda cls, p: cfg))
+    monkeypatch.setattr(cli, "probe_deployment", probed)
+    assert main(["probe", "--deployment", str(path)]) == 0
+    out = capsys.readouterr().out
+    for name in (*ISOLATION_PROPERTIES, "cleanup", "privileged_network"):
+        assert name in out
+    assert "allowlist, none" in out and "10.96.0.10:53/udp" in out
+    # A privileged check that never ran is absent rather than printed as a failure.
+    assert "privileged_exec_auth" not in out
+    if waived:
+        assert "NOT SHOWN  exec_auth" in out and "accepts running without: exec_auth" in out
+    else:
+        assert "NOT SHOWN" not in out and "accepts running without" not in out
 
 
 @pytest.mark.asyncio
-async def test_probe_output_mismatch_fails_before_platform(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_probe_requires_a_pinned_image_before_reaching_the_platform(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from flotilla.probe import probe_deployment
 
     cfg = config().model_copy(update={"base_dir": tmp_path})
     monkeypatch.setattr(
         FlotillaConfig, "build_platform", lambda *a, **k: pytest.fail("created platform before validation")
     )
-    with pytest.raises(ConfigError, match="must match"):
-        await probe_deployment(cfg, out=tmp_path / "wrong.json")
+    with pytest.raises(ConfigError, match=r"probe\.image"):
+        await probe_deployment(cfg)

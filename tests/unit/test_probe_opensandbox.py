@@ -8,22 +8,16 @@ from typing import Any
 import httpx
 import pytest
 
-from flotilla.core.anchor import Anchor, AnchorSettings
 from flotilla.platform.base import (
-    ExecResult,
     ExternalPolicy,
     FlotillaError,
-    InstanceHandle,
     InstanceSpec,
-    ProcessSpec,
     Resources,
 )
 from flotilla.platform.opensandbox import StorageSettings, build
 from flotilla.platform.opensandbox.filesystem import FilesystemSettings
 from flotilla.platform.opensandbox.network import NetworkSettings
 from flotilla.platform.opensandbox.platform import OpenSandboxPlatform
-from flotilla.probe import ProbeSettings, _Run
-from flotilla.probe_checks import prerequisites
 from flotilla.probe_opensandbox import authentication, policy
 from flotilla.testing.config import config
 from flotilla.testing.platform import ManualClock
@@ -82,12 +76,13 @@ async def test_probe_pending_filesystem_does_not_enable_normal_create(clock: Man
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "bad_token_status,leak,expected",
-    [(403, False, "passed"), (200, False, "failed"), (500, False, "error"), (403, True, "failed")],
+    "bad_token_status,leak,held",
+    [(403, False, True), (200, False, False), (500, False, False), (403, True, False)],
 )
-async def test_auth_controls_and_create_disclosure(
-    clock: ManualClock, bad_token_status: int, leak: bool, expected: str
+async def test_the_exec_channel_must_reject_a_missing_or_wrong_token(
+    clock: ManualClock, bad_token_status: int, leak: bool, held: bool
 ) -> None:
+    """A channel that serves anyone who connects, or a lifecycle read that leaks the token, is a gap."""
     token = ""
     paths = []
 
@@ -115,50 +110,12 @@ async def test_auth_controls_and_create_disclosure(
     try:
         unit = await platform.probe_create(spec())
         result = await authentication(platform, unit, run_id="p1")
-        assert result.status == expected
-        assert token not in result.model_dump_json() and "gateway-secret" not in result.model_dump_json()
-        if expected == "passed":
+        assert result.held is held
+        assert token not in result.observed and "gateway-secret" not in result.observed
+        if held:
             assert len(paths) == 9
             assert {path for path, _ in paths} == {"command", "download", "upload"}
             assert sum(value is None for _, value in paths) == 3
-    finally:
-        await platform.aclose()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("failure", [None, "missing", "wrong-content", "timeout"])
-async def test_prerequisites_require_configured_wrapper_base64(
-    clock: ManualClock, monkeypatch: pytest.MonkeyPatch, failure: str | None
-) -> None:
-    platform = backend(lambda _: httpx.Response(500), clock)
-    platform._execd = replace(platform._execd, wrapper="/configured/busybox")
-    settings = ProbeSettings(
-        image="reg/probe@sha256:" + "1" * 64,
-        share_release="r1",
-        endpoint="http://os.test",
-        evidence_profile="test",
-    )
-    anchor = Anchor(platform, clock, "Lp", AnchorSettings(image="anchor"))
-    run = _Run(platform, clock, anchor, settings, "p1")
-    commands = []
-
-    async def execute(_unit: InstanceHandle, proc: ProcessSpec) -> ExecResult:
-        commands.append(proc.argv)
-        if proc.argv[0] != "/configured/busybox":
-            return ExecResult(0, b"", b"")
-        assert proc.argv[-1] == "printf probe | /configured/busybox base64"
-        return ExecResult(
-            127 if failure == "missing" else 0,
-            b"bad" if failure == "wrong-content" else b"cHJvYmU=\n",
-            b"",
-            timed_out=failure == "timeout",
-        )
-
-    monkeypatch.setattr(platform, "exec", execute)
-    try:
-        measured = await prerequisites(run, InstanceHandle("unit"))
-        assert measured.ok is (failure is None)
-        assert len(commands) == 2
     finally:
         await platform.aclose()
 

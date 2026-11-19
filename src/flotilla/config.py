@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import ipaddress
 import json
 import logging
@@ -17,12 +16,13 @@ from typing import TYPE_CHECKING, Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from flotilla.backends import BUILTIN, Backend, BackendSettings, load_backend
-from flotilla.capabilities import SECURITY_FIELDS, CapabilityReport, ExternalTarget, ProbeSettings
+from flotilla.capabilities import ExternalTarget, IsolationEvidence, ProbeSettings
 from flotilla.core.anchor import EXPIRY_MARGIN_S, AnchorSettings
 from flotilla.core.reaper import ReaperSettings
 from flotilla.core.runtime import MonitorSettings
 from flotilla.core.trial import TrialSettings
 from flotilla.platform.base import (
+    DEVICES,
     WORK_ROOT,
     Capabilities,
     Clock,
@@ -33,6 +33,7 @@ from flotilla.platform.base import (
     SharedVolume,
     check_root_name,
 )
+from flotilla.platform.network import cluster_dns_address
 from flotilla.platform.opensandbox import ExecdSettings, NetworkSettings, StorageSettings
 from flotilla.platform.opensandbox import build as build_opensandbox
 from flotilla.platform.opensandbox.filesystem import FilesystemProtocol, FilesystemSettings
@@ -285,7 +286,7 @@ class Reaper(_Model):
 
     @model_validator(mode="after")
     def _timing(self) -> Reaper:
-        # Renew interval well below G (two renewals). G + list_visibility_s < W needs the report: check_against.
+        # Renew interval well below G (two renewals). G + list_visibility_s < W needs [platform]: see below.
         ok = (
             self.renew_interval >= ANCHOR_RETRY_S
             and self.renew_interval * 2 <= self.grace < self.anchor_ttl - EXPIRY_MARGIN_S
@@ -385,20 +386,50 @@ class ProbeTarget(_Model):
         return value
 
 
+class PlatformFacts(_Model):
+    """Platform properties a request cannot discover, so the deployment states them.
+
+    Everything a platform either does or refuses is assumed available instead: asking for a device
+    it has no runtime for, or a tmpfs it cannot mount, fails at create, and a clear refusal beats a
+    report that was right last month. What cannot work that way is a number a request has to be
+    built around -- how long a listing lags, how large a TTL may be -- because getting one wrong
+    does not refuse anything, it just misbehaves later.
+    """
+
+    #: How long after a create request a listing can still first reveal the instance. GC waits
+    #: this out before collecting, so a value below the truth can collect a live launch.
+    list_visibility_s: PositiveFloat = 30.0
+    #: The largest TTL the platform grants an instance, if it caps them. A trial's TTL is clamped
+    #: to it, so a value above the truth lets a sandbox expire while its trial is still running.
+    max_ttl_s: PositiveInt | None = None
+    #: Longest label value the platform stores; longer values are truncated to fit.
+    max_label_value_len: Annotated[int, Field(ge=63)] = 63
+    #: Most instances the platform will put in one connected group.
+    link_max_members: Annotated[int, Field(ge=2)] = 9
+    #: Egress the platform allows regardless of policy, as `host:port/protocol`. A task asking for
+    #: no network is refused when anything here is not just cluster DNS.
+    implicit_egress: tuple[str, ...] = ()
+    #: Resolver addresses the platform's own DNS uses; only TCP/UDP 53 to these may be implicit.
+    cluster_dns: tuple[str, ...] = ()
+
+    @field_validator("cluster_dns")
+    @classmethod
+    def _cluster_dns(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        return tuple(cluster_dns_address(ip) for ip in value)
+
+
 class Probe(_Model):
     deployment: str = "deployment"
     image: str = ""
     privileged_image: str = ""
-    inner_image: str = ""
     link_members: Annotated[int, Field(ge=2, le=32)] = 9
     hosts_recheck_s: Annotated[float, Field(ge=0)] = 600.0
-    list_visibility_s: PositiveFloat = 30.0
     total_timeout_s: PositiveFloat = 3600.0
     cleanup_timeout_s: PositiveFloat = 180.0
     external_targets: tuple[ProbeTarget, ...] = ()
     dns_name: str = ""
 
-    @field_validator("image", "privileged_image", "inner_image")
+    @field_validator("image", "privileged_image")
     @classmethod
     def _image(cls, value: str) -> str:
         if value and not re.fullmatch(r"[^\s]+@sha256:[0-9a-f]{64}", value):
@@ -452,6 +483,7 @@ class FlotillaConfig(_Model):
     # Typed agent runtime layer bindings (see AgentRuntime); never interpreted beyond shape and roots.
     agent_runtime: AgentRuntime | None = None
     prepare: Prepare = Prepare()
+    platform: PlatformFacts = PlatformFacts()
     probe: Probe = Probe()
     share: Share = Share()
     registry: Registry = Registry()
@@ -468,6 +500,23 @@ class FlotillaConfig(_Model):
 
     #: Config file directory (set by `load`) for resolving relative paths; not part of the TOML.
     base_dir: Path | None = Field(default=None, exclude=True)
+
+    @model_validator(mode="after")
+    def _timing_against_platform(self) -> FlotillaConfig:
+        """Reaper timing has to fit the platform's own numbers, which `[platform]` states."""
+        problems = []
+        visibility = self.platform.list_visibility_s
+        if not self.reaper.grace + visibility < self.reaper.gc_window:
+            problems.append(
+                f"requires reaper.grace + platform.list_visibility_s < reaper.gc_window ({self.reaper.grace} + "
+                f"{visibility} >= {self.reaper.gc_window})"
+            )
+        max_ttl = self.platform.max_ttl_s
+        if max_ttl is not None and self.reaper.anchor_ttl > max_ttl:
+            problems.append(f"reaper.anchor_ttl {self.reaper.anchor_ttl} exceeds platform.max_ttl_s {max_ttl}")
+        if problems:
+            raise ValueError("; ".join(problems))
+        return self
 
     @model_validator(mode="before")
     @classmethod
@@ -564,10 +613,8 @@ class FlotillaConfig(_Model):
         return self.opensandbox
 
     def to_mapping(self) -> dict[str, Any]:
-        """JSON-compatible config with an absolute report path, for a child process without `base_dir`."""
+        """JSON-compatible config with absolute local paths, for a child process without `base_dir`."""
         data = self.model_dump(mode="json", exclude={"base_dir"})
-        table = data["opensandbox"] if self.backend == BUILTIN else data["backends"][self.backend]
-        table["capabilities"] = str(self.capabilities_path().resolve())
         for name, binding in self.datasets.items():
             root = binding.local_root
             if not root.is_absolute() and self.base_dir is not None:
@@ -599,75 +646,45 @@ class FlotillaConfig(_Model):
             }
         return resolve(bindings, storage=self.storage.settings(), inputs=self.input_settings())
 
-    def capabilities_path(self) -> Path:
-        path = Path(self.backend_settings.capabilities)
-        if not path.is_absolute() and self.base_dir is not None:
-            path = self.base_dir / path
-        return path
+    def platform_capabilities(self) -> Capabilities:
+        """What this deployment may be asked for.
 
-    def load_report(self) -> CapabilityReport:
-        return CapabilityReport.load_json(self.capabilities_path().read_bytes())
-
-    def platform_capabilities(self, report: CapabilityReport | None = None) -> Capabilities:
-        """Capabilities measured by the probe, adjusted for what this deployment enforces."""
-        report = report or self.load_report()
-        caps = report.to_capabilities()
-        rt = report.runtime
-        isolated = (
-            rt.privileged_storage.passed_for("privileged")
-            and rt.privileged_network.passed_for("privileged")
-            and (
-                rt.privileged_no_auto_mount.passed_for("privileged") or "no_auto_mount" in self.security.accept_insecure
-            )
-            and (rt.privileged_exec_auth.passed_for("privileged") or "exec_auth" in self.security.accept_insecure)
-            and (
-                rt.privileged_inbound_isolation.passed_for("privileged")
-                or "inbound_isolation" in self.security.accept_insecure
-            )
-        )
-        caps = replace(
-            caps,
-            privileged_runtime=isolated,
-            devices=frozenset(
-                name
-                for name, item in (("fuse", rt.fuse), ("kvm", rt.kvm), ("tun", rt.tun))
-                if isolated and item.ok and item.scope == "privileged"
-            ),
+        Everything a platform either does or refuses is assumed available, because asking and
+        being refused is a better error than a report that was accurate last month. The values
+        that cannot work that way are the `[platform]` facts: numbers a request has to be built
+        around, where a wrong value misbehaves later instead of refusing now.
+        """
+        facts = self.platform
+        caps = Capabilities(
+            max_label_value_len=facts.max_label_value_len,
+            list_visibility_s=facts.list_visibility_s,
+            max_ttl_seconds=facts.max_ttl_s,
+            link=True,
+            link_udp=True,
+            link_max_members=facts.link_max_members,
+            inbound_isolation=True,
+            external_forms=frozenset({"none", "any", "allowlist"}),
+            implicit_egress=facts.implicit_egress,
+            internal_address="exec",
+            shared_volume=True,
+            volume_file=True,
+            no_auto_mount=True,
+            exec_auth=True,
+            privileged_runtime=True,
+            devices=frozenset(DEVICES),
+            cluster_dns=facts.cluster_dns,
+            sandbox_ingress=True,
+            readonly_rootfs=True,
+            native_tmpfs=True,
+            shm_size=True,
         )
         return load_backend(self.backend).capabilities(self.backend_settings, self, caps)
-
-    def evidence_profile(self) -> str:
-        """Bind relevant operational choices, not build concurrency or image replacements."""
-        settings = self.backend_settings.model_dump(mode="json")
-        for key in ("capabilities", "credential_env", "max_connections"):
-            settings.pop(key, None)
-        if self.backend == BUILTIN:
-            # Workspace-only selection is not measured by task/probe capability checks.
-            settings.pop("management_extensions", None)
-        data = {
-            "protocol": "native-task-v1-missing-mount-targets",
-            "backend": self.backend,
-            "settings": settings,
-            "storage": self.storage.model_dump(mode="json"),
-            **(
-                {"inputs": {name: root.model_dump(mode="json") for name, root in sorted(self.inputs.items())}}
-                if self.inputs
-                else {}
-            ),
-            "share": self.share.model_dump(mode="json"),
-            "network": self.network.model_dump(mode="json"),
-            "anchor_image": self.reaper.anchor_image,
-            "anchor_ttl": self.reaper.anchor_ttl,
-            "trial_ttl": self.reaper.trial_ttl,
-            "list_visibility_s": self.probe.list_visibility_s,
-        }
-        return hashlib.sha256(json.dumps(data, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
     def management_capabilities(self) -> Capabilities:
         """A bounded management client, NOT a capability report usable by normal tasks."""
         return Capabilities(
             max_label_value_len=63,
-            list_visibility_s=self.probe.list_visibility_s,
+            list_visibility_s=self.platform.list_visibility_s,
             max_ttl_seconds=None,
             link=False,
             link_udp=False,
@@ -696,11 +713,8 @@ class FlotillaConfig(_Model):
             create_timeout_s=self.timeouts.create,
             ttl_s=self.reaper.trial_ttl,
             anchor_ttl_s=self.reaper.anchor_ttl,
-            evidence_profile=self.evidence_profile(),
+            list_visibility_s=self.platform.list_visibility_s,
             test_external_any=self.network.external == "any",
-            filesystem_supported=(
-                self.backend == BUILTIN and self.opensandbox_settings().filesystem_protocol == "sandbox-system-v1"
-            ),
         )
 
     def filesystem_settings(self) -> FilesystemSettings:
@@ -723,43 +737,32 @@ class FlotillaConfig(_Model):
             self.backend_settings, self, clock=clock, credential=self.credential(), caps=caps, command_gate=command_gate
         )
 
-    def check_against(self, report: CapabilityReport) -> None:
-        """Startup validation without platform calls. Raises `ConfigError` listing every problem."""
+    def check_isolation(self, evidence: IsolationEvidence) -> None:
+        """What `flotilla probe` measured, against what this deployment accepts missing.
+
+        This runs where the probe runs, not at client start: the evidence is values in memory, and
+        a client in another process has no way to re-derive them. So isolation is a step an
+        operator takes against a deployment, and its result is this call's exit status.
+        """
         problems: list[str] = []
-        if report.evidence_profile != self.evidence_profile():
-            # Informational only: the report describes the platform, not this exact deployment text.
-            logging.getLogger(__name__).warning(
-                "capability report was measured with different deployment settings; rerun probe if the platform "
-                "behavior changed"
+        gaps: set[str] = set(evidence.gaps())
+        accepted: set[str] = set(self.security.accept_insecure)
+        for name in sorted(gaps - accepted):
+            problems.append(
+                f"deployment did not demonstrate isolation property {name} "
+                f"({getattr(evidence, name).observed or 'not measured'}); "
+                "accept it explicitly in security.accept_insecure to run anyway"
             )
-        endpoint = self.backend_settings.endpoint
-        if report.endpoint.rstrip("/") != endpoint:
-            problems.append(f"capability report endpoint {report.endpoint} does not match config {endpoint}")
-        problems += [f"deployment lacks required capability: {name}" for name in report.missing_required()]
+        for name in sorted(accepted - gaps):
+            logging.getLogger(__name__).warning("Unused security waiver: %s", name)
+        if not evidence.cleanup.held:
+            problems.append(f"probe could not confirm cleanup: {evidence.cleanup.observed or 'not measured'}")
 
         form = self.network.policy().mode
-        if form not in report.network.external_forms:
+        if form != "none" and form not in evidence.external_forms:
             problems.append(
-                f"network.external form {form} is not among supported {sorted(report.network.external_forms)}"
+                f"network.external form {form} was not exercised; probe observed {sorted(evidence.external_forms)}"
             )
-
-        gaps = set(report.security_gaps())
-        for name in sorted(gaps - self.security.accept_insecure):
-            problems.append(
-                f"deployment lacks security capability {name}; accept it explicitly in security.accept_insecure"
-            )
-        for name in sorted(self.security.accept_insecure - gaps):
-            logging.getLogger(__name__).warning("Unused security waiver: %s", name)
-
-        visibility = self.probe.list_visibility_s
-        if not self.reaper.grace + visibility < self.reaper.gc_window:
-            problems.append(
-                f"requires grace + list_visibility_s < gc_window ({self.reaper.grace} + {visibility} >= "
-                f"{self.reaper.gc_window})"
-            )
-        max_ttl = report.lifecycle.max_ttl_seconds
-        if max_ttl is not None and self.reaper.anchor_ttl > max_ttl:
-            problems.append(f"reaper.anchor_ttl {self.reaper.anchor_ttl} exceeds the deployment TTL limit {max_ttl}")
 
         if problems:
             raise ConfigError(problems)
@@ -869,7 +872,7 @@ def _is_hostname(target: str) -> bool:
     return all(_LABEL.fullmatch(label) for label in labels)
 
 
-__all__ = ["SECURITY_FIELDS", "ConfigError", "FlotillaConfig"]
+__all__ = ["ConfigError", "FlotillaConfig"]
 
 
 class OpenSandboxBackend(Backend[OpenSandbox]):

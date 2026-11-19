@@ -1,6 +1,6 @@
 # Configuration reference
 
-The only handwritten deployment file is `deployment.toml`. `flotilla probe` generates `capabilities.json`; it is evidence, not another configuration input. Templates are in [`deployments/examples/`](../deployments/examples/). Validation errors show field paths without echoing input values.
+The only deployment file is `deployment.toml`. `flotilla probe` writes nothing: it measures isolation and reports it through its output and exit status. Templates are in [`deployments/examples/`](../deployments/examples/). Validation errors show field paths without echoing input values.
 
 ## deployment.toml
 
@@ -11,7 +11,7 @@ Durations are in seconds. Relative paths are resolved against the directory cont
 | Key | Default | Meaning |
 |---|---|---|
 | `backend` | `"opensandbox"` | Sandbox backend. The built-in `opensandbox` backend reads `[opensandbox]`; any other name must be an installed backend plugin |
-| `[backends.<name>]` | | The selected third-party backend's settings, validated by that backend. Every backend table has `endpoint`, `credential_env`, and `capabilities` with the same meaning as in `[opensandbox]` |
+| `[backends.<name>]` | | The selected third-party backend's settings, validated by that backend. Every backend table has `endpoint` and `credential_env` with the same meaning as in `[opensandbox]` |
 
 A configuration contains exactly one backend table: `[opensandbox]` for the built-in backend, or `[backends.<name>]` matching `backend`. See [Writing a backend](Writing_a_Backend.md).
 
@@ -21,8 +21,7 @@ A configuration contains exactly one backend table: `[opensandbox]` for the buil
 |---|---|---|
 | `endpoint` | required | OpenSandbox server root (`http(s)://...`); the backend appends `/v1` |
 | `credential_env` | required | Name of the environment variable holding the API credential. Never put the credential itself here |
-| `capabilities` | `"capabilities.json"` | Path to the capability report written by `flotilla probe` |
-| `filesystem_protocol` | `"upstream"` | Lifecycle filesystem mapping: `"upstream"` omits extension fields; `"sandbox-system-v1"` enables the internal wire format, subject to matching probe evidence |
+| `filesystem_protocol` | `"upstream"` | Lifecycle filesystem mapping: `"upstream"` omits extension fields and rejects tasks needing read-only rootfs, tmpfs or `shm_size`; `"sandbox-system-v1"` enables the internal wire format and those capabilities |
 | `extensions` | `{}` | Extra `extensions` sent with every create request |
 | `privileged_extensions` | `{}` | Extra `extensions` sent only for privileged services, including services declaring `/dev/fuse`, `/dev/kvm` or `/dev/net/tun`. The device keys `fuse`, `kvm` and `tun` are written per instance and cannot be set in any extensions table |
 | `management_extensions` | `{}` | Overrides of `extensions` sent only by workspace anchors explicitly selecting `prepare.management_profile = "management"`; never merged with `privileged_extensions` |
@@ -107,21 +106,34 @@ Omitted means the built-in release `busybox-1.36.1-r31`, published from the Anch
 |---|---|---|
 | `external` | `[]` | Outbound access for services on non-internal networks: `[]` (none), a list of IPs, CIDRs, or host names (`*.example.com` allowed), or the string `"any"`. `link = "sandbox"` does not support `"any"` |
 
+### `[platform]`
+
+Platform properties a request cannot discover. Everything else a platform either does or refuses, and a refusal at create is a better answer than a stored report; what cannot work that way is a number a request has to be built around, where a wrong value refuses nothing and misbehaves later.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `list_visibility_s` | `30` | Worst-case delay before a created instance appears in listings. GC waits this out, so a value below the truth can collect a live launch. Subject to `reaper.grace + list_visibility_s < reaper.gc_window` |
+| `max_ttl_s` | unset | Largest TTL the platform grants an instance, if it caps them. A trial's TTL is clamped to it; a value above the truth lets a sandbox expire mid-trial. `reaper.anchor_ttl` must not exceed it |
+| `max_label_value_len` | `63` | Longest label value the platform stores; longer values are truncated to fit |
+| `link_max_members` | `9` | Largest group the platform links; a task with more services is rejected before any create |
+| `implicit_egress` | `[]` | Destinations a sandbox reaches regardless of policy, as `host:port/proto` (for example `10.96.0.10:53/udp,tcp`). An entry outside `cluster_dns` on port 53 forbids offline tasks |
+| `cluster_dns` | `[]` | Exact resolver IPs behind the port-53 entries of `implicit_egress`. Only concrete unicast addresses; a CIDR or a name is rejected |
+
 ### `[security]`
 
 | Key | Default | Meaning |
 |---|---|---|
-| `accept_insecure` | `[]` | Security gaps you explicitly accept: any of `"inbound_isolation"`, `"exec_auth"`, `"no_auto_mount"`. Startup refuses if the capability report shows an unaccepted gap. Waivers that no longer match a gap produce a warning |
+| `accept_insecure` | `[]` | Isolation properties you accept running without: any of `"inbound_isolation"`, `"exec_auth"`, `"no_auto_mount"`. `flotilla probe` exits nonzero on a gap not named here; it reports a waiver that matches no gap as unused. Confirmed cleanup is not waivable |
 
 ### `[reaper]`
 
 | Key | Default | Meaning |
 |---|---|---|
 | `anchor_image` | required for use | Anchor image by remote digest (`repo@sha256:...`), built with installed `flotilla anchor build` |
-| `anchor_ttl` | `600` | Actual anchor TTL request tested by probe; no platform maximum is inferred |
+| `anchor_ttl` | `600` | Anchor TTL requested per instance. Must not exceed `platform.max_ttl_s` when that is declared |
 | `renew_interval` | `30` | Anchor renewal interval |
 | `grace` | `90` | After this long without a successful renewal, the launch pauses new creates and directory operations until a renewal succeeds; running trials continue. The launch is lost only 60s before `anchor_ttl` without renewal. Must be at least `2 * renew_interval` and less than `anchor_ttl - 60` |
-| `gc_window` | `180` | Minimum age before GC may collect another launch. Must exceed `grace + list_visibility_s` |
+| `gc_window` | `180` | Minimum age before GC may collect another launch. Must exceed `grace + platform.list_visibility_s` |
 | `trial_ttl` | `1800` | Platform TTL of each service sandbox; renewed while the environment is alive. Sandboxes are not renewed during startup, so each is created with at least the open's startup budget plus `renew_before_s` |
 | `renew_before_s` | `600` | Renew a service sandbox when this much TTL remains (capped at `trial_ttl / 2`) |
 | `renew_margin_s` | `120` | Safety margin for renewal (capped at half of `renew_before_s`) |
@@ -237,28 +249,20 @@ All probe inputs live in the deployment file. Images must be pinned `repo@sha256
 
 | Key | Default | Meaning |
 |---|---|---|
-| `deployment` | `"deployment"` | Human-readable report name |
+| `deployment` | `"deployment"` | Human-readable name for this deployment in the probe's output |
 | `image` | `""` | Required ordinary probe image |
-| `privileged_image` | `""` | Image for the configured privileged create path (e.g. Kata DinD). Enables the privileged phase: isolation, FUSE, KVM and TUN checks |
-| `inner_image` | `""` | Fixed lightweight image with `/bin/sh` for DinD execution/resource checks. Without it Docker is not measured; admission of `privileged: true` services and devices does not depend on it |
-| `link_members` | `9` | Measured group size, bounded to 2–32; not a platform maximum |
+| `privileged_image` | `""` | Image for the configured privileged create path. Enables the privileged phase, which measures the same storage, egress, inbound and exec-channel restrictions again inside the privileged runtime |
+| `link_members` | `9` | Group size the probe builds for its network checks, bounded to 2–32; `platform.link_max_members` is the deployment's own limit |
 | `hosts_recheck_s` | `600` | Delay before verifying that `/etc/hosts` was not rewritten |
-| `list_visibility_s` | `30` | Configured listing budget, also used by management bootstrap and GC safety |
 | `total_timeout_s` | `3600` | Total check budget; cleanup has its own budget |
 | `cleanup_timeout_s` | `180` | Bounded reconciliation and deletion confirmation |
 | `external_targets` | `[]` | Explicit `{host, port, protocol, service}` controls: `service = "echo"` (default, TCP/UDP), `"https"` (TCP), or `"ntp"` (UDP); `protocol` defaults to `"tcp"`; never inferred from workload egress |
 | `dns_name` | `""` | DNS query name for explicit TCP/UDP resolver checks |
 
-For external isolation acceptance, provide TCP and UDP service controls (for example HTTPS and NTP, without operating echo servers) and a DNS query name. HTTPS/NTP resolve once under an allowing policy and use the same pinned IP for allow/deny/restore; HTTPS retains certificate hostname verification and SNI. Missing positives, invalid responses, certificate errors or restore failures never prove isolation. Measured cluster DNS on TCP/UDP 53 is allowed; this is not complete network disconnection. Non-53 controls on each resolver IP are optional and reported separately as `resolver_non_dns`; missing controls are `skipped`, not an isolation failure or proof of IP-wide blocking. See [Network validation](Network_Validation.md). Probe targets do not extend `[network].external` for tasks.
+For external isolation, provide TCP and UDP service controls (for example HTTPS and NTP, without operating echo servers) and a DNS query name. HTTPS/NTP resolve once under an allowing policy and use the same pinned IP for allow, deny and allow again; HTTPS retains certificate hostname verification and SNI. Missing positives, invalid responses, certificate errors and restore failures never prove isolation. The `platform.cluster_dns` resolvers are allowed on TCP/UDP 53; that is not complete network disconnection. See [Network validation](Network_Validation.md). Probe targets do not extend `[network].external` for tasks.
 
-The probe image needs the configured execd interface, shell/file utilities and Python 3's standard socket/TLS libraries and a CA trust store for HTTPS. The Docker check of the privileged phase additionally needs a running Docker daemon; the fixed inner image must expose readable cgroup v2 limits. FUSE runs only when the actual configured extensions enable it and requires `fuse-overlayfs` and `fusermount3`; missing tools are errors, not evidence of unsupported platform behavior. KVM and TUN checks run `python3` as root in the privileged image.
+The probe image needs the configured execd interface, shell and file utilities, and Python 3's standard socket/TLS libraries with a CA trust store for HTTPS.
 
-## Generated capabilities.json
+## Isolation evidence
 
-Schema 2 stores one `status` per check: `passed`, `failed`, `skipped`, or `error`, plus concise evidence, measurements and runtime scope. Only `passed` enables a capability. `ok` is a derived internal property, not an accepted report field. Reports do not accept `source`, `declared`, `implicit_egress_declared`, `diagnostics`, or `multi_container`.
-
-`evidence_profile` binds the backend name and its whole settings table except `capabilities`, `credential_env` and `max_connections` (and, for the built-in backend, `management_extensions`), together with storage and input roots, the shared-tool release, network policy, the Anchor image, and the anchor/trial TTL and list-visibility budgets. It records what the probe measured; a later configuration change only logs a warning, so rerun the probe when the platform behavior itself changed. Ordinary evidence does not enable privileged execution: its storage, auth, network and no-auto-mount checks are separate.
-
-The report records requested TTLs, observed expiries and measured group size, not maximum platform limits. The configured list budget remains subject to `reaper.grace + probe.list_visibility_s < reaper.gc_window`; a fast observation never shrinks the safety budget.
-
-Legacy reports are rejected, never upgraded or merged into new success results. The report is written atomically to the path the backend table declares; `--out` only restates that path and is refused when it names another, so inspect a candidate by pointing a separate deployment file at its own capabilities path. Inspect the complete summary and cleanup result before promoting it. Missing required checks block startup. Only the three existing security gaps can be explicitly waived; waivers never rewrite evidence to `passed` or waive incomplete network acceptance.
+`flotilla probe` prints one line per isolation property with what was observed, and exits nonzero if any of them did not hold without being named in `security.accept_insecure`, or if cleanup was not confirmed. It writes no file: the observations exist only for the length of the run, and a client in another process cannot re-derive them, so running the probe and reading its exit status is the gate. See [Platform requirements](Platform_Requirements.md).

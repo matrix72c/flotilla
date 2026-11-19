@@ -1,12 +1,19 @@
-"""Content-bearing TCP/UDP controls; a failed control never proves isolation."""
+"""Content-bearing TCP/UDP controls; a failed control never proves isolation.
+
+Every check here allows the traffic first, then denies it, then allows it again. A single blocked
+exchange proves nothing -- a listener that was never up, a name that did not resolve and a policy
+that is working all look identical from the client side. Only the allow/deny/allow sequence tells
+them apart, and anything that arrives during the deny step is a leak regardless of what the other
+samples did.
+"""
 
 from __future__ import annotations
 
 import ipaddress
-from collections import Counter
+from dataclasses import dataclass
 from typing import Any
 
-from flotilla.capabilities import ExternalTarget, Item, Network
+from flotilla.capabilities import Evidence, ExternalForm, ExternalTarget
 from flotilla.platform.base import ExternalPolicy, InstanceHandle, ProcessSpec, Topology
 from flotilla.probe import _Run
 from flotilla.probe_opensandbox import policy
@@ -154,10 +161,6 @@ async def service_exchange(run: _Run, handle: InstanceHandle, target: ExternalTa
     return value if value in ("received", "blocked", "wrong-content") else "error"
 
 
-def verdict(ok: bool, text: str, **measurements: Any) -> Item:
-    return Item(status="passed" if ok else "failed", evidence=text, measurements=measurements)
-
-
 async def _link_samples(run: _Run, source: InstanceHandle, host: str, protocol: str, token: str) -> list[str]:
     """Fixed UDP sampling, not retry-until-success. Retain misses and unexpected responses."""
     return [
@@ -182,17 +185,21 @@ def _deny_outcome(samples: list[str]) -> str:
     return "blocked"
 
 
-async def links(run: _Run) -> tuple[Item, Item, Item]:
+async def inbound_isolation(run: _Run) -> Evidence:
+    """A sandbox must not be reachable from one that was not given access to it.
+
+    Two members of one group: the source's egress is allowed independently, so a blocked exchange
+    is the target's ingress rule and not the source's egress.
+    """
     p = run.platform
     members = {}
-    for index in range(run.settings.link_members):
-        handle = await run._create(run._spec(f"link-{index}", group=run.run_id))
+    for index in range(2):
+        handle = await run._create(run._spec(f"inbound-{index}", group=run.run_id))
         members[str(index)] = handle
         await p.start_process(handle, python(_SERVER, background=True))
     topology = Topology({"probe": frozenset(members)})
     await p.link(members, topology)
     addresses = {name: await p.internal_address(handle) for name, handle in members.items()}
-    checks = {}
     # Readiness is a real loopback content exchange, not merely a Running state.
     for handle in members.values():
         for protocol in ("tcp", "udp"):
@@ -203,111 +210,48 @@ async def links(run: _Run) -> tuple[Item, Item, Item]:
                     break
                 await run.clock.sleep(0.5)
             if ready != "received":
-                error = Item(status="error", evidence="listener positive control failed")
-                return error, error, error
+                return Evidence(False, "listener positive control failed; inbound isolation not established")
+    outsider, target = members["0"], members["1"]
+    observations: list[dict[str, Any]] = []
     for protocol in ("tcp", "udp"):
-        pairs = []
-        failed_pairs = []
-        observations = []
-        for name, handle in members.items():
-            for target_name in members:
-                if name != target_name:
-                    samples = await _link_samples(
-                        run, handle, addresses[target_name], protocol, f"{run.run_id}:{name}:{target_name}:{protocol}"
-                    )
-                    observations.append({"source": name, "target": target_name, "outcomes": samples})
-                    value = _positive_outcome(samples)
-                    pairs.append(value)
-                    if value != "received":
-                        failed_pairs.append({"source": name, "target": target_name, "outcome": value})
-        checks[protocol] = verdict(
-            all(value == "received" for value in pairs),
-            "directed member-pair reachability (1 TCP / 3 UDP samples); not a lossless-delivery guarantee; "
-            "unreachable alone does not distinguish policy from routing or loss",
-            members=len(members),
-            addresses=addresses,
-            pairs=len(pairs),
-            outcomes=dict(Counter(pairs)),
-            # Bounded by the configured maximum of 32 members; never retain payloads or credentials.
-            samples=observations,
-            failed_pairs=failed_pairs,
-        )
-        if "error" in pairs:
-            checks[protocol] = checks[protocol].model_copy(
-                update={"status": "error", "evidence": "peer exchange check incomplete"}
-            )
-    # Inbound isolation has its own positive controls; unrelated matrix failures do not skip it.
-    outsider = members["0"]
-    target = members["1"]
-    inbound: list[dict[str, Any]] = []
-    unsupported = False
-    try:
-        for protocol in ("tcp", "udp"):
-            observation: dict[str, Any] = {"protocol": protocol}
-            inbound.append(observation)
-            await policy(p, outsider, egress=(target,), ingress=(target,))
-            await policy(p, target, egress=(outsider,), ingress=(outsider,))
-            positive = await _link_samples(run, outsider, addresses["1"], protocol, run.run_id + "allow")
-            observation["positive"] = positive
-            if _positive_outcome(positive) != "received":
-                continue
-            await policy(p, target, egress=(outsider,), ingress=())
-            negative = await _link_samples(run, outsider, addresses["1"], protocol, run.run_id + "deny")
-            observation["denied"] = negative
-            # Re-enable to distinguish isolation from listener failure.
-            await policy(p, target, egress=(outsider,), ingress=(outsider,))
-            observation["restored"] = await _link_samples(
-                run, outsider, addresses["1"], protocol, run.run_id + "restore"
-            )
-    except NotImplementedError:
-        unsupported = True
-    leak = any(_deny_outcome(item.get("denied", [])) in ("received", "wrong-content") for item in inbound)
-    complete = len(inbound) == 2 and all(
-        _positive_outcome(item.get("positive", [])) == "received"
-        and _deny_outcome(item.get("denied", ["error"])) == "blocked"
-        and _positive_outcome(item.get("restored", [])) == "received"
-        for item in inbound
+        observation: dict[str, Any] = {"protocol": protocol}
+        observations.append(observation)
+        await policy(p, outsider, egress=(target,), ingress=(target,))
+        await policy(p, target, egress=(outsider,), ingress=(outsider,))
+        observation["allowed"] = await _link_samples(run, outsider, addresses["1"], protocol, run.run_id + "allow")
+        if _positive_outcome(observation["allowed"]) != "received":
+            continue
+        await policy(p, target, egress=(outsider,), ingress=())
+        observation["denied"] = await _link_samples(run, outsider, addresses["1"], protocol, run.run_id + "deny")
+        # Re-enable to distinguish isolation from a listener that simply died.
+        await policy(p, target, egress=(outsider,), ingress=(outsider,))
+        observation["restored"] = await _link_samples(run, outsider, addresses["1"], protocol, run.run_id + "restore")
+    leaked = [
+        o["protocol"] for o in observations if _deny_outcome(o.get("denied", [])) in ("received", "wrong-content")
+    ]
+    if leaked:
+        return Evidence(False, f"a sandbox denied ingress stayed reachable over {leaked}")
+    complete = len(observations) == 2 and all(
+        _positive_outcome(o.get("allowed", [])) == "received"
+        and _deny_outcome(o.get("denied", ["error"])) == "blocked"
+        and _positive_outcome(o.get("restored", [])) == "received"
+        for o in observations
     )
-    inbound_item = Item(
-        status="failed" if leak else "skipped" if unsupported else "passed" if complete else "error",
-        evidence="TCP/UDP inbound allow/deny/restore with independently allowed source egress; "
-        "all deny samples must be blocked",
-        measurements={"controls": inbound},
+    return Evidence(
+        complete,
+        "TCP and UDP ingress allow/deny/restore held" if complete else f"ingress controls incomplete: {observations}",
     )
-    # Real runtime link update removes a member; both protocols must become blocked and then recover.
-    reduced = Topology({"probe": frozenset(set(members) - {"0"})})
-    await p.link(members, reduced)
-    for protocol in ("tcp", "udp"):
-        denied = await _link_samples(run, outsider, addresses["1"], protocol, run.run_id + "unlinked")
-        await p.link(members, topology)
-        restored = await _link_samples(run, outsider, addresses["1"], protocol, run.run_id + "linked")
-        checks[protocol] = checks[protocol].model_copy(
-            update={
-                "measurements": {
-                    **checks[protocol].measurements,
-                    "disconnect": {"denied": denied, "restored": restored},
-                }
-            }
-        )
-        if _deny_outcome(denied) in ("received", "wrong-content"):
-            checks[protocol] = checks[protocol].model_copy(
-                update={"status": "failed", "evidence": "disconnected member remained reachable"}
-            )
-        elif (_deny_outcome(denied) == "error" or _positive_outcome(restored) != "received") and checks[
-            protocol
-        ].status != "failed":
-            checks[protocol] = checks[protocol].model_copy(
-                update={"status": "error", "evidence": "disconnect/reconnect control incomplete"}
-            )
-        await p.link(members, reduced)
-    return checks["tcp"], checks["udp"], inbound_item
 
 
-async def egress(run: _Run, *, mode: str = "allowlist") -> tuple[Item, Item]:
+async def egress(run: _Run, *, mode: str = "allowlist") -> tuple[Evidence, bool]:
+    """Whether a deny policy is actually enforced, and whether the allowing mode worked at all.
+
+    Returns the deny evidence and whether `mode` was exercised end to end, which is an observation
+    about the probe's own configuration rather than an isolation property.
+    """
     targets = run.settings.targets
     if not targets:
-        skipped = Item(status="skipped", evidence="probe.external_targets not configured")
-        return skipped, skipped
+        return Evidence(False, "probe.external_targets not configured, so egress was not measured"), False
     observations: list[dict[str, Any]] = []
     for target in targets:
         try:
@@ -318,75 +262,57 @@ async def egress(run: _Run, *, mode: str = "allowlist") -> tuple[Item, Item]:
         if mode == "any":
             external = ExternalPolicy(mode="any")
         handle = await run._create(run._spec(f"external-{target.protocol}", external=external))
-        observation = {
-            "host": target.host,
-            "port": target.port,
-            "protocol": target.protocol,
-            "service": target.service,
-        }
+        observation = {"host": target.host, "port": target.port, "protocol": target.protocol}
         observations.append(observation)
         # Legacy echo targets retain their original behavior. Standard services pin resolution
         # once under the allowing policy, then use that exact address for all three exchanges.
         try:
             ip = target.host if target.service == "echo" else await resolve_target(run, handle, target)
         except ValueError:
-            observation["positive"] = "resolution-error"
+            observation["allowed"] = "resolution-error"
             break
         observation["address"] = ip
         if target.service != "echo" and mode != "any":
             external = ExternalPolicy(mode="allowlist", cidrs=(ip,))
             await policy(run.platform, handle, external=external)
-        positive = await service_exchange(run, handle, target, ip, run.run_id + "external")
-        observation["positive"] = positive
-        if positive != "received":
+        observation["allowed"] = await service_exchange(run, handle, target, ip, run.run_id + "external")
+        if observation["allowed"] != "received":
             break
         await policy(run.platform, handle, external=ExternalPolicy(mode="none"))
-        denied = await service_exchange(run, handle, target, ip, run.run_id + "denied")
-        observation["denied"] = denied
+        observation["denied"] = await service_exchange(run, handle, target, ip, run.run_id + "denied")
         await policy(run.platform, handle, external=external)
-        restored = await service_exchange(run, handle, target, ip, run.run_id + "restored")
-        observation["restored"] = restored
+        observation["restored"] = await service_exchange(run, handle, target, ip, run.run_id + "restored")
         await run._delete(handle.iid)
-        if denied == "error" or restored != "received":
+        if observation["denied"] == "error" or observation["restored"] != "received":
             break
-    measurements = {"targets": observations}
-    leak = any(item.get("denied") in ("received", "wrong-content") for item in observations)
+    leaked = [o["protocol"] for o in observations if o.get("denied") in ("received", "wrong-content")]
     complete = len(observations) == len(targets) and all(
-        item.get("positive") == item.get("restored") == "received" and item.get("denied") != "error"
-        for item in observations
+        o.get("allowed") == o.get("restored") == "received" and o.get("denied") != "error" for o in observations
     )
-    allow = Item(
-        status="passed" if complete else "error",
-        evidence=f"configured {mode} service controls" if complete else "external positive/restore control incomplete",
-        measurements=measurements,
-    )
-    coverage = {target.protocol for target in targets}
-    if leak:
-        none = Item(
-            status="failed", evidence="external target remained reachable under deny", measurements=measurements
-        )
-    elif not complete:
-        none = Item(status="error", evidence="external policy control incomplete", measurements=measurements)
-    elif coverage != {"tcp", "udp"}:
-        none = Item(
-            status="skipped", evidence="none requires configured TCP and UDP controls", measurements=measurements
-        )
-    else:
-        none = Item(
-            status="passed",
-            evidence=f"TCP/UDP same-target deny after positive {mode} controls",
-            measurements=measurements,
-        )
-    return none, allow
+    if leaked:
+        return Evidence(False, f"an external target stayed reachable under a deny policy over {leaked}"), complete
+    if not complete:
+        return Evidence(False, f"external allow/deny/restore incomplete: {observations}"), False
+    covered = {target.protocol for target in targets}
+    if covered != {"tcp", "udp"}:
+        return Evidence(
+            False, f"egress measured over {sorted(covered)} only; both TCP and UDP controls are required"
+        ), complete
+    return Evidence(True, f"TCP and UDP deny enforced after a working {mode} policy"), complete
 
 
-async def dns(run: _Run, handle: InstanceHandle) -> tuple[Item, tuple[str, ...], tuple[str, ...]]:
+async def resolvers_of(run: _Run, handle: InstanceHandle) -> tuple[Evidence, tuple[str, ...], tuple[str, ...]]:
+    """Which resolvers the platform gives a sandbox, and which of them answer under a deny policy.
+
+    Cluster DNS reaching out under "no external access" is normal and expected; it is recorded as
+    implicit egress rather than treated as a leak, because a task asking for no network has to know.
+    """
     if not run.settings.dns_name:
-        return Item(status="skipped", evidence="probe.dns_name not configured"), (), ()
+        return Evidence(False, "probe.dns_name not configured, so resolver behavior was not measured"), (), ()
     resolver_file = (await run.platform.read_file(handle, "/etc/resolv.conf")).decode()
     resolvers = tuple(line.split()[1] for line in resolver_file.splitlines() if line.startswith("nameserver "))
     if not resolvers:
-        return Item(status="error", evidence="no resolver addresses found"), (), ()
+        return Evidence(False, "no resolver addresses found in /etc/resolv.conf"), (), ()
     observations: list[str] = []
     for host in resolvers:
         external = ExternalPolicy(mode="allowlist", cidrs=(host,))
@@ -394,17 +320,25 @@ async def dns(run: _Run, handle: InstanceHandle) -> tuple[Item, tuple[str, ...],
             await policy(run.platform, handle, external=external)
             control = await run.platform.exec(handle, python(_DNS, host, protocol, run.settings.dns_name))
             if control.exit_code != 0 or control.stdout.strip() != b"received":
-                return Item(status="error", evidence="DNS positive control failed"), resolvers, tuple(observations)
+                return (
+                    Evidence(False, f"DNS positive control failed for {host}/{protocol}"),
+                    resolvers,
+                    tuple(observations),
+                )
             await policy(run.platform, handle, external=ExternalPolicy(mode="none"))
             result = await run.platform.exec(handle, python(_DNS, host, protocol, run.settings.dns_name))
             if result.exit_code != 0 or result.stdout.strip() not in (b"received", b"blocked"):
-                return Item(status="error", evidence="DNS negative check incomplete"), resolvers, tuple(observations)
+                return (
+                    Evidence(False, f"DNS deny check incomplete for {host}/{protocol}"),
+                    resolvers,
+                    tuple(observations),
+                )
             await policy(run.platform, handle, external=external)
             restored = await run.platform.exec(handle, python(_DNS, host, protocol, run.settings.dns_name))
             await policy(run.platform, handle, external=ExternalPolicy(mode="none"))
             if restored.exit_code != 0 or restored.stdout.strip() != b"received":
                 return (
-                    Item(status="error", evidence="DNS restored positive control failed"),
+                    Evidence(False, f"DNS restore control failed for {host}/{protocol}"),
                     resolvers,
                     tuple(observations),
                 )
@@ -412,71 +346,69 @@ async def dns(run: _Run, handle: InstanceHandle) -> tuple[Item, tuple[str, ...],
                 target = f"[{host}]" if ":" in host else host
                 observations.append(f"{target}:53/{protocol}")
     return (
-        Item(status="passed", evidence="TCP/UDP resolver behavior measured; not an exhaustive implicit-egress claim"),
+        Evidence(True, "resolver TCP/UDP behavior measured; not an exhaustive implicit-egress claim"),
         resolvers,
         tuple(observations),
     )
 
 
-async def measure_network(run: _Run, handle: InstanceHandle) -> Network:
+@dataclass(frozen=True)
+class NetworkIsolation:
+    """What the network checks established, before it becomes part of `IsolationEvidence`."""
+
+    external_none: Evidence
+    network_acceptance: Evidence
+    inbound_isolation: Evidence
+    external_forms: frozenset[ExternalForm] = frozenset()
+    implicit_egress: tuple[str, ...] = ()
+    cluster_dns: tuple[str, ...] = ()
+
+
+async def measure_isolation(run: _Run, handle: InstanceHandle) -> NetworkIsolation:
+    """Egress enforcement, resolver behavior and inbound isolation, in that order."""
     from flotilla.probe_checks import attempt
 
-    link_result = await attempt(lambda: links(run))
-    if isinstance(link_result, Item):
-        tcp = udp = inbound = link_result
-    else:
-        tcp, udp, inbound = link_result
-    # Release the larger group before ordinary/privileged phases.
+    inbound = await attempt(lambda: inbound_isolation(run))
+    # Release the group before the egress checks create their own instances.
     for iid in list(run._created):
         if iid != handle.iid:
             await run._delete(iid)
-    external_result = await attempt(lambda: egress(run))
-    none, allow = (external_result, external_result) if isinstance(external_result, Item) else external_result
-    any_item = Item(status="skipped", evidence="unrestricted external mode is not selected")
+    result = await attempt(lambda: egress(run))
+    none, allowlist_worked = (result, False) if isinstance(result, Evidence) else result
+    forms: set[ExternalForm] = {"allowlist"} if allowlist_worked else set()
+    if none.held:
+        forms.add("none")
     if run.settings.test_external_any:
         any_result = await attempt(lambda: egress(run, mode="any"))
-        any_item = any_result if isinstance(any_result, Item) else any_result[1]
-        if not isinstance(any_result, Item) and any_result[0].status == "failed":
-            # A later observed deny leak cannot be hidden by earlier allowlist controls.
-            none = any_result[0]
-    dns_result = await attempt(lambda: dns(run, handle))
-    dns_item, resolvers, observations = (dns_result, (), ()) if isinstance(dns_result, Item) else dns_result
-    # Resolver non-53 controls are optional: users need not operate services on shared cluster DNS.
-    # Keep their evidence separate; neither DNS success nor absent controls proves IP-wide isolation.
-    non_dns_controls = {(target.host, target.protocol) for target in run.settings.targets if target.port != 53}
-    resolver_controls = bool(resolvers) and all(
-        (host, protocol) in non_dns_controls for host in resolvers for protocol in ("tcp", "udp")
-    )
-    resolver_non_dns = Item(
-        status="skipped", evidence="resolver non-DNS TCP/UDP controls not configured for every resolver"
-    )
-    if resolver_controls:
-        resolver_non_dns = Item(
-            status="passed" if none.ok else "error",
-            evidence=(
-                "configured resolver non-DNS controls passed within external allow/deny/restore checks"
-                if none.ok
-                else "external controls incomplete or failed; resolver non-DNS isolation not established"
-            ),
-        )
-    accepted = none.ok and dns_item.ok
-    acceptance_evidence = (
-        "bounded external TCP/UDP isolation with measured cluster DNS behavior; not complete network disconnection"
-        if accepted
-        else "external TCP/UDP isolation or DNS behavior checks incomplete or failed"
-    )
-    return Network(
-        link=tcp,
-        link_udp=udp,
-        inbound_isolation=inbound,
-        link_max_members=run.settings.link_members,
+        if not isinstance(any_result, Evidence):
+            any_none, any_worked = any_result
+            if any_worked:
+                forms.add("any")
+            # A leak observed later cannot be hidden by the earlier allowlist controls.
+            if not any_none.held and "stayed reachable" in any_none.observed:
+                none = any_none
+    dns_evidence = await attempt(lambda: resolvers_of(run, handle))
+    resolvers: tuple[str, ...] = ()
+    implicit: tuple[str, ...] = ()
+    if isinstance(dns_evidence, Evidence):
+        dns_item = dns_evidence
+    else:
+        dns_item, resolvers, implicit = dns_evidence
+    accepted = none.held and dns_item.held
+    return NetworkIsolation(
         external_none=none,
-        external_allowlist=allow,
-        external_any=any_item,
-        dns=dns_item,
-        resolver_non_dns=resolver_non_dns,
-        internal_address="exec",
+        network_acceptance=Evidence(
+            accepted,
+            "the platform enforced the policy it was sent, with measured cluster DNS behavior; "
+            "not complete network disconnection"
+            if accepted
+            else f"policy enforcement or resolver behavior unproven: {none.observed}; {dns_item.observed}",
+        ),
+        inbound_isolation=inbound,
+        external_forms=frozenset(forms),
+        implicit_egress=implicit,
         cluster_dns=resolvers,
-        implicit_egress=observations,
-        network_acceptance=Item(status="passed" if accepted else "error", evidence=acceptance_evidence),
     )
+
+
+__all__ = ["NetworkIsolation", "egress", "inbound_isolation", "measure_isolation"]

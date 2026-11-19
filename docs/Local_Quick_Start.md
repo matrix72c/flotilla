@@ -116,7 +116,6 @@ Create `$LOCAL/deployment.toml`, replacing the bridge subnet and gateway, the sh
 [opensandbox]
 endpoint = "http://127.0.0.1:8080"
 credential_env = "FLOTILLA_OPENSANDBOX_CREDENTIAL"
-capabilities = "capabilities.json"
 
 [opensandbox.network]
 link = "cidr"
@@ -169,7 +168,7 @@ external_targets = [
 
 There is no handwritten declaration file. A probe reports `passed`, `failed`, `skipped`, or `error`; absent controls never count as success. Configure TCP/UDP service controls and a DNS query name as described in [Network validation](Network_Validation.md). HTTPS and NTP avoid the need to operate raw echo servers; `service = "echo"` remains the default for existing controls. Standard services use one pinned IP across allow/deny/restore, and HTTPS requires valid CA trust and hostname verification. Cluster DNS may remain reachable; resolver-IP non-53 controls are optional diagnostics, not a prerequisite. Explicit security waivers cannot manufacture functional or no-network acceptance.
 
-## 5. Probe the platform
+## 5. Measure the platform's isolation
 
 Every sandbox mounts a small, immutable directory of helper tools at `/.flotilla`. The deployment has no `[share]`, so the first probe publishes the built-in release from the anchor image's BusyBox.
 
@@ -178,11 +177,11 @@ flotilla probe --deployment deployment.toml
 flotilla share verify --deployment deployment.toml
 ```
 
-The probe creates real sandboxes and checks lifecycle, execution, authentication, storage, and controlled networking. It atomically writes `capabilities.json`, including cleanup status and configuration binding. Inspect every required result and cleanup outcome; this guide does not predict which checks will pass on your Docker runtime. Missing required evidence blocks runtime admission. Review security gaps before accepting any by name; never edit report outcomes to bypass admission.
+The probe creates real sandboxes and measures whether egress policy, inbound isolation, read-only and subdirectory mounts, auto-mounting and exec authentication actually hold. It prints each observation and writes nothing; a nonzero exit means something it measured did not hold. This guide does not predict which will hold on your Docker runtime. Read the gaps before naming any of them in `security.accept_insecure` — a waiver records that you run without the property, and does not provide it.
 
 ## 6. Run a task
 
-Only after capability checks and cleanup pass, create the [README example](../README.md#example), a two-service task with Redis:
+Only after the probe exits zero, create the [README example](../README.md#example), a two-service task with Redis:
 
 ```sh
 mkdir -p task/environment

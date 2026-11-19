@@ -15,7 +15,6 @@ import pytest
 from flotilla.cli import main
 from flotilla.config import FlotillaConfig
 from flotilla.testing.platform import FakePlatform, ManualClock, SharedTree
-from flotilla.testing.reports import report
 
 SHA = "0" * 64
 
@@ -26,7 +25,6 @@ def _deployment(tmp_path: Path, **extra: str) -> Path:
         "[opensandbox]",
         'endpoint = "http://os.test"',
         'credential_env = "FLOTILLA_CRED"',
-        'capabilities = "capabilities.json"',
         "",
         "[opensandbox.network]",
         'sandbox_cidrs = ["10.0.0.0/16"]',
@@ -45,8 +43,6 @@ def _deployment(tmp_path: Path, **extra: str) -> Path:
     ]
     path = tmp_path / "flotilla.toml"
     path.write_text("\n".join(lines) + "\n")
-    cfg = FlotillaConfig.load(path)
-    report(evidence_profile=cfg.evidence_profile()).write_json(cfg.capabilities_path())
     return path
 
 

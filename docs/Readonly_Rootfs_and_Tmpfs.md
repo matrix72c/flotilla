@@ -19,12 +19,12 @@ This is independent of `[opensandbox.execd].protocol`. The default filesystem pr
 Configure the pinned probe image in `[probe].image`, then regenerate evidence with the exact deployment that will run tasks:
 
 ```sh
-flotilla probe --deployment deployment.toml --out capabilities.json
+flotilla probe --deployment deployment.toml
 ```
 
 Filesystem checks run when the explicitly selected protocol can express them; unsupported modes produce `skipped`, not an automatic protocol/runtime fallback. There are no handwritten declaration flags. The image needs the standard probe tools including Python 3, `stat` (`-f`), `dd`, `grep`, `touch`, `/tmp`, and `/var/tmp`, plus working configured share mounts.
 
-The report records `runtime.readonly_rootfs`, `storage.native_tmpfs`, and `storage.shm_size`. Only `passed` ordinary-runtime evidence enables these capabilities. The deployment must still select `sandbox-system-v1`; with `upstream` these capabilities are off. A configuration that differs from the probed `evidence_profile` only logs a warning. Legacy reports are rejected and must be reprobed.
+These three capabilities come from `opensandbox.filesystem_protocol`: `sandbox-system-v1` has them, `upstream` does not and rejects such a task at planning. Nothing measures them first — a platform that advertises the dialect and then drops the fields is caught by `python -m tests.contract.filesystem`, not by a stored report. The probe measures isolation, which is separate.
 
 Checks include EROFS root writes, writable-volume transfer, `/etc/hosts`, actual tmpfs type, ownership/mode, non-root writes, capacity exhaustion, persistence across exec, output delivery while full, and separation between instances. The combined readonly/tmpfs behavior is also checked. Probe cleanup is bounded and recorded. Unit mocks are not real platform acceptance.
 

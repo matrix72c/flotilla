@@ -9,30 +9,22 @@ from typing import Any
 import pytest
 
 from flotilla import Flotilla
-from flotilla.capabilities import Item, ProbeSettings
 from flotilla.compose.normalize import normalize
 from flotilla.compose.task import load_task
 from flotilla.config import FlotillaConfig
-from flotilla.core.anchor import Anchor, AnchorSettings
 from flotilla.platform.base import (
     Capabilities,
     ErrorCategory,
-    ExecResult,
     ExternalPolicy,
     FlotillaError,
     InstanceSpec,
-    ProcessSpec,
     Resources,
 )
-from flotilla.probe import _Run
-from flotilla.probe_checks import device, fuse
 from flotilla.runtime.manager import Manager
 from flotilla.runtime.types import RunRequest
 from flotilla.scan import scan
-from flotilla.testing.config import config_data
 from flotilla.testing.planning import APP, _caps, _task, plan
-from flotilla.testing.platform import FakePlatform, ManualClock, SharedTree
-from flotilla.testing.reports import ok, report
+from flotilla.testing.platform import FakePlatform, SharedTree
 from flotilla.testing.runtime import deployment as deployment
 from flotilla.testing.runtime import task
 
@@ -155,6 +147,8 @@ async def test_device_units_open_on_the_privileged_runtime(
     cfg, platform, _ = deployment
     base = task()
     prepared = replace(base, units={"main": replace(base.units["main"], devices=frozenset({"kvm", "tun"}))})
+    # A deployment whose runtime has no device support at all refuses the task before any create.
+    platform.caps = replace(platform.caps, privileged_runtime=False, devices=frozenset())
     with pytest.raises(FlotillaError, match="devices") as failure:
         Manager(cfg, platform=platform).plan(RunRequest(prepared, "devices"))
     assert failure.value.category is ErrorCategory.INVALID and platform.calls["create"] == 0
@@ -169,103 +163,7 @@ async def test_device_units_open_on_the_privileged_runtime(
         assert (await fleet.drain(2)).clean
 
 
-def test_report_devices_need_privileged_scoped_evidence() -> None:
-    measured = {"runtime.kvm": {**ok(), "scope": "privileged"}, "runtime.tun": {**ok(), "scope": "privileged"}}
-    assert report(**measured).to_capabilities().devices == {"fuse", "kvm", "tun"}
-    ordinary = {"runtime.kvm": ok(), "runtime.tun": ok()}
-    assert report(**ordinary).to_capabilities().devices == {"fuse"}
-    unprivileged = {**measured, "runtime.privileged_network": {"status": "failed", "scope": "privileged"}}
-    assert not report(**unprivileged).to_capabilities().devices
-    no_docker = {**measured, "runtime.privileged_runtime": {"status": "skipped", "scope": "privileged"}}
-    caps = report(**no_docker).to_capabilities()
-    assert caps.devices == {"fuse", "kvm", "tun"} and caps.privileged_runtime
-    cfg = FlotillaConfig.from_mapping(config_data())
-    caps = cfg.platform_capabilities(report(**no_docker))
-    assert caps.devices == {"fuse", "kvm", "tun"} and caps.privileged_runtime
-
-
-SETTINGS = ProbeSettings(
-    image="probe",
-    privileged_image="dind",
-    share_release="r1",
-    endpoint="http://os.test",
-    evidence_profile="test",
-)
-
-
 def test_fuse_is_normalized_and_needs_the_privileged_runtime() -> None:
     project = normalize(_service(devices=["/dev/fuse"]))
     assert not project.rejected, project.findings
     assert project.services["main"].devices == {"fuse"}
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("tools", "mount", "status"),
-    [(0, 0, "passed"), (0, 1, "failed"), (1, 0, "error")],
-    ids=["mounts", "mount-fails", "tools-missing"],
-)
-async def test_fuse_probe_requests_only_the_fuse_device(
-    platform: FakePlatform, clock: ManualClock, tools: int, mount: int, status: str
-) -> None:
-    """The deployment's extension tables are not consulted: the probe asks for the device itself."""
-    SharedTree(platform)
-    anchor = Anchor(platform, clock, "fuse-test", AnchorSettings(image="anchor"))
-    await clock.run(anchor.start())
-    run = _Run(platform, clock, anchor, SETTINGS, "p1")
-    platform.caps = _device_caps(platform.caps)
-    original = platform.exec_handler
-    specs: dict[str, InstanceSpec] = {}
-    platform.on_create = lambda iid, spec: specs.__setitem__(iid, spec)
-    scripts: list[str] = []
-
-    def execute(iid: str, proc: ProcessSpec) -> ExecResult:
-        if iid == anchor.iid:
-            return original(iid, proc)
-        script = proc.argv[-1]
-        scripts.append(script)
-        return ExecResult(tools if "command -v" in script else mount, b"", b"")
-
-    platform.set_exec_handler(execute)
-    result = await clock.run(fuse(run))
-    assert isinstance(result, Item) and result.scope == "privileged"
-    assert result.status == status
-    (spec,) = specs.values()
-    assert spec.privileged and spec.devices == {"fuse"}
-    # A missing tool is reported before anything is mounted.
-    assert any("fuse-overlayfs -o lowerdir" in script for script in scripts) == (tools == 0)
-    # The instance is deleted on every path, including the two failures.
-    assert not run._created and platform.iids() == [anchor.iid]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(("name", "node"), [("kvm", "/dev/kvm"), ("tun", "/dev/net/tun")])
-@pytest.mark.parametrize("exit_code", [0, 1])
-async def test_device_probe_creates_one_privileged_instance_per_device(
-    platform: FakePlatform, clock: ManualClock, name: str, node: str, exit_code: int
-) -> None:
-    SharedTree(platform)
-    anchor = Anchor(platform, clock, "device-test", AnchorSettings(image="anchor"))
-    await clock.run(anchor.start())
-    run = _Run(platform, clock, anchor, SETTINGS, "p1")
-    platform.caps = _device_caps(platform.caps)  # the fake has no evidence-free probe create path
-    original = platform.exec_handler
-    specs: dict[str, InstanceSpec] = {}
-    platform.on_create = lambda iid, spec: specs.__setitem__(iid, spec)
-    scripts: list[str] = []
-
-    def execute(iid: str, proc: ProcessSpec) -> ExecResult:
-        if iid == anchor.iid:
-            return original(iid, proc)
-        assert proc.uid == 0
-        scripts.append(proc.argv[-1])
-        return ExecResult(exit_code, b"", b"")
-
-    platform.set_exec_handler(execute)
-    result = await clock.run(device(run, name))  # type: ignore[arg-type]
-    assert isinstance(result, Item) and result.scope == "privileged"
-    assert result.status == ("passed" if exit_code == 0 else "failed")
-    (spec,) = specs.values()
-    assert spec.privileged and spec.devices == {name} and spec.image == "dind"
-    assert len(scripts) == 1 and node in scripts[0]
-    assert not run._created and platform.iids() == [anchor.iid]
