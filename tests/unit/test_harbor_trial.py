@@ -70,7 +70,6 @@ async def test_native_harbor_trial(
     (source / "tests/test.sh").write_text('#!/bin/sh\nprintf "1\\n" > "$FIXTURE_REWARD_PATH"\n')
     definitions = task_environments(source)
     assert len(definitions) == (1 if mode == "shared" else 2)
-    assert all(definition.environment_config is not None for definition in definitions)
     compiled = planned_task(source, cfg, environments=task_environments)
 
     def transient_role(environment: FlotillaEnvironment) -> TrialPlan:

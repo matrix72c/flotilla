@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 _NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # Longest first: `:-` must not be read as a name followed by `-`.
@@ -20,8 +20,7 @@ class Interpolated:
     """Result of interpolation: the substituted value and unprovided variables referenced (name -> default or None)."""
 
     value: object
-    unresolved: dict[str, str | None] = field(default_factory=dict)
-    references: set[str] = field(default_factory=set)
+    unresolved: dict[str, str | None]
 
 
 def interpolate(value: object, variables: Mapping[str, str]) -> Interpolated:
@@ -33,25 +32,20 @@ def interpolate(value: object, variables: Mapping[str, str]) -> Interpolated:
     value is `None` -- those are bare references the task provides nothing for.
     """
     unresolved: dict[str, str | None] = {}
-    references: set[str] = set()
-    return Interpolated(_walk(value, variables, unresolved, references, path="$"), unresolved, references)
+    return Interpolated(_walk(value, variables, unresolved, path="$"), unresolved)
 
 
-def _walk(
-    value: object, variables: Mapping[str, str], unresolved: dict[str, str | None], references: set[str], path: str
-) -> object:
+def _walk(value: object, variables: Mapping[str, str], unresolved: dict[str, str | None], path: str) -> object:
     if isinstance(value, str):
-        return _string(value, variables, unresolved, references, path)
+        return _string(value, variables, unresolved, path)
     if isinstance(value, dict):
-        return {k: _walk(v, variables, unresolved, references, f"{path}.{k}") for k, v in value.items()}
+        return {k: _walk(v, variables, unresolved, f"{path}.{k}") for k, v in value.items()}
     if isinstance(value, list):
-        return [_walk(v, variables, unresolved, references, f"{path}[{i}]") for i, v in enumerate(value)]
+        return [_walk(v, variables, unresolved, f"{path}[{i}]") for i, v in enumerate(value)]
     return value
 
 
-def _string(
-    text: str, variables: Mapping[str, str], unresolved: dict[str, str | None], references: set[str], path: str
-) -> str:
+def _string(text: str, variables: Mapping[str, str], unresolved: dict[str, str | None], path: str) -> str:
     """Substitute `$$`, `${VAR}`, `${VAR:-default}`, `${VAR-default}`, `${VAR:+alt}` and `${VAR+alt}`.
 
     Defaults and alternatives may themselves contain references (`${NO_PROXY:+${NO_PROXY},}`), as in Compose.
@@ -64,7 +58,7 @@ def _string(
             out.append("$")
             i += 2
         elif text.startswith("${", i):
-            value, i = _reference(text, i, variables, unresolved, references, path)
+            value, i = _reference(text, i, variables, unresolved, path)
             out.append(value)
         elif text[i] == "$" and _NAME.match(text, i + 1):
             raise InterpolationError(f"{path}: bare $VAR is not supported, use ${{VAR}}: {text!r}")
@@ -79,7 +73,6 @@ def _reference(
     start: int,
     variables: Mapping[str, str],
     unresolved: dict[str, str | None],
-    references: set[str],
     path: str,
 ) -> tuple[str, int]:
     """Substitute the `${...}` starting at `start`; returns the value and the index after its closing brace."""
@@ -90,7 +83,6 @@ def _reference(
     if name is None or (op is None and name.end() != len(body)):
         raise InterpolationError(f"{path}: unsupported interpolation syntax ${{{body}}}")
     var = name.group()
-    references.add(var)
     arg = body[name.end() + len(op) :] if op else ""
 
     value: str | None  # None: the argument's value
@@ -108,7 +100,7 @@ def _reference(
         used = op in (":-", "-")
         value = None if used else ""
     # An unused argument is still checked for syntax; its missing variables do not become required.
-    argument = _string(arg, variables, unresolved if used else {}, references, path)
+    argument = _string(arg, variables, unresolved if used else {}, path)
     result = argument if value is None else value
     # Only a bare reference makes the variable required; if any reference lacks a default, later defaults
     # cannot lift that.

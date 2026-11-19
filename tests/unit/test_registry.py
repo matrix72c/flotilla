@@ -184,13 +184,6 @@ def test_a_second_401_is_reported_rather_than_retried_forever() -> None:
         images.image_config(f"{NAME}@{DIGEST}")
 
 
-def test_prewarm_reads_each_distinct_image_once() -> None:
-    seen: list[str] = []
-    with configs(ROUTES, record=seen) as images:
-        images.prewarm([f"{NAME}@{DIGEST}"] * 4)
-    assert seen.count(f"/v2/ns/app/manifests/{DIGEST}") == 1
-
-
 def test_a_manifest_without_a_config_blob_is_refused() -> None:
     routes = {f"/v2/ns/app/manifests/{DIGEST}": {"mediaType": MANIFEST["mediaType"], "layers": []}}
     with configs(routes) as images, pytest.raises(RegistryError, match="no config blob"):

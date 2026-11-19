@@ -14,7 +14,7 @@ import asyncio
 import json
 import sys
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -65,12 +65,6 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--deployment", required=True, help=DEPLOYMENT_HELP)
     p.add_argument("--env", type=Path, help="explicit platform credential environment file")
     p.add_argument("--image", help="explicit override of [probe].image (digest-pinned)")
-    p.add_argument(
-        "--hosts-recheck",
-        type=float,
-        default=None,
-        help="explicit override of [probe].hosts_recheck_s",
-    )
     return parser
 
 
@@ -81,7 +75,7 @@ async def _probe(args: argparse.Namespace) -> int:
     not re-checked at startup: running this, and reading its exit status, is the gate.
     """
     cfg = FlotillaConfig.load(args.deployment)
-    evidence = await probe_deployment(cfg, image=args.image, hosts_recheck=args.hosts_recheck)
+    evidence = await probe_deployment(cfg, image=args.image)
 
     def line(name: str) -> None:
         item = getattr(evidence, name)
@@ -214,26 +208,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         except (OSError, ValueError) as exc:
             print(exc, file=sys.stderr)
             return 2
-    if args.command == "probe":
-        try:
-            return asyncio.run(_probe(args))
-        except ConfigError as exc:
-            print(exc, file=sys.stderr)
-            return 2
-    if args.command == "inspect":
-        try:
-            return _inspect(args)
-        except (ConfigError, ValueError, OSError) as exc:
-            print(exc, file=sys.stderr)
-            return 2
-    if args.command == "gc":
-        try:
-            return asyncio.run(_gc(args))
-        except ConfigError as exc:
-            print(exc, file=sys.stderr)
-            return 2
-    print(f"subcommand {args.command!r} is not implemented", file=sys.stderr)
-    return 2
+    handlers: dict[str, Callable[[argparse.Namespace], int]] = {
+        "inspect": _inspect,
+        "gc": lambda a: asyncio.run(_gc(a)),
+        "probe": lambda a: asyncio.run(_probe(a)),
+    }
+    try:
+        return handlers[args.command](args)
+    except (ConfigError, ValueError, OSError) as exc:
+        print(exc, file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

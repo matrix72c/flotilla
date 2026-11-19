@@ -131,7 +131,7 @@ class NativeAttempt:
         config = _task_config(source.local)
         has_tests = (source.local / TESTS_DIR).is_dir()
         verification = verification_of(config, roles=plans, has_tests=has_tests)
-        artifacts = artifacts_of(config, has_tests=has_tests)
+        artifacts = artifacts_of(has_tests=has_tests)
         check_against_plans(verification, artifacts, plans=plans)
         instruction = (source.local / INSTRUCTION).read_text(encoding="utf-8")
         return NativeTask(

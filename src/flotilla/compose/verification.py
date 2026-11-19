@@ -55,14 +55,13 @@ def verification_of(config: Any, *, roles: Mapping[str, Any], has_tests: bool) -
     )
 
 
-def artifacts_of(config: Any, *, has_tests: bool) -> tuple[Artifact, ...]:
+def artifacts_of(*, has_tests: bool) -> tuple[Artifact, ...]:
     """The directories the agent writes that outlive its sandbox.
 
     One, always the same: the agent's log directory, which the verifier reads to grade the run.
     A task that declares its own `artifacts` is refused during import rather than represented
     here, so there is nothing else to collect.
     """
-    del config  # reserved: a task-declared artifact list is refused at import, not encoded here
     if not has_tests:
         return ()
     return (Artifact(name=AGENT_ARTIFACT, role="main", target=AGENT_TARGET, verifier_target=AGENT_HANDOFF_TARGET),)

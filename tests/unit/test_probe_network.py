@@ -28,8 +28,6 @@ SETTINGS = ProbeSettings(
     image="r/probe@sha256:" + "1" * 64,
     share_release="r1",
     endpoint="http://os.test",
-    link_members=9,
-    hosts_recheck_s=0,
 )
 
 
@@ -40,7 +38,7 @@ async def test_inbound_isolation_needs_allow_deny_and_restore(
 ) -> None:
     anchor = Anchor(platform, clock, "Lp", AnchorSettings(image="anchor"))
     await clock.run(anchor.start())
-    run = _Run(platform, clock, anchor, replace(SETTINGS, link_members=2), "p1")
+    run = _Run(platform, clock, anchor, SETTINGS, "p1")
 
     async def exchange(_run: _Run, source: InstanceHandle, host: str, port: int, protocol: str, token: str) -> str:
         if host == "127.0.0.1":

@@ -31,7 +31,6 @@ class VolumePlan:
     """A named volume and the (unit, target, read_only) references that mount it."""
 
     name: str
-    mode: Literal["trial"]
     references: tuple[tuple[str, str, bool], ...]
 
 
@@ -68,7 +67,7 @@ def classify(services: Mapping[str, Service]) -> Layout:
                 bind_refs.append((name, posixpath.normpath(mount.source), mount.target, mount.read_only))
             order.append((name, mount.target))
 
-    volumes = tuple(VolumePlan(name, "trial", tuple(refs)) for name, refs in sorted(vol_refs.items()))
+    volumes = tuple(VolumePlan(name, tuple(refs)) for name, refs in sorted(vol_refs.items()))
     sources = sorted({src for _, src, _, _ in bind_refs}, key=lambda s: (s.count("/"), s))
     roots: list[str] = []
     for source in sources:

@@ -50,11 +50,8 @@ def _caps() -> Capabilities:
         inbound_isolation=True,
         external_forms=frozenset({"none", "allowlist"}),
         implicit_egress=(),
-        internal_address="exec",
         shared_volume=True,
         volume_file=True,
-        no_auto_mount=True,
-        exec_auth=True,
         privileged_runtime=False,
         devices=frozenset(),
     )

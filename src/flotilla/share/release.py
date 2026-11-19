@@ -10,7 +10,7 @@ import posixpath
 import stat
 import time
 import uuid
-from collections.abc import Mapping, Sequence, Set
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -48,38 +48,6 @@ class ReleaseResult:
     release_sha256: str  # sha256 of `RELEASE.json` itself, the value pinned in the deployment config
     uploaded: int  # files uploaded this time; 0 when skipped
     skipped: bool
-
-
-@dataclass(frozen=True)
-class VerifyReport:
-    """Result of a full verification (full sha256 checks run on demand via `flotilla share verify`)."""
-
-    release: str
-    #: Whether the sha256 of `RELEASE.json` matches the pinned value. If false, other checks are meaningless.
-    manifest_ok: bool
-    actual_sha256: str
-    expected_sha256: str
-    checked: int
-    missing: tuple[str, ...] = ()
-    size_mismatch: tuple[str, ...] = ()
-    digest_mismatch: tuple[str, ...] = ()
-    mode_mismatch: tuple[str, ...] = ()
-
-    @property
-    def ok(self) -> bool:
-        broken = self.missing or self.size_mismatch or self.digest_mismatch or self.mode_mismatch
-        return self.manifest_ok and not broken
-
-
-@dataclass(frozen=True)
-class GcReleasesReport:
-    """Result of `share gc`. `staging` is listed, not deleted (see `gc_releases`)."""
-
-    kept: frozenset[str]
-    removed: frozenset[str]
-    would_remove: frozenset[str]
-    staging: tuple[str, ...] = ()
-    dry_run: bool = False
 
 
 def release_entries(root: Path) -> list[tuple[str, os.stat_result]]:
@@ -225,7 +193,7 @@ async def _discard(anchor: Anchor, staging: str) -> None:
 async def check_release(anchor: Anchor, release: str, *, expected_sha256: str) -> None:
     """Startup check: the pinned RELEASE.json digest matches and `bin/busybox` exists. Raises `ReleaseError`.
 
-    One download and one existence check; per-file verification is `verify_release` (`flotilla share verify`).
+    One download and one existence check; a caller needing per-file verification loops over `RELEASE.json` itself.
     """
     target = f"{RELEASES}/{release}"
     manifest_key = f"{target}/{RELEASE_JSON}"
@@ -273,75 +241,6 @@ async def ensure_builtin_release(anchor: Anchor) -> bool:
     if result.release_sha256 != BUILTIN_RELEASE_SHA256:
         raise ReleaseError(f"built-in share published with unexpected {RELEASE_JSON} sha256 {result.release_sha256}")
     return not result.skipped
-
-
-async def verify_release(anchor: Anchor, release: str, *, expected_sha256: str) -> VerifyReport:
-    """Fully verify a release: the manifest's own digest first, then each file's size, content and mode.
-
-    If the manifest digest does not match the pinned value, the rest is meaningless and is skipped.
-    """
-    target = f"{RELEASES}/{release}"
-    manifest_key = f"{target}/{RELEASE_JSON}"
-    if not await anchor.exists(manifest_key, stage="prepare"):
-        raise ReleaseError(f"{manifest_key} does not exist")
-    blob = await anchor.download(manifest_key, stage="prepare")
-    actual = hashlib.sha256(blob).hexdigest()
-    if actual != expected_sha256:
-        return VerifyReport(release, False, actual, expected_sha256, 0)
-    document = json.loads(blob)
-    files: dict[str, dict[str, object]] = document.get("files") or {}
-    missing, size_bad, digest_bad, mode_bad = [], [], [], []
-    for rel in sorted(files):
-        entry = files[rel]
-        key = f"{target}/{rel}"
-        if not await anchor.exists(key, stage="prepare"):
-            missing.append(rel)
-            continue
-        info = await anchor.stat(key, stage="prepare")
-        if info.size != entry.get("size"):
-            size_bad.append(rel)
-        else:
-            data = await anchor.download(key, stage="prepare")
-            if hashlib.sha256(data).hexdigest() != entry.get("sha256"):
-                digest_bad.append(rel)
-        if f"{info.mode:04o}" != entry.get("mode"):
-            mode_bad.append(rel)
-    return VerifyReport(
-        release,
-        True,
-        actual,
-        expected_sha256,
-        len(files),
-        tuple(missing),
-        tuple(size_bad),
-        tuple(digest_bad),
-        tuple(mode_bad),
-    )
-
-
-async def gc_releases(anchor: Anchor, *, keep: Set[str], dry_run: bool) -> GcReleasesReport:
-    """Delete releases not in `keep`.
-
-    `keep` must include the release pinned in the deployment config. This keeps "the configured release and
-    `--keep`"; it does **not** check all running references, so a release pinned by another experiment but
-    missing from `keep` will be deleted.
-
-    **`share/staging` is not reclaimed**: it cannot be told apart from another process assembling a release
-    (which may rename it into place at any time), and deleting it would break that publish, so it is only listed.
-    """
-    present = sorted(await anchor.listdir(RELEASES, stage="run")) if await anchor.exists(RELEASES, stage="run") else []
-    removed = [name for name in present if name not in keep]
-    if not dry_run:
-        for name in removed:
-            await anchor.remove(f"{RELEASES}/{name}", stage="run")
-    staging = sorted(await anchor.listdir(STAGING, stage="run")) if await anchor.exists(STAGING, stage="run") else []
-    return GcReleasesReport(
-        kept=frozenset(present) - frozenset(removed),
-        removed=frozenset() if dry_run else frozenset(removed),
-        would_remove=frozenset(removed),
-        staging=tuple(staging),
-        dry_run=dry_run,
-    )
 
 
 def _sha256(path: Path) -> str:

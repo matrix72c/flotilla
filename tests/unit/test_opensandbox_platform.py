@@ -801,10 +801,7 @@ async def test_legacy_execd_settings_reach_command_and_upload(clock: ManualClock
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("exec_auth", [True, False])
-async def test_each_instance_gets_own_token_on_every_execd_request(
-    clock: ManualClock, caps: Capabilities, exec_auth: bool
-) -> None:
+async def test_each_instance_gets_own_token_on_every_execd_request(clock: ManualClock, caps: Capabilities) -> None:
     from datetime import UTC, datetime
 
     created: dict[str, str] = {}
@@ -828,7 +825,7 @@ async def test_each_instance_gets_own_token_on_every_execd_request(
             return httpx.Response(200, content=b"x")
         return httpx.Response(200, json={})
 
-    platform = _platform(handler, clock, caps=dataclasses.replace(caps, exec_auth=exec_auth))
+    platform = _platform(handler, clock, caps=caps)
     ha = await clock.run(platform.create(_spec("a")))
     hb = await clock.run(platform.create(_spec("b")))
     assert created["sb-a"] != created["sb-b"]

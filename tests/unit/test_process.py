@@ -252,7 +252,6 @@ async def test_completed_successfully_waits_for_exit_zero(platform: FakePlatform
     assert not _started(platform, handles, "app")
     _finish(platform, handles, "init", 0)
     started = await clock.run(task)
-    assert started.exit_codes == {"init": 0}
     assert set(started.pids) == {"init", "app"}
 
 
@@ -382,8 +381,7 @@ async def test_one_shot_with_healthcheck_only_waits_for_exit(platform: FakePlatf
     task = asyncio.create_task(process.start_all(platform, clock, plan, handles))
     await clock.advance(30.0)
     _finish(platform, handles, "init", 0)
-    started = await clock.run(task)
-    assert started.exit_codes == {"init": 0}
+    await clock.run(task)
     assert script.checks("init") == 0
 
 
@@ -404,8 +402,7 @@ async def test_mixed_health_and_completion_dependencies(platform: FakePlatform, 
         assert _started(platform, handles, "early")
         assert not _started(platform, handles, "late")
         _finish(platform, handles, "init", 0)
-        started = await clock.run(work)
-        assert started.exit_codes == {"init": 0}
+        await clock.run(work)
         assert _started(platform, handles, "late")
     finally:
         work.cancel()

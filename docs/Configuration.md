@@ -186,7 +186,7 @@ Per-stage startup deadlines. The whole startup, from admission to ready, is also
 | `hosts` | `30` | Writing `/etc/hosts` entries |
 | `start_max` | `1800` | Upper bound for starting services and waiting for health gates |
 | `close` | `60` | Default timeout for `fleet.drain()` and `fleet.close()` |
-| `client_start` | `300` | Starting the client's anchor and checking the pinned share release, once per client before its first open. The check downloads `RELEASE.json`, compares its sha256 and confirms `bin/busybox`; `flotilla.share.release.verify_release` checks every file |
+| `client_start` | `300` | Starting the client's anchor and checking the pinned share release, once per client before its first open. The check downloads `RELEASE.json`, compares its sha256 and confirms `bin/busybox` |
 
 `[process].poll_interval` (default `2`) sets how often background process status is polled.
 
@@ -249,11 +249,8 @@ All probe inputs are fields of the spec. Images must be pinned `repo@sha256:<64 
 
 | Key | Default | Meaning |
 |---|---|---|
-| `deployment` | `"deployment"` | Human-readable name for this deployment in the probe's output |
 | `image` | `""` | Required ordinary probe image |
 | `privileged_image` | `""` | Image for the configured privileged create path. Enables the privileged phase, which measures the same storage, egress, inbound and exec-channel restrictions again inside the privileged runtime |
-| `link_members` | `9` | Group size the probe builds for its network checks, bounded to 2–32; `platform.link_max_members` is the deployment's own limit |
-| `hosts_recheck_s` | `600` | Delay before verifying that `/etc/hosts` was not rewritten |
 | `total_timeout_s` | `3600` | Total check budget; cleanup has its own budget |
 | `cleanup_timeout_s` | `180` | Bounded reconciliation and deletion confirmation |
 | `external_targets` | `[]` | Explicit `{host, port, protocol, service}` controls: `service = "echo"` (default, TCP/UDP), `"https"` (TCP), or `"ntp"` (UDP); `protocol` defaults to `"tcp"`; never inferred from workload egress |

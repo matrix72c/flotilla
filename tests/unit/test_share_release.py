@@ -32,10 +32,8 @@ from flotilla.share.release import (
     _release_json,
     check_release,
     ensure_builtin_release,
-    gc_releases,
     publish_release,
     release_entries,
-    verify_release,
 )
 from flotilla.testing.platform import FakePlatform, ManualClock, SharedTree
 
@@ -210,114 +208,6 @@ async def test_publish_discards_staging_on_failure(anchor: Anchor, tree: SharedT
         await publish_release(anchor, "r1", root, components={})
     assert not [d for d in tree.dirs if d.startswith(f"{STAGING}/r1.")]
     assert not [f for f in tree.files if f.startswith(f"{RELEASES}/r1/")]
-
-
-# ───────────────────────────── verify ─────────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_verify_ok_then_detects_content_change(anchor: Anchor, platform: FakePlatform, tmp_path: Path) -> None:
-    root = _tree(tmp_path / "src")
-    result = await publish_release(anchor, "r1", root, components={})
-    report = await verify_release(anchor, "r1", expected_sha256=result.release_sha256)
-    assert report.ok and report.checked == 1 and report.manifest_ok
-
-    platform.tree_contents[f"{RELEASES}/r1/bin/busybox"] = b"tampered"
-    bad = await verify_release(anchor, "r1", expected_sha256=result.release_sha256)
-    assert not bad.ok and bad.size_mismatch == ("bin/busybox",)
-
-
-@pytest.mark.asyncio
-async def test_verify_detects_digest_change_of_same_size(
-    anchor: Anchor, platform: FakePlatform, tmp_path: Path
-) -> None:
-    root = _tree(tmp_path / "src")
-    result = await publish_release(anchor, "r1", root, components={})
-    same_size = bytes(len(b"\x00busybox-bytes")) or b"x"
-    assert len(same_size) == len(b"\x00busybox-bytes")
-    platform.tree_contents[f"{RELEASES}/r1/bin/busybox"] = b"y" * len(b"\x00busybox-bytes")
-    report = await verify_release(anchor, "r1", expected_sha256=result.release_sha256)
-    assert not report.ok and report.digest_mismatch == ("bin/busybox",) and not report.size_mismatch
-
-
-@pytest.mark.asyncio
-async def test_verify_detects_mode_change_with_identical_content(
-    anchor: Anchor, tree: SharedTree, tmp_path: Path
-) -> None:
-    """Content unchanged, only busybox mode changed from 0755 to 0644: must be reported."""
-    root = _tree(tmp_path / "src")
-    result = await publish_release(anchor, "r1", root, components={})
-    tree.modes[f"{RELEASES}/r1/bin/busybox"] = "0644"
-    report = await verify_release(anchor, "r1", expected_sha256=result.release_sha256)
-    assert not report.ok
-    assert report.mode_mismatch == ("bin/busybox",)
-    assert not report.digest_mismatch and not report.size_mismatch
-
-
-@pytest.mark.asyncio
-async def test_verify_flags_manifest_sha_mismatch(anchor: Anchor, tmp_path: Path) -> None:
-    """A deployment-pinned sha256 that does not match is reported immediately, without per-file verification."""
-    root = _tree(tmp_path / "src")
-    await publish_release(anchor, "r1", root, components={})
-    report = await verify_release(anchor, "r1", expected_sha256="0" * 64)
-    assert not report.manifest_ok and not report.ok
-    assert report.checked == 0 and report.actual_sha256 != report.expected_sha256
-
-
-@pytest.mark.asyncio
-async def test_verify_reports_missing_file(anchor: Anchor, tree: SharedTree, tmp_path: Path) -> None:
-    root = _tree(tmp_path / "src")
-    result = await publish_release(anchor, "r1", root, components={})
-    tree.files.discard(f"{RELEASES}/r1/bin/busybox")
-    report = await verify_release(anchor, "r1", expected_sha256=result.release_sha256)
-    assert not report.ok and report.missing == ("bin/busybox",)
-
-
-@pytest.mark.asyncio
-async def test_verify_missing_manifest_raises(anchor: Anchor) -> None:
-    with pytest.raises(ReleaseError, match=r"RELEASE\.json does not exist"):
-        await verify_release(anchor, "nope", expected_sha256=SHA)
-
-
-# ───────────────────────────── gc ─────────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_gc_keeps_only_listed(anchor: Anchor, tmp_path: Path) -> None:
-    for name in ("r1", "r2", "r3"):
-        await publish_release(anchor, name, _tree(tmp_path / name), components={})
-    report = await gc_releases(anchor, keep={"r2"}, dry_run=False)
-    assert report.removed == frozenset({"r1", "r3"})
-    assert report.kept == frozenset({"r2"})
-    left = sorted(await anchor.listdir(RELEASES, stage="run"))
-    assert left == ["r2"]
-
-
-@pytest.mark.asyncio
-async def test_gc_dry_run_removes_nothing(anchor: Anchor, tmp_path: Path) -> None:
-    await publish_release(anchor, "r1", _tree(tmp_path / "r1"), components={})
-    report = await gc_releases(anchor, keep=set(), dry_run=True)
-    assert report.removed == frozenset() and report.dry_run
-    assert report.would_remove == frozenset({"r1"})
-    assert sorted(await anchor.listdir(RELEASES, stage="run")) == ["r1"]
-    actual = await gc_releases(anchor, keep=set(), dry_run=False)
-    assert actual.removed == actual.would_remove == report.would_remove
-
-
-@pytest.mark.asyncio
-async def test_gc_never_touches_staging(anchor: Anchor, tree: SharedTree, tmp_path: Path) -> None:
-    """A staging directory being assembled by another publisher must not be deleted by gc."""
-    await publish_release(anchor, "r1", _tree(tmp_path / "r1"), components={})
-    tree.dirs.update({f"{STAGING}/r2.inflight", f"{STAGING}/r2.inflight/bin"})
-    report = await gc_releases(anchor, keep={"r1"}, dry_run=False)
-    assert f"{STAGING}/r2.inflight" in tree.dirs
-    assert report.staging == ("r2.inflight",)
-
-
-@pytest.mark.asyncio
-async def test_gc_without_releases_prefix_is_empty(anchor: Anchor) -> None:
-    report = await gc_releases(anchor, keep=set(), dry_run=False)
-    assert report.kept == frozenset() and report.removed == frozenset()
 
 
 @pytest.mark.asyncio

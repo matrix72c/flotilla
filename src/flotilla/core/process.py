@@ -220,11 +220,9 @@ def _stderr(result: ExecResult) -> str:
 
 @dataclass(frozen=True)
 class Started:
-    """Result of the start stage: process IDs per service (excluding those without one) and exit codes of finished
-    one-shot services."""
+    """Result of the start stage: process IDs per service (excluding those without one)."""
 
     pids: Mapping[str, str]
-    exit_codes: Mapping[str, int]
 
 
 async def start_all(
@@ -281,11 +279,10 @@ class _Runner:
         self._wait_exit = {u for u, c in awaited if c == "service_completed_successfully"}
         self._wait_health = {u for u, c in awaited if c == "service_healthy"}
         self._pids: dict[str, str] = {}
-        self._exit_codes: dict[str, int] = {}
 
     async def run(self) -> Started:
         await run_all(self._service(u) for u in sorted(self._plan.units))
-        return Started(pids=dict(self._pids), exit_codes=dict(self._exit_codes))
+        return Started(pids=dict(self._pids))
 
     async def _service(self, name: str) -> None:
         unit = self._plan.units[name]
@@ -335,7 +332,6 @@ class _Runner:
         handle = self._handles[name]
         try:
             code = await wait_exit(self._platform, self._clock, handle, name, pid, poll_interval_s=self._poll)
-            self._exit_codes[name] = code
             if code != 0:
                 raise await _service_error(self._platform, handle, name, f"one-shot service exit code {code}")
         except FlotillaError as exc:
