@@ -103,7 +103,7 @@ class NativeHarness:
             spec = platform.spec_of(handle.iid)
             argv = proc.argv
             if spec.labels.get(labels.ROLE) == labels.ROLE_ANCHOR:
-                if argv[:4] == ("python3", "-I", "-m", "flotilla.native.platform_verify"):
+                if argv[:2] == ("/.flotilla/bin/busybox", "find") and argv[3:] == ("-mindepth", "1", "-delete"):
                     return self._helper(argv)
                 if argv[0] == "cp" and argv[-2].endswith("/."):
                     return self._copy_contents(argv)
@@ -125,15 +125,13 @@ class NativeHarness:
 
     def _helper(self, argv: tuple[str, ...]) -> ExecResult:
         rel = self.tree._rel
-        if "--clear-directory" in argv:
-            key = rel(argv[5], write=True)
-            for entries in (self.tree.dirs, self.tree.files):
-                entries.difference_update(k for k in entries if k.startswith(key + "/"))
-            for book in (self.tree.modes, self.tree.owners, self.platform.tree_contents):
-                for key_part in [k for k in book if k.startswith(key + "/")]:
-                    del book[key_part]
-            return ExecResult(0, b"", b"")
-        raise AssertionError(f"unexpected installed helper call: {argv!r}")
+        key = rel(argv[2], write=True)
+        for entries in (self.tree.dirs, self.tree.files):
+            entries.difference_update(k for k in entries if k.startswith(key + "/"))
+        for book in (self.tree.modes, self.tree.owners, self.platform.tree_contents):
+            for key_part in [k for k in book if k.startswith(key + "/")]:
+                del book[key_part]
+        return ExecResult(0, b"", b"")
 
     def _copy_contents(self, argv: tuple[str, ...]) -> ExecResult:
         src, dst = self.tree._rel(argv[-2].removesuffix("/.")), self.tree._rel(argv[-1], write=True)

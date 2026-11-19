@@ -33,4 +33,4 @@ docker rm "$container"
 chmod 0755 share-root/bin/busybox
 ```
 
-Retain the binary checksum and distribute its license and corresponding source alongside the image artifacts. Replace the digest placeholder with the digest printed by `images/anchor/build.sh --push`.
+Retain the binary checksum and distribute its license and corresponding source alongside the image artifacts. Replace the digest placeholder with the `anchor_pin` returned by `flotilla.anchor_build.build_anchor(..., push=True)`.

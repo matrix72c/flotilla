@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 from pathlib import Path
 
 import pytest
-from harbor.models.task.config import EnvironmentConfig, NetworkPolicy
+from harbor.models.task.config import EnvironmentConfig
 from harbor.models.trial.paths import TrialPaths
 
 from flotilla import Flotilla
@@ -19,7 +18,9 @@ from flotilla.core.plan import TaskSource
 from flotilla.integrations.harbor import FlotillaEnvironment
 from flotilla.integrations.harbor_source import task_environments
 from flotilla.platform.base import ExecResult, FlotillaError, ProcessSpec
-from flotilla.testing.config import importable
+from flotilla.runtime.environment import Environment
+from flotilla.runtime.types import OpenOptions
+from flotilla.testing.config import config_data, importable
 from flotilla.testing.planning import planned_task
 from flotilla.testing.platform import FakePlatform, SharedTree
 from flotilla.testing.runtime import deployment as runtime_deployment
@@ -48,7 +49,6 @@ def test_scan_checks_verifier_context_and_continues_after_invalid_harbor_input(
     with pytest.raises(TaskError, match="Harbor environment definition"):
         task_environments(tasks / "bad-config")
     output = tmp_path / "scan.jsonl"
-    from flotilla.testing.config import config_data
 
     cfg = FlotillaConfig.from_mapping(config_data())
     deployment = importable(cfg)
@@ -94,35 +94,36 @@ def test_harbor_resolves_each_role_from_its_own_directory(tmp_path: Path, monkey
     assert all(definition.name == path.name for definition in definitions)
 
 
-def adapter(
+async def view(
     tmp_path: Path,
     cfg: FlotillaConfig,
     fleet: Flotilla,
     *,
-    network_policy: NetworkPolicy | None = None,
     environment: str = "environment",
-    planned: bool = True,
-    **kwargs: object,
-) -> FlotillaEnvironment:
-    deployment = importable(cfg)
-    path = source(tmp_path) if not (tmp_path / "dataset" / "task").exists() else tmp_path / "dataset" / "task"
+    options: OpenOptions | None = None,
+) -> tuple[FlotillaEnvironment, Environment]:
+    """Open one role's plan, then borrow it as a Harbor view over the live handle."""
+    path = tmp_path / "dataset" / "task"
+    if not path.exists():
+        source(tmp_path)
     compiled = planned_task(path, cfg, environments=task_environments)
-    return FlotillaEnvironment(
-        environment_dir=path / environment,
-        environment_name="task",
-        session_id="harbor-test",
-        trial_paths=TrialPaths(tmp_path / "trial"),
-        task_env_config=EnvironmentConfig(docker_image="r.io/main:1"),
-        network_policy=network_policy,
-        deployment=deployment,
-        plan=compiled["main" if environment == "environment" else "verifier"] if planned else None,
-        fleet=fleet,
-        **kwargs,  # type: ignore[arg-type]
+    handle = await fleet.open(compiled["main" if environment == "environment" else "verifier"], options)
+    return (
+        FlotillaEnvironment.view(
+            handle,
+            cfg=cfg,
+            environment_dir=path / environment,
+            environment_name="task",
+            session_id="harbor-test",
+            trial_paths=TrialPaths(tmp_path / "trial"),
+            task_env_config=EnvironmentConfig(docker_image="r.io/main:1"),
+        ),
+        handle,
     )
 
 
 @pytest.mark.asyncio
-async def test_harbor_opens_an_internal_transient_role(
+async def test_harbor_views_each_role_from_its_own_plan(
     tmp_path: Path, deployment: tuple[FlotillaConfig, FakePlatform, SharedTree]
 ) -> None:
     cfg, _, _ = deployment
@@ -131,61 +132,55 @@ async def test_harbor_opens_an_internal_transient_role(
     async with Flotilla(deployment=cfg) as fleet:
         # The image reference reaches the sandbox as the task wrote it; nothing resolves it here.
         for directory, image in (("environment", "r.io/main:1"), ("tests", "r.io/verifier:1")):
-            env = adapter(tmp_path, cfg, fleet, environment=directory)
-            await env.start()
-            assert (await env.handle.info()).services[0].image == image
+            env, handle = await view(tmp_path, cfg, fleet, environment=directory)
+            assert (await handle.info()).services[0].image == image
             await env.stop()
+            await handle.release()
 
 
 @pytest.mark.asyncio
-async def test_harbor_requires_attempt_and_rejects_legacy_prepared_and_force_build(
+async def test_harbor_requires_a_view_and_rejects_owning_misuse(
     tmp_path: Path, deployment: tuple[FlotillaConfig, FakePlatform, SharedTree]
 ) -> None:
     cfg, platform, _ = deployment
+    path = source(tmp_path)
     async with Flotilla(deployment=cfg) as fleet:
-        with pytest.raises(ValueError, match="NativeAttempt"):
-            await adapter(tmp_path, cfg, fleet, planned=False).start()
+        env, _ = await view(tmp_path, cfg, fleet)
         with pytest.raises(ValueError, match="force_build is unsupported"):
-            await adapter(tmp_path, cfg, fleet).start(force_build=True)
-        with pytest.raises(ValueError, match="prepared JSONL"):
+            await env.start(force_build=True)
+        await env.start()  # the handle was open all along; start only prepares Harbor's log directories
+        with pytest.raises(ValueError, match="resource overrides"):
             FlotillaEnvironment(
-                environment_dir=tmp_path / "remote-only",
+                environment_dir=path / "environment",
                 environment_name="task",
-                session_id="legacy",
-                trial_paths=TrialPaths(tmp_path / "legacy"),
-                task_env_config=EnvironmentConfig(),
-                deployment=str(tmp_path / "deployment.toml"),
-                fleet=fleet,
-                prepared="obsolete.jsonl",
+                session_id="unopened",
+                trial_paths=TrialPaths(tmp_path / "trial"),
+                task_env_config=EnvironmentConfig(docker_image="r.io/main:1"),
+                override_cpus=2,
+                cfg=cfg,
             )
-        # A deployment setting: accepting it at open would silently do nothing.
-        with pytest.raises(ValueError, match="belong to the deployment"):
-            adapter(tmp_path, cfg, fleet, runtime_params={"SEED": "2"})
+        with pytest.raises(RuntimeError, match="environment is not started"):
+            await FlotillaEnvironment(
+                environment_dir=path / "environment",
+                environment_name="task",
+                session_id="unopened",
+                trial_paths=TrialPaths(tmp_path / "trial"),
+                task_env_config=EnvironmentConfig(docker_image="r.io/main:1"),
+                cfg=cfg,
+            ).start()
     assert not await platform.list({labels.ROLE: labels.ROLE_UNIT})
 
 
 @pytest.mark.asyncio
-async def test_harbor_cpu_override_and_borrowed_stop_is_non_owning(
+async def test_harbor_borrowed_stop_leaves_the_owner_running(
     tmp_path: Path, deployment: tuple[FlotillaConfig, FakePlatform, SharedTree]
 ) -> None:
     cfg, _, _ = deployment
     async with Flotilla(deployment=cfg) as fleet:
-        owner = adapter(tmp_path, cfg, fleet, override_cpus=2)
-        await owner.start()
-        assert (await owner.handle.info()).services[0].cpu == "2"
-        view = FlotillaEnvironment.view(
-            owner.handle,
-            fleet=fleet,
-            deployment=str(tmp_path / "deployment.toml"),
-            environment_dir=tmp_path / "dataset/task/environment",
-            environment_name="task",
-            session_id="borrowed",
-            trial_paths=TrialPaths(tmp_path / "borrowed"),
-            task_env_config=EnvironmentConfig(docker_image="r.io/main:1", cpus=1),
-        )
-        await view.stop()
-        await owner.handle.check()  # stopping a borrowed view leaves the owner's environment running
-        await owner.stop()
+        env, handle = await view(tmp_path, cfg, fleet)
+        await env.stop()
+        await handle.check()  # stopping a borrowed view leaves the owner's environment running
+        await handle.release()
 
 
 @pytest.mark.parametrize("extra", [False, True])
@@ -201,12 +196,19 @@ def test_harbor_advertises_no_network_only_for_declared_dns(
             "platform": cfg.platform.model_copy(update={"cluster_dns": ("10.96.0.10",), "implicit_egress": implicit})
         }
     )
-    env = adapter(tmp_path, cfg, Flotilla(deployment=cfg))
+    env = FlotillaEnvironment(
+        environment_dir=source(tmp_path) / "environment",
+        environment_name="task",
+        session_id="harbor-test",
+        trial_paths=TrialPaths(tmp_path / "trial"),
+        task_env_config=EnvironmentConfig(docker_image="r.io/main:1"),
+        cfg=cfg,
+    )
     assert env.capabilities.disable_internet is not extra
 
 
 @pytest.mark.asyncio
-async def test_harbor_no_network_overrides_deployment_egress_with_dns_exception(
+async def test_harbor_disable_internet_is_fixed_at_open_with_dns_exception(
     tmp_path: Path,
     deployment: tuple[FlotillaConfig, FakePlatform, SharedTree],
 ) -> None:
@@ -221,11 +223,11 @@ async def test_harbor_no_network_overrides_deployment_egress_with_dns_exception(
     )
     platform.caps = cfg.platform_capabilities()
     async with Flotilla(deployment=cfg) as fleet:
-        env = adapter(tmp_path, cfg, fleet, network_policy=NetworkPolicy(network_mode="no-network"))
-        await env.start()
-        info = await env._env().info()
+        env, handle = await view(tmp_path, cfg, fleet, options=OpenOptions(disable_internet=True))
+        info = await handle.info()
         assert platform.spec_of(info.services[0].instance_id).external.mode == "none"
         await env.stop()
+        await handle.release()
 
 
 @pytest.mark.asyncio
@@ -235,21 +237,23 @@ async def test_harbor_environment_contract(
 ) -> None:
     cfg, _, _ = deployment
     async with Flotilla(deployment=cfg) as fleet:
-        env = adapter(tmp_path, cfg, fleet)
+        env, handle = await view(tmp_path, cfg, fleet)
         assert env.capabilities.docker_compose
         await env.start()
         result = await env.exec("echo ok", env={"LITERAL": "$(no)"})
         assert result.return_code == 0
-        await env._env().agent.write_file("/tmp/reward", b"0")
+        await handle.agent.write_file("/tmp/reward", b"0")
         target = tmp_path / "reward"
         await env.download_file("/tmp/reward", target)
         assert target.read_bytes() == b"0"
         await env.stop()
+        await handle.release()
 
 
 @pytest.mark.asyncio
-async def test_harbor_prepares_role_logs_and_records_cleanup(
-    tmp_path: Path, deployment: tuple[FlotillaConfig, FakePlatform, SharedTree]
+async def test_harbor_prepares_role_logs_once_and_records_the_environment(
+    tmp_path: Path,
+    deployment: tuple[FlotillaConfig, FakePlatform, SharedTree],
 ) -> None:
     cfg, platform, _ = deployment
     original = platform.exec_handler
@@ -261,27 +265,26 @@ async def test_harbor_prepares_role_logs_and_records_cleanup(
         return original(iid, proc)
 
     platform.set_exec_handler(execute)
-    fleet = Flotilla(deployment=cfg)
-    env = adapter(tmp_path, cfg, fleet)
-    env._owns_fleet = True
-    await env.start()
-    await env.start()  # idempotent start must not reset agent outputs
-    assert len(commands) == 2
-    for proc in commands:
-        assert proc.uid == proc.gid == 0 and proc.cwd == "/"
-        assert set(proc.argv[3:]) == {"/logs/agent", "/logs/user-agent", "/logs/verifier", "/logs/artifacts"}
-    info = json.loads((tmp_path / "trial/flotilla/harbor-test/environment.json").read_text())
-    assert info["services"][0]["instance_id"]
-    assert "accepted_security_gaps" in info
-    await env.stop()
-    cleanup = json.loads((tmp_path / "trial/flotilla/harbor-test/cleanup.json").read_text())
-    assert cleanup["clean"] is True and cleanup["remaining"] == []
+    async with Flotilla(deployment=cfg) as fleet:
+        env, handle = await view(tmp_path, cfg, fleet)
+        await env.start()
+        await env.start()  # idempotent start must not reset agent outputs
+        assert len(commands) == 2
+        for proc in commands:
+            assert proc.uid == proc.gid == 0 and proc.cwd == "/"
+            assert set(proc.argv[3:]) == {"/logs/agent", "/logs/user-agent", "/logs/verifier", "/logs/artifacts"}
+        info = json.loads((tmp_path / "trial/flotilla/harbor-test/environment.json").read_text())
+        assert info["services"][0]["instance_id"]
+        assert "accepted_security_gaps" in info
+        await env.stop()
+        await handle.release()
+    assert fleet.cleanup_report is not None and fleet.cleanup_report.clean
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("owned", [False, True])
-async def test_harbor_log_initialization_failure_releases_environment(
-    tmp_path: Path, deployment: tuple[FlotillaConfig, FakePlatform, SharedTree], owned: bool
+async def test_harbor_log_initialization_failure_leaves_the_handle_to_its_owner(
+    tmp_path: Path,
+    deployment: tuple[FlotillaConfig, FakePlatform, SharedTree],
 ) -> None:
     cfg, platform, _ = deployment
     original = platform.exec_handler
@@ -293,19 +296,14 @@ async def test_harbor_log_initialization_failure_releases_environment(
 
     platform.set_exec_handler(execute)
     fleet = Flotilla(deployment=cfg)
-    env = adapter(tmp_path, cfg, fleet)
-    env._owns_fleet = owned
     try:
+        env, handle = await view(tmp_path, cfg, fleet)
         with pytest.raises(RuntimeError, match="initialize Harbor log"):
             await env.start()
-        assert env._environment is None
+        await handle.check()  # a failed view start does not tear down the owner's environment
         report = await fleet.drain(2)
         assert report.clean
         assert not await platform.list({labels.LAUNCH: report.launch_id, labels.ROLE: labels.ROLE_UNIT})
-        if owned:
-            assert fleet.cleanup_report is not None and fleet.cleanup_report.clean
-        else:
-            assert fleet.cleanup_report is None
     finally:
         await fleet.close(2)
 
@@ -317,37 +315,13 @@ async def test_harbor_reward_read_does_not_hide_lost_environment(
 ) -> None:
     cfg, platform, _ = deployment
     async with Flotilla(deployment=cfg) as fleet:
-        env = adapter(tmp_path, cfg, fleet)
+        env, handle = await view(tmp_path, cfg, fleet)
         await env.start()
-        await env._env().agent.write_file("/tmp/reward", b"0")
-        info = await env._env().info()
+        await handle.agent.write_file("/tmp/reward", b"0")
+        info = await handle.info()
         await fleet._call(lambda manager: manager.platform.delete(info.services[0].instance_id))
         with pytest.raises(FlotillaError):
             await env.download_file("/tmp/reward", tmp_path / "reward")
-        with pytest.raises(FlotillaError):
-            await env.stop()
+        await env.stop()  # detaching never fails; the owner's close reports the loss
     assert fleet.cleanup_report is not None
     assert not await platform.list({labels.LAUNCH: fleet.cleanup_report.launch_id})
-
-
-@pytest.mark.asyncio
-async def test_cancelled_stop_still_closes_owned_fleet(
-    tmp_path: Path,
-    deployment: tuple[FlotillaConfig, FakePlatform, SharedTree],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    cfg, _, _ = deployment
-    fleet = Flotilla(deployment=cfg)
-    env = adapter(tmp_path, cfg, fleet)
-    env._owns_fleet = True
-    await env.start()
-    release = env._env().release
-
-    async def interrupted() -> None:
-        await release()
-        raise asyncio.CancelledError
-
-    monkeypatch.setattr(env._env(), "release", interrupted)
-    with pytest.raises(asyncio.CancelledError):
-        await env.stop()
-    assert fleet.cleanup_report is not None and fleet.cleanup_report.clean

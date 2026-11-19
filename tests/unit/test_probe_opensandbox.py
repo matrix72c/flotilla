@@ -10,7 +10,6 @@ import pytest
 
 from flotilla.platform.base import (
     ExternalPolicy,
-    FlotillaError,
     InstanceSpec,
     Resources,
 )
@@ -50,7 +49,7 @@ def backend(handler: Callable[[httpx.Request], httpx.Response], clock: ManualClo
 
 
 @pytest.mark.asyncio
-async def test_probe_pending_filesystem_does_not_enable_normal_create(clock: ManualClock) -> None:
+async def test_probe_pending_filesystem_does_not_become_a_capability(clock: ManualClock) -> None:
     bodies = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -63,8 +62,9 @@ async def test_probe_pending_filesystem_does_not_enable_normal_create(clock: Man
         await platform.probe_create(requested)
         assert bodies[0]["readOnlyRootFilesystem"] is True
         assert not platform.caps.readonly_rootfs
-        with pytest.raises(FlotillaError, match="readonly_rootfs"):
-            await platform.create(requested)
+        # Pending evidence enables nothing: admission against these caps still refuses the trial.
+        with pytest.raises(ValueError, match="readonly_rootfs"):
+            platform.caps.require_filesystem(True, ())
         with pytest.raises(ValueError, match="probe run label"):
             await platform.probe_create(replace(requested, labels={}))
         with pytest.raises(ValueError, match="combination"):

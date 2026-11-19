@@ -15,27 +15,13 @@ IPNet = ipaddress.IPv4Network | ipaddress.IPv6Network
 
 @dataclass(frozen=True)
 class NetworkSettings:
-    """Deployment config `[opensandbox.network]`."""
+    """Deployment config `[opensandbox.network]`; validated at the config layer (`config.py` and the backend check)."""
 
     sandbox_cidrs: tuple[str, ...] = ()  # platform sandbox address ranges for cidr mode
     platform_cidrs: tuple[str, ...] = ()  # platform infrastructure (nodes, service ranges, metadata addresses, etc.)
     max_rules: int = 4096  # OPENSANDBOX_EGRESS_MAX_RULES
     link: Literal["cidr", "sandbox"] = "cidr"
     ingress: Literal["deployment", "sandbox"] = "deployment"
-
-    def __post_init__(self) -> None:
-        if self.link not in ("cidr", "sandbox"):
-            raise ValueError("link must be cidr or sandbox")
-        if self.ingress not in ("deployment", "sandbox"):
-            raise ValueError("ingress must be deployment or sandbox")
-        if self.ingress == "sandbox" and self.link != "sandbox":
-            raise ValueError("ingress = sandbox requires link = sandbox")
-        if self.link == "cidr" and not self.sandbox_cidrs:
-            raise ValueError("link = cidr requires sandbox_cidrs")
-        for c in (*self.sandbox_cidrs, *self.platform_cidrs):
-            ipaddress.ip_network(c, strict=False)  # raises ValueError if invalid
-        if self.max_rules < 1:
-            raise ValueError("max_rules must be >= 1")
 
 
 def compile_policy(

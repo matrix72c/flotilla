@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
-from flotilla.backends import BUILTIN, Backend, BackendSettings, load_backend
+from flotilla.backends import BUILTIN, Backend, BackendSettings
 from flotilla.capabilities import ExternalTarget, IsolationEvidence, ProbeSettings
 from flotilla.core.anchor import EXPIRY_MARGIN_S, AnchorSettings
 from flotilla.core.reaper import ReaperSettings
@@ -36,6 +36,7 @@ from flotilla.platform.network import cluster_dns_address
 from flotilla.platform.opensandbox import ExecdSettings, NetworkSettings, StorageSettings
 from flotilla.platform.opensandbox import build as build_opensandbox
 from flotilla.platform.opensandbox.filesystem import FilesystemProtocol, FilesystemSettings
+from flotilla.platform.opensandbox.storage import check_claim_name, check_host_path, check_root_subpath
 from flotilla.resources import cpu, memory
 from flotilla.share.release import BUILTIN_RELEASE, BUILTIN_RELEASE_SHA256
 
@@ -82,7 +83,6 @@ class OpenSandboxNetwork(_Model):
 
 class OpenSandboxExecd(_Model):
     protocol: Literal["current", "legacy"] = "current"
-    wrapper: str = ExecdSettings().wrapper
 
 
 class OpenSandbox(BackendSettings):
@@ -110,8 +110,18 @@ class Storage(_Model):
     root_subpath: str = ""
 
     @model_validator(mode="after")
-    def _settings(self) -> Storage:
-        self.settings()  # raises ValueError
+    def _storage(self) -> Storage:
+        if self.volumes == "host":
+            if self.claim_name:
+                raise ValueError("storage.volumes = host does not use claim_name")
+            check_host_path(self.host_path)
+        elif self.volumes == "pvc":
+            if self.host_path:
+                raise ValueError("storage.volumes = pvc does not use host_path")
+            check_claim_name(self.claim_name)
+        else:
+            raise ValueError(f"storage.volumes must be host or pvc: {self.volumes!r}")
+        check_root_subpath(self.root_subpath)
         return self
 
     def settings(self) -> StorageSettings:
@@ -348,15 +358,7 @@ class Prepare(_Model):
     # Nonsecret connection settings only; credentials belong in explicit RO mounts.
     management_env: dict[str, str] = Field(default_factory=dict)
     concurrency: PositiveInt = 4
-    workspace_command: tuple[str, ...] = ("python3", "-I", "-m", "flotilla.integrations.workspace")
     workspace_timeout: PositiveFloat = 1800.0
-
-    @field_validator("workspace_command")
-    @classmethod
-    def _command(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        if not value or any(not part for part in value):
-            raise ValueError("workspace_command must be a nonempty argv")
-        return value
 
 
 class ProbeTarget(_Model):
@@ -560,7 +562,7 @@ class FlotillaConfig(_Model):
             selected = self.agent_runtime.input
             if selected is not None and selected not in self.inputs:
                 raise ValueError(f"agent_runtime.input names no [inputs.{selected}]")
-        backend = load_backend(self.backend)
+        backend = backend_of(self.backend)
         if self.backend == BUILTIN:
             if self.backends:
                 raise ValueError("[backends.*] tables are only read for third-party backends; use [opensandbox]")
@@ -622,7 +624,7 @@ class FlotillaConfig(_Model):
             return self.opensandbox_settings()
         table = self.backends[self.backend]
         try:
-            return load_backend(self.backend).settings_model.model_validate(table)
+            return backend_of(self.backend).settings_model.model_validate(table)
         except ValidationError as exc:
             # Re-raise with the TOML path; `hide_input_in_errors` keeps values out of the message.
             prefix = f"backends.{self.backend}"
@@ -677,7 +679,7 @@ class FlotillaConfig(_Model):
             native_tmpfs=True,
             shm_size=True,
         )
-        return load_backend(self.backend).capabilities(self.backend_settings, self, caps)
+        return backend_of(self.backend).capabilities(self.backend_settings, self, caps)
 
     def management_capabilities(self) -> Capabilities:
         """A bounded management client, NOT a capability report usable by normal tasks."""
@@ -729,7 +731,7 @@ class FlotillaConfig(_Model):
         self, *, clock: Clock, caps: Capabilities, command_gate: Callable[[], Awaitable[None]] | None = None
     ) -> Platform:
         """Construct the selected backend's platform client; the caller owns it and calls `aclose()`."""
-        return load_backend(self.backend).build(
+        return backend_of(self.backend).build(
             self.backend_settings, self, clock=clock, credential=self.credential(), caps=caps, command_gate=command_gate
         )
 
@@ -841,9 +843,7 @@ class FlotillaConfig(_Model):
 
     def execd_settings(self) -> ExecdSettings:
         e = self.opensandbox_settings().execd
-        return ExecdSettings(
-            protocol=e.protocol, wrapper=e.wrapper, output_limit_bytes=self.runtime.exec_output_limit_bytes
-        )
+        return ExecdSettings(protocol=e.protocol, output_limit_bytes=self.runtime.exec_output_limit_bytes)
 
 
 def _as_network(target: str) -> ipaddress.IPv4Network | ipaddress.IPv6Network | None:
@@ -869,10 +869,10 @@ def _is_hostname(target: str) -> bool:
 __all__ = ["ConfigError", "FlotillaConfig"]
 
 
-class OpenSandboxBackend(Backend[OpenSandbox]):
-    """The built-in backend, configured by `[opensandbox]`."""
+class OpenSandboxBackend:
+    """The built-in backend, configured by `[opensandbox]`. Satisfies `flotilla.backends.Backend`."""
 
-    settings_model = OpenSandbox
+    settings_model: type[BackendSettings] = OpenSandbox
 
     def check(self, settings: OpenSandbox, cfg: FlotillaConfig) -> list[str]:
         problems = []
@@ -926,3 +926,18 @@ class OpenSandboxBackend(Backend[OpenSandbox]):
             create_timeout_s=cfg.timeouts.create_request,
             max_connections=settings.max_connections,
         )
+
+
+_BACKEND_NAME = re.compile(r"[a-z][a-z0-9_-]*")
+
+#: The in-tree backend table: registering a backend means adding it here.
+BACKENDS: dict[str, Backend[Any]] = {BUILTIN: OpenSandboxBackend()}
+
+
+def backend_of(name: str) -> Backend[Any]:
+    """Look a backend up in `BACKENDS`, the whole discovery mechanism."""
+    if not _BACKEND_NAME.fullmatch(name):
+        raise ValueError(f"backend must match [a-z][a-z0-9_-]*: {name!r}")
+    if (found := BACKENDS.get(name)) is None:
+        raise ValueError(f"unknown backend {name!r}; in-tree: {', '.join(sorted(BACKENDS))}")
+    return found

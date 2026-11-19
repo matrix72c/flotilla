@@ -49,7 +49,6 @@ A configuration contains exactly one backend table: `[opensandbox]` for the buil
 | Key | Default | Meaning |
 |---|---|---|
 | `protocol` | `"current"` | execd protocol of the deployment: `"current"` or `"legacy"`. There is no automatic fallback |
-| `wrapper` | `"/.flotilla/bin/busybox"` | BusyBox binary from the share release used to wrap commands |
 
 See the [OpenSandbox backend](backends/opensandbox.md) for the differences.
 
@@ -206,20 +205,19 @@ Precedence, lowest first: `[resources.default]`, resources declared in the Compo
 
 ### `[prepare]`
 
-The attempt's own management sandbox: the launch anchor that compiles attempt-owned storage and reads task metadata, which every client creates.
+The attempt's own management sandbox: the launch anchor that compiles attempt-owned storage, which every client creates.
 
 | Key | Default | Meaning |
 |---|---|---|
 | `concurrency` | `4` | Tasks a launch anchor works on concurrently |
-| `workspace_command` | `["python3", "-I", "-m", "flotilla.integrations.workspace"]` | Helper in the trusted management image; the matching Flotilla install is required and never installed automatically |
-| `workspace_timeout` | `1800` | Total remote budget for that helper |
+| `workspace_timeout` | `1800` | Total remote budget for anchor commands that stage an attempt's workspace |
 | `management_profile` | `"default"` | `"management"` selects the trusted backend-specific management overrides for workspace anchors only; OpenSandbox requires nonempty `management_extensions` |
 | `management_resources` | unset (`0.5` CPU / `512Mi`) | Optional `{cpu, memory}` allocation for workspace anchors only |
 | `management_network` | external none | Explicit management-only destinations; no automatic unrestricted egress |
 | `management_mounts` | `[]` | Explicit read-only shared-volume mounts for credential/config files, never baked into images or passed to task sandboxes |
 | `management_env` | `{}` | Nonsecret connection settings; credential contents belong in mounted files |
 
-The launch anchor that reads task metadata can be sized and placed separately from the ordinary task runtime:
+The launch anchor can be sized and placed separately from the ordinary task runtime:
 
 ```python
 prepare=Prepare(management_profile="management", management_resources=Resource(cpu="2", memory="4Gi")),
@@ -231,7 +229,7 @@ opensandbox=OpenSandbox(
 
 These are operator-owned deployment settings, not Compose fields or task runtime parameters. The internal profile is closed (`default` or `management`); selecting it does not grant task privileged permission, and combining management with `privileged=True` is rejected. Ordinary task, probe, bootstrap and GC requests retain their existing extensions and resource allocations. Management extensions may override global deployment extensions but cannot set Flotilla-managed placement-group or shared-memory keys.
 
-The management image still comes from `reaper.anchor_image`, and the anchor retains its explicit entrypoint. Metadata and resource inspection only read the task's Compose files in-process; they run no tool and need no Docker daemon in the anchor.
+The management image still comes from `reaper.anchor_image`, and the anchor retains its explicit entrypoint. Inspection reads the task's Compose files in-process; it runs no tool and needs no Docker daemon in the anchor.
 
 Probes do not use the management-only extensions, profile or resources, so a passing probe says nothing about them; check a management anchor separately against the exact image digest, extensions and resources when changing them.
 

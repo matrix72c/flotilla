@@ -33,6 +33,7 @@ from flotilla.platform.base import (
     Topology,
 )
 from flotilla.platform.opensandbox import ExecdSettings, OpenSandboxPlatform, StorageSettings, build
+from flotilla.platform.opensandbox.execd import BUSYBOX
 from flotilla.platform.opensandbox.filesystem import SHM_SIZE_EXTENSION, UPSTREAM_FILESYSTEM, FilesystemSettings
 from flotilla.platform.opensandbox.network import NetworkSettings
 from flotilla.platform.opensandbox.platform import EXECD_TOKEN_HEADER, MANAGED_CREATE_FIELDS
@@ -257,9 +258,8 @@ async def test_filesystem_wire_format_is_explicit_and_upstream_unchanged(
     spec = dataclasses.replace(
         _spec("db"), readonly_rootfs=True, tmpfs_mounts=(TmpfsMount("/tmp", 16777216, 0o750, 1000, 1001),)
     )
-    with pytest.raises(FlotillaError, match="readonly_rootfs") as failure:
-        await _create_body(clock, caps, spec)
-    assert not failure.value.retryable
+    # Whether upstream may carry these at all is decided by capability composition, not here: the
+    # upstream dialect simply has no fields for them (see test_filesystem.py).
     body = await _create_body(clock, caps, spec, filesystem=FilesystemSettings("sandbox-system-v1"))
     assert body["readOnlyRootFilesystem"] is True
     assert body["tmpfsMounts"] == [{"mountPath": "/tmp", "size": "16777216", "mode": "0750", "uid": 1000, "gid": 1001}]
@@ -269,25 +269,15 @@ async def test_filesystem_wire_format_is_explicit_and_upstream_unchanged(
 
 @pytest.mark.asyncio
 async def test_shm_size_is_a_per_instance_internal_extension(clock: ManualClock, caps: Capabilities) -> None:
+    # Filesystem compatibility (missing evidence, memory budget) is decided at admission; here the compiled
+    # request is what matters.
     internal = FilesystemSettings("sandbox-system-v1")
     spec = dataclasses.replace(_spec("db"), shm_size_bytes=1073741824)
-    with pytest.raises(FlotillaError, match="shm_size") as failure:
-        await _create_body(clock, dataclasses.replace(caps, shm_size=True), spec)  # upstream clears the capability
-    assert not failure.value.retryable
-    with pytest.raises(FlotillaError, match="shm_size"):
-        await _create_body(clock, caps, spec, filesystem=internal)  # no probed evidence
     caps = dataclasses.replace(caps, shm_size=True)
     body = await _create_body(clock, caps, spec, filesystem=internal)
     assert body["extensions"] == {"project": "p1", SHM_SIZE_EXTENSION: "1073741824"}
     plain = await _create_body(clock, caps, _spec("plain"), filesystem=internal)
     assert plain["extensions"] == {"project": "p1"}
-    with pytest.raises(FlotillaError, match="exceed"):  # 2Gi request: 1Gi tmpfs + 1.5Gi shm
-        await _create_body(
-            clock,
-            dataclasses.replace(caps, native_tmpfs=True),
-            dataclasses.replace(spec, tmpfs_mounts=(TmpfsMount("/tmp", 1073741824),), shm_size_bytes=1610612736),
-            filesystem=internal,
-        )
     with pytest.raises(ValueError, match="shm-size"):
         _platform(lambda r: httpx.Response(200), clock, caps=caps, extensions={SHM_SIZE_EXTENSION: "8Gi"})
 
@@ -784,9 +774,7 @@ async def test_legacy_execd_settings_reach_command_and_upload(clock: ManualClock
             return httpx.Response(200, content=b'{"type":"execution_complete"}\n\n')
         return httpx.Response(200)
 
-    platform = _platform(
-        _with_create(handler, "sb-1"), clock, caps=caps, execd=ExecdSettings(protocol="legacy", wrapper="/opt/bb")
-    )
+    platform = _platform(_with_create(handler, "sb-1"), clock, caps=caps, execd=ExecdSettings(protocol="legacy"))
     handle = await clock.run(platform.create(_spec("db")))
     proc_spec = ProcessSpec(argv=("mkdir", "-p", "/x"), uid=0, gid=0, cwd="/", env={}, timeout_s=5.0)
     await clock.run(platform.exec(handle, proc_spec))
@@ -794,7 +782,7 @@ async def test_legacy_execd_settings_reach_command_and_upload(clock: ManualClock
     prefix = "/v1/sandboxes/sb-1/proxy/44772"
     assert [path for path, _ in seen] == [f"{prefix}/command", f"{prefix}/files/upload"]
     command = seen[0][1]
-    assert command is not None and "argv" not in command and str(command["command"]).startswith("/opt/bb sh -c")
+    assert command is not None and "argv" not in command and str(command["command"]).startswith(f"{BUSYBOX} sh -c")
 
 
 # ───────────────────────────── execd access token ─────────────────────────────
@@ -1002,11 +990,9 @@ async def test_reconciliation_keeps_tokens_of_repeated_creates_distinct(clock: M
 async def test_devices_are_per_instance_extensions_on_the_privileged_runtime(
     clock: ManualClock, caps: Capabilities
 ) -> None:
+    # Device evidence is decided at admission; here the compiled request is what matters.
     spec = dataclasses.replace(_spec("vm"), privileged=True, devices=frozenset({"tun", "kvm"}))
     kwargs: dict[str, Any] = {"privileged_extensions": {"runtimeClassName": "sysbox-runc"}}
-    with pytest.raises(FlotillaError, match="devices") as failure:
-        await _create_body(clock, caps, spec, **kwargs)  # no probed evidence
-    assert failure.value.category is ErrorCategory.INVALID and not failure.value.retryable
     caps = dataclasses.replace(caps, privileged_runtime=True, devices=frozenset({"kvm", "tun"}))
     body = await _create_body(clock, caps, spec, **kwargs)
     assert body["extensions"] == {"project": "p1", "runtimeClassName": "sysbox-runc", "kvm": "true", "tun": "true"}

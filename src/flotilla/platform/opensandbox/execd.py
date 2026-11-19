@@ -30,7 +30,7 @@ from flotilla.platform.base import (
 from flotilla.platform.execution import confirm_stopped
 from flotilla.platform.opensandbox.http import Http
 
-BUSYBOX = "/.flotilla/bin/busybox"  # static busybox on the share
+BUSYBOX = "/.flotilla/bin/busybox"  # static busybox from the share; applets sh, env, id, awk, ip, chown, chmod, base64
 _ENV_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")  # variable names referenceable as "$K" in sh
 #: Other names (Docker allows `discovery.type`) travel in `envs` under this prefix plus an index; the wrapper
 #: restores the original name for `env -i`, which clears the alias.
@@ -39,9 +39,6 @@ _CHOWN_TIMEOUT_S = 30.0  # chown after legacy upload
 _SYSTEM_FILES = frozenset({"/etc/hosts", "/etc/resolv.conf"})
 _SYSTEM_FILE_LIMIT = 1024 * 1024
 _SYSTEM_FILE_TIMEOUT_S = 30.0
-#: The wrapper path is written verbatim into `sh -c` scripts: only characters needing no quoting, so spaces, `$`,
-#: or quotes in the path are never interpreted by the shell.
-_SAFE_PATH = re.compile(r"/[A-Za-z0-9_./-]+")
 #: Under legacy, `envs` first enter execd's outer (non-interactive) bash, where these change the shell itself --
 #: `BASH_ENV` is sourced, `SHELLOPTS=noexec` makes every command silently return 0 (false health check passes),
 #: likewise `BASHOPTS` / `ENV`. Docker has no such layer; reject them.
@@ -55,15 +52,7 @@ class ExecdSettings:
     """Deployment config `[opensandbox.execd]`."""
 
     protocol: ExecdProtocol = "current"
-    #: Same path on all instances; needs applets sh, env, id, awk (wrap), ip (address), chown, chmod (legacy upload).
-    wrapper: str = BUSYBOX
     output_limit_bytes: int = 8 * 1024 * 1024
-
-    def __post_init__(self) -> None:
-        if self.protocol not in ("current", "legacy"):
-            raise ValueError(f"execd.protocol must be current or legacy: {self.protocol!r}")
-        if not _SAFE_PATH.fullmatch(self.wrapper) or posixpath.normpath(self.wrapper) != self.wrapper:
-            raise ValueError(f"execd.wrapper must be a normalized absolute path in [A-Za-z0-9_./-]: {self.wrapper!r}")
 
 
 # Pure functions: SSE (NDJSON) parsing, exit code normalization, argv wrapping, multipart encoding
@@ -180,16 +169,16 @@ def env_aliases(env_keys: Sequence[str]) -> dict[str, str]:
     }
 
 
-def wrap_argv(argv: Sequence[str], env_keys: Sequence[str], *, wrapper: str) -> list[str]:
+def wrap_argv(argv: Sequence[str], env_keys: Sequence[str]) -> list[str]:
     """Wrap with `env -i` to clear the inherited env, bring back only `env_keys` by name, then exec the argv.
 
     Values reach sh's env via the request `envs`; sh expands `K="$K"` for `env -i`; `$0` is `flotilla`, `"$@"` the
     original argv. A name sh cannot reference is quoted and reads its value from its alias (`env_aliases`). The
-    script holds only names, never values. Keys are sorted (deterministic). `wrapper` is the busybox path.
+    script holds only names, never values. Keys are sorted (deterministic).
     """
     aliases = sorted(env_aliases(env_keys).items())
     assigns = "".join(f'{shlex.quote(key)}="${alias}" ' for key, alias in aliases)
-    command = f'exec {wrapper} env -i {assigns}"$@"'
+    command = f'exec {BUSYBOX} env -i {assigns}"$@"'
     if "HOME" not in env_keys:
         # Resolve inside the cleared environment, after execd applies uid/gid.
         # Never reuse the daemon's HOME or load a login shell. Read passwd on
@@ -201,8 +190,8 @@ def wrap_argv(argv: Sequence[str], env_keys: Sequence[str], *, wrapper: str) -> 
             "'$3 == uid {print $6; exit}' /etc/passwd 2>/dev/null)\"; "
             f'exec "$0" env -i HOME="${{HOME:-/}}" {assigns}"$@"'
         )
-        command = f'exec {wrapper} env -i {carried}{wrapper} sh -c {shlex.quote(defaults)} {wrapper} "$@"'
-    return [wrapper, "sh", "-c", command, "flotilla", *argv]
+        command = f'exec {BUSYBOX} env -i {carried}{BUSYBOX} sh -c {shlex.quote(defaults)} {BUSYBOX} "$@"'
+    return [BUSYBOX, "sh", "-c", command, "flotilla", *argv]
 
 
 def multipart_upload(path: str, data: bytes, mode: int) -> tuple[str, bytes]:
@@ -419,7 +408,7 @@ class Execd:
 
     async def _read_system_file(self, path: str) -> bytes:
         proc = ProcessSpec(
-            argv=(self.settings.wrapper, "base64", path),
+            argv=(BUSYBOX, "base64", path),
             uid=0,
             gid=0,
             cwd="/",
@@ -454,7 +443,7 @@ class Execd:
 
     async def _chown(self, path: str, *, mode: int, uid: int, gid: int) -> None:
         """Set owner and mode after legacy upload. Applets run via the wrapper's absolute path, not image PATH/tools."""
-        w = self.settings.wrapper
+        w = BUSYBOX
         script = '"$0" chown "$1" "$3" && "$0" chmod "$2" "$3"'
         argv = (w, "sh", "-c", script, w, f"{uid}:{gid}", format(mode & 0o7777, "o"), path)
         proc = ProcessSpec(argv=argv, uid=0, gid=0, cwd="/", env={}, timeout_s=_CHOWN_TIMEOUT_S)
@@ -513,7 +502,7 @@ def command_body(proc: ProcessSpec, *, background: bool, settings: ExecdSettings
             category=ErrorCategory.INVALID,
             retryable=False,
         )
-    argv = wrap_argv(proc.argv, list(proc.env), wrapper=settings.wrapper)
+    argv = wrap_argv(proc.argv, list(proc.env))
     body: dict[str, Any] = {"cwd": proc.cwd, "background": background, "uid": proc.uid, "gid": proc.gid}
     if settings.protocol == "legacy":
         body["command"] = shlex.join(argv)

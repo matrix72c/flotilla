@@ -90,12 +90,11 @@ export FLOTILLA_OPENSANDBOX_CREDENTIAL="$(cat "$LOCAL/api_key")"
 
 ## 3. Build the anchor and probe images
 
-Build the native Anchor from the installed Flotilla wheel and a fixed Python 3.12 base. For this local HTTP registry, build locally and push through the locally configured Docker daemon:
+Build the native Anchor: a scratch image with the verified BusyBox. For this local HTTP registry, build locally and push through the locally configured Docker daemon:
 
 ```sh
 python -c 'from flotilla.anchor_build import AnchorBuildOptions, build_anchor
-build_anchor(AnchorBuildOptions(image="localhost:5000/flotilla/anchor:local",
-                                python_image="python@sha256:FULL_PYTHON_312_DIGEST"))'
+build_anchor(AnchorBuildOptions(image="localhost:5000/flotilla/anchor:local"))'
 docker push localhost:5000/flotilla/anchor:local
 "$FLOTILLA_REPO/images/probe/build.sh" localhost:5000/flotilla/probe:local --push
 ```

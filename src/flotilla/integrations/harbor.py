@@ -1,9 +1,10 @@
-"""Harbor 0.24 execution/file view. Install the harbor extra to import it.
+"""Harbor execution/file view over an open Flotilla environment.
 
 Task executions enter through `NativeAttempt`, which owns the workspace and both
-roles. This class adapts its live handles to native Harbor I/O. Native Harbor
-Trial's local-task upload flow is not a supported remote-task entrypoint.
-Transient `plan` is an internal I/O adapter hook, not a dataset format.
+roles. `FlotillaEnvironment.view(handle, ...)` borrows one live handle for
+Harbor-agent I/O -- exec, uploads, downloads and service stops -- without taking
+lifecycle ownership: resources and network policy were fixed when the owner
+opened the handle, and releasing it is the owner's business.
 """
 
 from __future__ import annotations
@@ -26,10 +27,7 @@ from harbor.models.trial.paths import EnvironmentPaths, TrialPaths
 
 from flotilla._io import owned_io
 from flotilla.config import FlotillaConfig
-from flotilla.core.plan import TrialPlan
-from flotilla.runtime.client import Flotilla
 from flotilla.runtime.environment import Environment, Service
-from flotilla.runtime.types import CleanupError, OpenOptions
 
 
 class FlotillaEnvironment(BaseEnvironment):  # type: ignore[misc]
@@ -58,36 +56,21 @@ class FlotillaEnvironment(BaseEnvironment):  # type: ignore[misc]
         enable_environment_dir_upload: bool = True,
         auto_mounts: list[ServiceVolumeConfig] | None = None,
         auto_mounting: bool = False,
-        deployment: str,
-        prepared: str | None = None,
-        plan: TrialPlan | None = None,
-        fleet: Flotilla | None = None,
-        run_timeout: float | None = None,
-        runtime_params: dict[str, str] | None = None,
+        cfg: FlotillaConfig,
     ) -> None:
-        if prepared is not None:
-            raise ValueError("prepared JSONL is unsupported; use NativeAttempt with a task source")
-        if runtime_params:
-            raise ValueError("runtime parameters belong to the deployment; set them in [runtime_params]")
-        self._transient_plan = plan
-        self._cfg = fleet.config if fleet is not None else FlotillaConfig.load(deployment)
-        self._owns_environment = True
-        self._fleet = fleet or Flotilla(deployment=self._cfg)
-        self._owns_fleet = fleet is None
+        if any(
+            value is not None
+            for value in (override_cpus, override_memory_mb, override_storage_mb, override_gpus, override_tpu)
+        ):
+            raise ValueError("resource overrides are applied when the owner opens the environment, not here")
+        if extra_docker_compose:
+            raise ValueError("additional Compose overlays are unsupported")
+        self._cfg = cfg
         self._environment: Environment | None = None
+        self._initialized = False
         self._service_error: BaseException | None = None
         self._stopped: set[str] = set()
         self._stopping: dict[str, asyncio.Task[None]] = {}
-        self._run_timeout = run_timeout
-        self._resource_overrides = {}
-        if override_cpus is not None:
-            self._resource_overrides["cpu"] = str(override_cpus)
-        if override_memory_mb is not None:
-            self._resource_overrides["memory"] = str(override_memory_mb) + "Mi"
-        if any(value is not None for value in (override_storage_mb, override_gpus, override_tpu)):
-            raise ValueError("storage, GPU and TPU overrides are unsupported")
-        if extra_docker_compose:
-            raise ValueError("additional Compose overlays are unsupported")
         super().__init__(
             environment_dir=environment_dir,
             environment_name=environment_name,
@@ -131,29 +114,21 @@ class FlotillaEnvironment(BaseEnvironment):  # type: ignore[misc]
         self._directory = Path(self.environment_dir)
         self._task_root = self._directory.parent
 
-    def _plan(self) -> TrialPlan:
-        """Internal transient role only; production task inputs enter NativeAttempt."""
-        if self._transient_plan is None:
-            raise ValueError("use NativeAttempt with a task source, then FlotillaEnvironment.view(handle)")
-        return self._transient_plan
-
     @classmethod
     def view(
         cls,
         handle: Environment,
         *,
-        fleet: Flotilla,
-        deployment: str,
+        cfg: FlotillaConfig,
         environment_dir: Path,
         environment_name: str,
         session_id: str,
         trial_paths: TrialPaths,
         task_env_config: EnvironmentConfig,
     ) -> FlotillaEnvironment:
-        """Borrow an existing environment for Harbor I/O, without taking lifecycle ownership."""
+        """Borrow an open environment for Harbor I/O, without taking lifecycle ownership."""
         view = cls(
-            fleet=fleet,
-            deployment=deployment,
+            cfg=cfg,
             environment_dir=environment_dir,
             environment_name=environment_name,
             session_id=session_id,
@@ -161,46 +136,16 @@ class FlotillaEnvironment(BaseEnvironment):  # type: ignore[misc]
             task_env_config=task_env_config,
         )
         view._environment = handle
-        view._owns_environment = False
         return view
 
     async def start(self, force_build: bool = False) -> None:
+        """Prepare the borrowed handle's Harbor log directories; its owner already started it."""
         self._check_resources()
         if force_build:
             raise ValueError("force_build is unsupported: images come from the platform workspace compiler")
-        if self._environment is not None:
-            return
-        try:
-            plan = await owned_io(self._plan)
-            await self._fleet.start()
-            mode = self._network_policy.network_mode
-            self._environment = await self._fleet.open(
-                plan,
-                OpenOptions(
-                    request_id=self.session_id,
-                    lifetime=self._run_timeout,
-                    resources={"main": self._resource_overrides} if self._resource_overrides else {},
-                    disable_internet=mode == "no-network",
-                ),
-            )
+        if not self._initialized:
             await self.initialize()
-        except BaseException as primary:
-            if self._environment is not None:
-                try:
-                    await self._environment.release()
-                except BaseException as cleanup:
-                    primary.add_note(f"release also failed: {cleanup!r}")
-                finally:
-                    self._environment = None
-            if self._owns_fleet:
-                try:
-                    report = await self._fleet.close()
-                    self._save_metadata("cleanup", {**asdict(report), "clean": report.clean})
-                    if not report.clean:
-                        primary.add_note(f"cleanup incomplete: {report!r}")
-                except BaseException as cleanup:
-                    primary.add_note(f"cleanup also failed: {cleanup!r}")
-            raise
+            self._initialized = True
 
     async def initialize(self) -> None:
         self._save_metadata("environment", asdict(await self._env().info()))
@@ -247,7 +192,7 @@ class FlotillaEnvironment(BaseEnvironment):  # type: ignore[misc]
 
     @property
     def handle(self) -> Environment:
-        """The owned Flotilla environment, for native service execution by integrations."""
+        """The borrowed Flotilla environment, for native service execution by integrations."""
         return self._env()
 
     def _check_resources(self) -> None:
@@ -258,45 +203,8 @@ class FlotillaEnvironment(BaseEnvironment):  # type: ignore[misc]
         return self._env().agent if self.is_main_service(name) else self._env().service(str(name))
 
     async def stop(self, delete: bool = True) -> None:
-        if not self._owns_environment:
-            self._environment = None
-            return
-        errors: list[BaseException] = []
-        # Stop-service tasks own their work even if their original waiter cancels.
-        for task in self._stopping.values():
-            try:
-                await asyncio.shield(task)
-            except BaseException as exc:
-                errors.append(exc)
-        try:
-            if not delete:
-                raise ValueError("retaining environments is unsupported; Flotilla always releases owned resources")
-            if self._environment is not None:
-                await self._environment.check()
-        except BaseException as exc:
-            errors.append(exc)
-        if self._environment is not None:
-            try:
-                await self._environment.release()
-            except BaseException as exc:
-                errors.append(exc)
-            finally:
-                self._environment = None
-        # Closing the owner remains necessary even if the release waiter was cancelled.
-        if self._owns_fleet:
-            try:
-                report = await self._fleet.close()
-                self._save_metadata("cleanup", {**asdict(report), "clean": report.clean})
-                if not report.clean:
-                    raise CleanupError(report)
-            except BaseException as exc:
-                errors.append(exc)
-        if errors:
-            primary = errors[0]
-            for error in errors[1:]:
-                primary.add_note(f"cleanup also failed: {error!r}")
-            raise primary
-        self._check_resources()
+        """Detach from the borrowed handle. Its owner releases it; `delete` is the owner's decision."""
+        self._environment = None
 
     async def exec(
         self,

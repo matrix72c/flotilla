@@ -56,11 +56,9 @@ def test_legacy_prepare_is_not_silently_warmup() -> None:
 
 def test_building_an_anchor_does_not_publish_unless_asked() -> None:
     """A local build is not a deployable pin: only a remote digest is, and `push` is opt-in."""
-    options = AnchorBuildOptions(image="reg/anchor:v1", python_image="reg/python@sha256:" + "a" * 64)
+    options = AnchorBuildOptions(image="reg/anchor:v1")
     assert not options.push
-    local = AnchorBuildResult(
-        image="reg/anchor:v1", version="0", image_id="sha256:test", remote_digest=None, published_image=None
-    )
+    local = AnchorBuildResult(image="reg/anchor:v1", image_id="sha256:test", remote_digest=None, published_image=None)
     assert local.anchor_pin is None
 
 

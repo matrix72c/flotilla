@@ -9,7 +9,7 @@ import pytest
 
 from flotilla.platform.base import FlotillaError
 from flotilla.platform.opensandbox.address import parse_default_dev, parse_dev_ipv4, read_internal_address
-from flotilla.platform.opensandbox.execd import Execd, ExecdSettings
+from flotilla.platform.opensandbox.execd import BUSYBOX, Execd, ExecdSettings
 from flotilla.platform.opensandbox.http import Http, RetryPolicy
 from flotilla.testing.platform import ManualClock
 
@@ -101,7 +101,7 @@ async def test_read_internal_address_exec_nonzero(clock: ManualClock) -> None:
 
 
 @pytest.mark.asyncio
-async def test_read_internal_address_uses_configured_busybox(clock: ManualClock) -> None:
+async def test_read_internal_address_runs_through_the_share_busybox(clock: ManualClock) -> None:
     import json
 
     argvs: list[list[str]] = []
@@ -111,12 +111,11 @@ async def test_read_internal_address_uses_configured_busybox(clock: ManualClock)
         argvs.append(argv)
         return httpx.Response(200, content=_sse_exec(ROUTE if "route" in argv else ADDR))
 
-    execd = _execd(handler, clock, ExecdSettings(wrapper="/opt/bb"))
+    execd = _execd(handler, clock, ExecdSettings())
     assert await clock.run(read_internal_address(execd, "sb-1")) == "10.0.1.7"
-    # The original argv after wrapping (after "flotilla") starts with the configured busybox instead of a
-    # hard-coded share path.
+    # The original argv after wrapping (after "flotilla") starts with the share busybox path.
     inner = [a[a.index("flotilla") + 1 :] for a in argvs]
     assert inner == [
-        ["/opt/bb", "ip", "-4", "-o", "route", "show", "default"],
-        ["/opt/bb", "ip", "-4", "-o", "addr", "show", "eth0"],
+        [BUSYBOX, "ip", "-4", "-o", "route", "show", "default"],
+        [BUSYBOX, "ip", "-4", "-o", "addr", "show", "eth0"],
     ]

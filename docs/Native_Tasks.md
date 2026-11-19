@@ -135,27 +135,22 @@ least one task would not open, and `--out report.json` records each one with the
 refused. Making that a gate — refusing to submit a job whose dataset does not fully resolve — belongs
 to whatever submits your jobs; Flotilla provides the check and the exit code, not the policy.
 
-## Installed Anchor builder
+## Anchor image builder
 
 ```python
 from flotilla.anchor_build import AnchorBuildOptions, build_anchor
 
-result = build_anchor(
-    AnchorBuildOptions(
-        image="registry.example.org/team/anchor:VERSION",
-        python_image="registry.example.org/python@sha256:FULL_DIGEST",
-    )
-)
+result = build_anchor(AnchorBuildOptions(image="registry.example.org/team/anchor:VERSION"))
 # Add push=True and optionally authfile= to publish explicitly.
 ```
 
-The builder uses packaged assets and the exact installed non-editable Flotilla distribution plus its
-runtime dependencies. It validates installed RECORD contents and copies no source checkout,
-credentials or compiler stack. It requires a pinned Python 3.12 linux/amd64 base and a verified
-pinned BusyBox asset. The base must support the installed runtime's ABI. Build context and downloaded
+The builder assembles a scratch filesystem from packaged assets and a hash-verified pinned BusyBox:
+the multicall binary at `/.flotilla/bin/busybox`, PATH symlinks for the anchor's directory commands,
+`/etc/passwd` and `/etc/group`, the GPL text, and a self-check script. It copies no source checkout,
+credentials or compiler stack, and pulls no base image. Build context and downloaded
 archives are isolated temporary directories.
 
-A new container verifies helpers and tools without network or source/credential mounts. Publication
+A new container verifies the applets without network or source/credential mounts. Publication
 uses configurable Docker/Skopeo argv and manifest format (`v2s2` by default for the current internal
 registry). `result.anchor_pin` is set only after obtaining the remote digest. Local image IDs
 are not deployment pins. Platform behavior is still measured by probe; self-containment does not

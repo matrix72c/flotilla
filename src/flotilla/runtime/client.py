@@ -9,7 +9,7 @@ import dataclasses
 import threading
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable, Coroutine, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Coroutine, Mapping
 from contextlib import asynccontextmanager, suppress
 from types import TracebackType
 from typing import TYPE_CHECKING, Any
@@ -209,51 +209,6 @@ class Flotilla:
         """Per-client anchor overhead, in addition to environment reservations."""
         resource = self._deployment.anchor_settings(workspace=True).resources
         return ResourceReservation({"anchor": {"cpu": resource.cpu, "memory": resource.memory}})
-
-    async def describe_tasks(self, task_keys: Sequence[str]) -> dict[str, dict[str, Any]]:
-        """Read native Harbor instruction/config metadata without creating attempts.
-
-        Keys are canonical platform-relative source directories, deduplicated by
-        full key (never basename). Sources must remain immutable during the run.
-        Requests are bounded to 128 tasks / 1 MiB and results to 64 MiB per batch;
-        any invalid task or exceeded limit fails the call, without partial results.
-        """
-        await self.start()
-        return await self._call(lambda manager: manager.workspaces.describe_tasks(task_keys), settle_cancel=True)
-
-    async def describe_task_resources(
-        self, task_keys: Sequence[str], *, runtime_params: Mapping[str, str] | None = None
-    ) -> dict[str, dict[str, ResourceReservation]]:
-        """Inspect capacity without attempts, image builds/exports or task instances.
-
-        Returns full source key -> Harbor role -> effective per-service resources,
-        with the same retry copies and deployment overrides as ``reservation``.
-        One interpolation mapping applies to the whole call (over deployment
-        runtime_params). Batching, failure and cancellation match describe_tasks.
-        Compose inputs use private copies and the official normalizer; this is
-        not a buildability check, image prewarming, or a persistent resource cache.
-        """
-        from flotilla.runtime.workspace import runtime_parameters
-
-        params = runtime_parameters(runtime_params)
-        await self.start()
-        declared = await self._call(
-            lambda manager: manager.workspaces.describe_task_resources(task_keys, runtime_params=params),
-            settle_cancel=True,
-        )
-        return {
-            key: {
-                role: ResourceReservation(
-                    {
-                        name: self._deployment.resources.effective(key.rsplit("/", 1)[-1], name, values)
-                        for name, values in services.items()
-                    },
-                    copies=ENVIRONMENT_RESERVATION_COPIES,
-                )
-                for role, services in roles.items()
-            }
-            for key, roles in declared.items()
-        }
 
     def plan(self, source: TaskSource, options: OpenOptions | None = None) -> TrialPlan:
         """Resolve a task directory into the trial `open` would create, without creating it.
