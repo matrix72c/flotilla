@@ -114,7 +114,7 @@ def test_default_build_is_local_and_verifies_without_network_or_mounts(commands:
     assert result.image_id == LOCAL
     assert result.version == "1.2.3"
     assert result.published_image is None
-    assert result.deployment_toml is None
+    assert result.anchor_pin is None
     assert not any(call[0] == "skopeo" or "push" in call or "save" in call for call in commands)
     build = next(call for call in commands if "build" in call)
     assert build[build.index("--network") + 1] == "none"
@@ -145,7 +145,7 @@ def test_push_uses_verified_id_v2s2_and_actual_remote_digest(commands: list[list
     assert copy[-2].startswith("docker-archive:")
     assert str(auth) in copy
     assert result.published_image == f"registry.example:5000/team/anchor@{REMOTE}"
-    assert result.deployment_toml == f'[reaper]\nanchor_image = "{result.published_image}"\n'
+    assert result.anchor_pin == result.published_image
     assert not any("latest" in arg for call in commands for arg in call)
 
 

@@ -17,7 +17,7 @@ Before running `flotilla probe`:
 4. Build and push the anchor and probe images, make them accessible to your deployment, and replace the image digest placeholders. Share publication needs the anchor image already configured.
 5. Declare `[platform]`: the listing delay, any TTL cap, label and link limits, and the implicit egress with its resolver IPs. A wrong number here refuses nothing and misbehaves later.
 6. Set `[probe]` inputs: pinned ordinary and privileged images, controlled TCP/UDP targets, DNS name and budgets. A missing control is reported as not-shown, never as isolation.
-7. Prepare the immutable `share/releases/<release>/` tree, including `bin/busybox`. `flotilla share publish <dir> --deployment myproject.deployment:PLATFORM` publishes through a bounded management anchor. Paste the resulting release name and digest back into the spec's `share=`.
+7. Prepare the immutable `share/releases/<release>/` tree, including `bin/busybox`. `publish_release(anchor, name, dir, components={...})` publishes it through `Deployment(PLATFORM).management_anchor()`, a bounded management anchor. Put the release name and the returned `release_sha256` into the spec's `share=`.
 
 Run `flotilla probe --deployment myproject.deployment:PLATFORM`. It reports each isolation property with what it observed and exits nonzero when one did not hold without being waived, or when cleanup was not confirmed. Nothing is written, so there is no report to review later or promote: read the output of the run. The probe makes real sandbox requests only when explicitly invoked, and a failed deletion is reported rather than disguised as a successful TTL cleanup. Keep private deployment inputs outside source control.
 

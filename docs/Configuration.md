@@ -70,7 +70,7 @@ Filesystem checks run when the explicitly selected backend protocol can express 
 
 Same keys as `[storage]`. Each section declares a named read-only root for published task releases or external read-only payloads such as an Agent runtime, for example an owner's storage shared read-only with this deployment. Names match `[a-z][a-z0-9_-]{0,62}`, at most 63 characters; `work` is reserved for `[storage]`. A release selects its root with `input`; other consumers name the root on their mounts. Task instances mount files from an input root read-only; the Anchor mounts every input root read-only at `/flotilla-inputs/<name>` and only reads from it (release verification, copy sources, hidden tests). Nothing is written, cleaned or garbage-collected there, and Flotilla checks at startup that each input root exists.
 
-Publishing tools (`share publish`) always write the work root of the deployment they are given; release and runtime upload is outside Flotilla. Changing these sections invalidates capability evidence.
+`publish_release` always writes the work root of the deployment it is given; release and runtime upload is outside Flotilla. Changing these sections invalidates capability evidence.
 
 ### `[datasets.<name>]`
 
@@ -103,7 +103,7 @@ Omitted means the built-in release `busybox-1.36.1-r31`, published from the Anch
 | Key | Meaning |
 |---|---|
 | `release` | Share release name (letters, digits, `.`, `_`, `-`) |
-| `release_sha256` | SHA-256 of the release's `RELEASE.json`, printed by `flotilla share publish` |
+| `release_sha256` | SHA-256 of the release's `RELEASE.json`, returned by `flotilla.share.release.publish_release` |
 
 ### `[network]`
 
@@ -134,7 +134,7 @@ Platform properties a request cannot discover. Everything else a platform either
 
 | Key | Default | Meaning |
 |---|---|---|
-| `anchor_image` | required for use | Anchor image by remote digest (`repo@sha256:...`), built with installed `flotilla anchor build` |
+| `anchor_image` | required for use | Anchor image by remote digest (`repo@sha256:...`), built with `flotilla.anchor_build.build_anchor` |
 | `anchor_ttl` | `600` | Anchor TTL requested per instance. Must not exceed `platform.max_ttl_s` when that is declared |
 | `renew_interval` | `30` | Anchor renewal interval |
 | `grace` | `90` | After this long without a successful renewal, the launch pauses new creates and directory operations until a renewal succeeds; running trials continue. The launch is lost only 60s before `anchor_ttl` without renewal. Must be at least `2 * renew_interval` and less than `anchor_ttl - 60` |
@@ -186,7 +186,7 @@ Per-stage startup deadlines. The whole startup, from admission to ready, is also
 | `hosts` | `30` | Writing `/etc/hosts` entries |
 | `start_max` | `1800` | Upper bound for starting services and waiting for health gates |
 | `close` | `60` | Default timeout for `fleet.drain()` and `fleet.close()` |
-| `client_start` | `300` | Starting the client's anchor and checking the pinned share release, once per client before its first open. The check downloads `RELEASE.json`, compares its sha256 and confirms `bin/busybox`; `flotilla share verify` checks every file |
+| `client_start` | `300` | Starting the client's anchor and checking the pinned share release, once per client before its first open. The check downloads `RELEASE.json`, compares its sha256 and confirms `bin/busybox`; `flotilla.share.release.verify_release` checks every file |
 
 `[process].poll_interval` (default `2`) sets how often background process status is polled.
 

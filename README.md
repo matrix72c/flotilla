@@ -133,9 +133,10 @@ source/runtime interfaces.
 
 Flotilla runs on **Linux x86_64 with Python 3.12**. A task's `task.toml` is Harbor's format, so
 `harbor` is a required dependency; nothing needs Docker, a Compose binary or a GPU stack. Build the
-Anchor from the installed package with `flotilla anchor build`, using a pinned Python base; publication
-requires explicit `--push`. Platform capabilities and cleanup must pass `flotilla probe` before
-consumption. See [Native tasks](docs/Native_Tasks.md) for the complete workflow.
+Anchor from the installed package with `flotilla.anchor_build.build_anchor`, using a pinned Python
+base; publication requires an explicit `push=True`. A deployment's isolation must pass
+`flotilla probe` before consumption. See [Native tasks](docs/Native_Tasks.md) for the complete
+workflow.
 
 ```sh
 git clone https://github.com/matrix72c/flotilla.git

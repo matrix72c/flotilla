@@ -9,13 +9,16 @@ sections, timeout names, storage settings).
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Iterable, Mapping
+import uuid
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping
+from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, field
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 from flotilla.config import FlotillaConfig
+from flotilla.core.anchor import Anchor
 from flotilla.core.plan import TaskSource, TrialPlan
 from flotilla.environment import read_env_file
 from flotilla.native.dataset import Dataset, platform_key
@@ -128,6 +131,26 @@ class Deployment:
 
     def client(self, *, on_event: Callable[[RuntimeEvent], None] | None = None) -> Flotilla:
         return Flotilla(deployment=self._config, on_event=on_event)
+
+    @asynccontextmanager
+    async def management_anchor(self) -> AsyncIterator[Anchor]:
+        """A temporary Anchor for shared-storage work outside a run: publishing or checking a share release.
+
+        It is the only way to reach shared storage, because nothing else may write there, and it is
+        deliberately not a client: a bounded management anchor claims none of the capabilities a task
+        needs. It creates no `launches/<id>` directory, so it never becomes a gc candidate.
+        """
+        from flotilla.platform.clock import SystemClock
+
+        clock = SystemClock()
+        platform = self._config.build_platform(clock=clock, caps=self._config.management_capabilities())
+        anchor = Anchor(platform, clock, f"mgmt-{uuid.uuid4().hex[:12]}", self._config.anchor_settings())
+        try:
+            await anchor.start()
+            yield anchor
+        finally:
+            await anchor.close()
+            await platform.aclose()
 
     def run_timeout(self) -> float:
         """Upper bound for one run inside an opened environment."""

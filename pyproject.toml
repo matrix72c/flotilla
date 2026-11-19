@@ -157,7 +157,7 @@ forbidden_modules = [
   "flotilla.integrations",
   "flotilla.cli",
   "flotilla.runtime",
-  "flotilla.prepare",
+  "flotilla.inspect",
   "flotilla.testing",
   "flotilla.deployment",
 ]
@@ -213,7 +213,7 @@ forbidden_modules = ["flotilla.integrations", "flotilla.cli", "flotilla.probe", 
 name = "runtime does not inspect or scan"
 type = "forbidden"
 source_modules = ["flotilla.runtime"]
-forbidden_modules = ["flotilla.prepare", "flotilla.scan"]
+forbidden_modules = ["flotilla.inspect", "flotilla.scan"]
 allow_indirect_imports = true
 
 [[tool.mypy.overrides]]

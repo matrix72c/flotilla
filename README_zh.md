@@ -14,7 +14,7 @@ Flotilla 读取已发布的任务目录，把它解析成每服务一个沙盒�
 
 支持 **Linux x86_64 + Python 3.12**。发行包、导入名和 CLI 统一为 `flotilla`。从本仓库的固定 commit 或对应 wheel 安装，**不要直接运行 `pip install flotilla`**：公共 PyPI 同名包属于其他项目。迁移时使用干净环境，不与拥有同名 Python 模块的 `flotilla-compose` 混装。
 
-任务的 `task.toml` 是 Harbor 的格式，所以 `harbor` 是必需依赖；Compose 二进制、Docker 和 GPU 栈都不需要。安装后的 `flotilla anchor build` 使用包内资源构建 Anchor；必须提供固定 digest 的 Python 基础镜像，显式 `--push` 才发布。
+任务的 `task.toml` 是 Harbor 的格式，所以 `harbor` 是必需依赖；Compose 二进制、Docker 和 GPU 栈都不需要。`flotilla.anchor_build.build_anchor` 使用已安装包内的资源构建 Anchor；必须提供固定 digest 的 Python 基础镜像，显式传 `push=True` 才发布。
 
 ## 三件事
 

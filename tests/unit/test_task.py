@@ -157,16 +157,17 @@ def test_scan_task_merges_task_and_deployment_findings(tmp_path: Path, caps: Cap
 # ───────────────────────────── CLI ─────────────────────────────
 
 
-def test_scan_cli_writes_one_line_per_task(
+def test_inspect_reports_every_task_and_fails_on_any_that_would_not_open(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """One malformed task does not hide the rest, and the exit status says the dataset is not clean."""
     tasks = tmp_path / "tasks"
     _task(tasks, "solo")
     _task(tasks, "multi", compose=COMPOSE)
     _task(tasks, "offline", '[environment]\nnetwork_mode = "no-network"\n')
     _task(tasks, "unknown-network", compose="services:\n  main:\n    networks: [missing]\n")
     (_task(tasks, "broken") / "task.toml").write_text("[task\n")
-    out = tmp_path / "scan.jsonl"
+    out = tmp_path / "report.json"
     deployment = importable(
         FlotillaConfig.from_mapping(
             {
@@ -180,15 +181,20 @@ def test_scan_cli_writes_one_line_per_task(
             }
         )
     )
+    # Planning reads each image's config; this test is about the report, not the registry.
+    monkeypatch.setattr("flotilla.registry.ImageConfigs.image_config", lambda self, pinned: {})
     assert main(["inspect", str(tasks), "--deployment", deployment, "--out", str(out)]) == 1
-    lines = {row["path"].rsplit("/", 1)[1]: row for row in json.loads(out.read_text())["environments"]}
-    assert {k: v["status"] for k, v in lines.items()} == {
-        "broken": "rejected",
-        "multi": "accepted",
-        "offline": "accepted",
-        "solo": "accepted",
-        "unknown-network": "rejected",
+    document = json.loads(out.read_text())
+    outcomes = {row["task"].rsplit("/", 1)[1]: row["planned"] for row in document["tasks"]}
+    assert outcomes == {
+        "broken": False,
+        "multi": True,
+        "offline": True,
+        "solo": True,
+        "unknown-network": False,
     }
+    assert (document["planned"], document["failed"]) == (3, 2)
     summary = capsys.readouterr().out
-    assert "broken" in summary
-    assert "rejected" in summary
+    # Only the failures are named, each with why; the rest is one count.
+    assert "broken" in summary and "unknown-network" in summary and "solo" not in summary
+    assert "3 of 5 tasks would open" in summary

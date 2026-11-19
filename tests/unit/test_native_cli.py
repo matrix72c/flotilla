@@ -54,21 +54,14 @@ def test_legacy_prepare_is_not_silently_warmup() -> None:
         _build_parser().parse_args(["prepare", "task-key", "--deployment", "d.toml"])
 
 
-def test_anchor_defaults_to_build_only(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-    import flotilla.anchor_build as builder
-
-    seen: list[AnchorBuildOptions] = []
-
-    def build(options: AnchorBuildOptions) -> AnchorBuildResult:
-        seen.append(options)
-        return AnchorBuildResult(
-            image="reg/anchor:v1", version="0", image_id="sha256:test", remote_digest=None, published_image=None
-        )
-
-    monkeypatch.setattr(builder, "build_anchor", build)
-    assert main(["anchor", "build", "--image", "reg/anchor:v1", "--python-image", "reg/python@sha256:" + "a" * 64]) == 0
-    assert not seen[0].push
-    assert "not published" in capsys.readouterr().out
+def test_building_an_anchor_does_not_publish_unless_asked() -> None:
+    """A local build is not a deployable pin: only a remote digest is, and `push` is opt-in."""
+    options = AnchorBuildOptions(image="reg/anchor:v1", python_image="reg/python@sha256:" + "a" * 64)
+    assert not options.push
+    local = AnchorBuildResult(
+        image="reg/anchor:v1", version="0", image_id="sha256:test", remote_digest=None, published_image=None
+    )
+    assert local.anchor_pin is None
 
 
 @pytest.mark.asyncio

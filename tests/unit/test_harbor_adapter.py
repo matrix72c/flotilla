@@ -15,6 +15,7 @@ from flotilla.cli import main
 from flotilla.compose.task import TaskError
 from flotilla.config import FlotillaConfig
 from flotilla.core import labels
+from flotilla.core.plan import TaskSource
 from flotilla.integrations.harbor import FlotillaEnvironment
 from flotilla.integrations.harbor_source import task_environments
 from flotilla.platform.base import ExecResult, FlotillaError, ProcessSpec
@@ -51,12 +52,15 @@ def test_scan_checks_verifier_context_and_continues_after_invalid_harbor_input(
 
     cfg = FlotillaConfig.from_mapping(config_data())
     deployment = importable(cfg)
+    monkeypatch.setattr("flotilla.registry.ImageConfigs.image_config", lambda self, pinned: {})
     assert main(["inspect", str(tasks / "valid"), "--deployment", deployment, "--out", str(output)]) == 0
-    # Invalid sources are rejected independently by the same library resolver.
-    from flotilla.prepare.inspect import inspect
+    # `inspect` plans the task's own environment; a rejected verifier environment is a separate read.
+    from flotilla.inspect import inspect_source
+    from flotilla.registry import ImageConfigs
 
     for name in ("bad-verifier",):
-        assert all(entry.status == "accepted" for entry in inspect(cfg, tasks / name))
+        source = TaskSource(local=tasks / name)
+        assert inspect_source(cfg, source, ImageConfigs()).planned
         assert task_environments(tasks / name)[1].project.rejected
 
 
