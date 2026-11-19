@@ -180,7 +180,7 @@ Never include raw response bodies, credentials, environment values, or command o
 
 `flotilla probe` measures isolation through your `Platform` and reports it through its output and exit status; it writes nothing. A check your backend cannot express must raise `NotImplementedError`, which the probe records as not-shown. Never fabricate a success. See [Platform requirements](Platform_Requirements.md).
 
-The probe follows the normal [deployment guide](Deployment.md): build and push the anchor and probe images, publish a share release, run `flotilla probe`, and review the report. Common checks use the Platform contract. Current independent ingress, execd authentication and privileged-runtime checks also use explicit OpenSandbox helpers; another backend must provide equivalent measured controls before those capabilities can be enabled. Management bootstrap uses conservative capabilities and must not bypass normal create gates.
+The probe follows the normal [deployment guide](Deployment.md): build and push the anchor and probe images, publish a share release, run `flotilla probe`, and read its output and exit status. Common checks use the Platform contract. Current independent ingress, execd authentication and privileged-runtime checks also use explicit OpenSandbox helpers; another backend must provide equivalent measured controls before those capabilities can be enabled. Management bootstrap uses conservative capabilities and must not bypass normal create gates.
 
 ## Testing
 

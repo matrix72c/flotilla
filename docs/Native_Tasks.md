@@ -33,8 +33,13 @@ Every `image:` must be `repo@sha256:...`. A tag is refused: it can move between 
 pinned to one would not be reproducible, and its provenance would not be in the task. Resolve tags
 to digests when the dataset is published.
 
-A task declaring `build:` is refused. Publish the image first and name it; producing images is a
+A task declaring `build:`, or a single-service task with only a `Dockerfile` and no
+`[environment].docker_image`, is refused. Publish the image first and name it; producing images is a
 different job from running them.
+
+Every image's own `USER` must be root (empty, `0`, `0:0` or `root`): the exec daemon is the sandbox
+entrypoint. Declare the application identity with Compose `user`, numerically as `uid[:gid]`. A named
+user is refused, because resolving it would mean reading the image's `/etc/passwd`.
 
 Multi-step Harbor tasks are refused by the protocol itself — the lifecycle is one agent run plus one
 verification — not by a consumer option.
@@ -54,8 +59,8 @@ datasets={
 }
 ```
 
-Local relative paths resolve against the deployment file, not the caller's working directory. For
-host storage, `platform_root` is a key relative to the shared root or an absolute path under it. For
+`local_root` must be absolute: a spec is imported by the client, Harbor workers and `flotilla gc`
+alike, and a relative path would mean something different in each. For host storage, `platform_root` is a key relative to the shared root or an absolute path under it. For
 PVC storage use the explicit `pvc:<claim>/<configured-root-subpath>/<key>` form; a bare relative key
 is refused, and an arbitrary absolute host path is not turned into a PVC key by stripping a prefix.
 

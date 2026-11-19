@@ -58,7 +58,7 @@ harbor run --config /srv/eval/harbor-job.yaml
 
 `nop` is a lifecycle smoke agent, not a solver. Supply your intended Harbor agent and its credentials separately for evaluation. Do **not** set Harbor `tasks`/`datasets`, `verifier.import_path`, or `verifier.env`: the dataset owns selection and each task owns its verification. Without `selection`, every task in the dataset is selected, in a stable order; with it, the listed keys in that file's order, so repeating a key repeats the trial.
 
-A relative `deployment` or `selection` path resolves against the config that defines it. Snapshots freeze absolute external paths. Remote configs require absolute input paths. A standalone restored Trial revalidates its selection rather than depending on the old Job's in-memory cache.
+`deployment` is an import target, `package.module:attribute`, and must be importable in every Harbor worker. A relative `selection` path resolves against the job config that names it. Snapshots freeze absolute external paths. Remote configs require absolute input paths. A standalone restored Trial revalidates its selection rather than depending on the old Job's in-memory cache.
 
 The adapter builds a metadata-backed Harbor Task from the task's own `task.toml` and `instruction.md`. Remote task downloads, multi-step and non-Linux tasks fail explicitly.
 

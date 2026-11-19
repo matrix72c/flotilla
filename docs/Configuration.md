@@ -68,9 +68,9 @@ Filesystem checks run when the explicitly selected backend protocol can express 
 
 ### `[inputs.<name>]` (optional)
 
-Same keys as `[storage]`. Each section declares a named read-only root for published task releases or external read-only payloads such as an Agent runtime, for example an owner's storage shared read-only with this deployment. Names match `[a-z][a-z0-9_-]{0,62}`, at most 63 characters; `work` is reserved for `[storage]`. A release selects its root with `input`; other consumers name the root on their mounts. Task instances mount files from an input root read-only; the Anchor mounts every input root read-only at `/flotilla-inputs/<name>` and only reads from it (release verification, copy sources, hidden tests). Nothing is written, cleaned or garbage-collected there, and Flotilla checks at startup that each input root exists.
+Same keys as `[storage]`. Each section declares a named read-only root for published datasets or external read-only payloads such as an Agent runtime, for example an owner's storage shared read-only with this deployment. Names match `[a-z][a-z0-9_-]{0,62}`, at most 63 characters; `work` is reserved for `[storage]`. A dataset or runtime layer binding selects its root with `input`; other consumers name the root on their mounts. Task instances mount files from an input root read-only; the Anchor mounts every input root read-only at `/flotilla-inputs/<name>` and only reads from it (copy sources, hidden tests). Nothing is written, cleaned or garbage-collected there, and Flotilla checks at startup that each input root exists.
 
-`publish_release` always writes the work root of the deployment it is given; release and runtime upload is outside Flotilla. Changing these sections invalidates capability evidence.
+`publish_release` always writes the work root of the deployment it is given; release and runtime upload is outside Flotilla. Run `flotilla probe` again after changing these sections.
 
 ### `[datasets.<name>]`
 
@@ -233,7 +233,7 @@ These are operator-owned deployment settings, not Compose fields or task runtime
 
 The management image still comes from `reaper.anchor_image`, and the anchor retains its explicit entrypoint. Metadata and resource inspection only read the task's Compose files in-process; they run no tool and need no Docker daemon in the anchor.
 
-Management-only extensions/profile/resources are excluded from the task capability fingerprint because probes do not use them. Record separate management diagnostics against the exact management image digest, extensions and resources when changing them.
+Probes do not use the management-only extensions, profile or resources, so a passing probe says nothing about them; check a management anchor separately against the exact image digest, extensions and resources when changing them.
 
 ### `runtime_params` and `[agent_overlay]`
 
@@ -245,7 +245,7 @@ Management-only extensions/profile/resources are excluded from the task capabili
 
 ### `[probe]`
 
-All probe inputs live in the deployment file. Images must be pinned `repo@sha256:<64 lowercase hex>` references; empty optional images skip the corresponding phase.
+All probe inputs are fields of the spec. Images must be pinned `repo@sha256:<64 lowercase hex>` references; empty optional images skip the corresponding phase.
 
 | Key | Default | Meaning |
 |---|---|---|

@@ -192,12 +192,12 @@ printf 'Check Redis connectivity.\n' > task/instruction.md
 cat > task/environment/docker-compose.yaml <<'EOF'
 services:
   main:
-    image: alpine:3.20
+    image: alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc   # alpine:3.20
     depends_on:
       cache:
         condition: service_healthy
   cache:
-    image: redis:7-alpine
+    image: redis@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe    # redis:7-alpine
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 2s

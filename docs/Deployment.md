@@ -45,7 +45,7 @@ async with Deployment(PLATFORM).management_anchor() as anchor:
 print(result.release, result.release_sha256)
 ```
 
-Then put its release name and `RELEASE.json` digest in `[share]`. Shared-tools releases are immutable. They are separate from native task releases and any Agent runtime.
+Then put its release name and `RELEASE.json` digest in `[share]`. Shared-tools releases are immutable. They are separate from datasets and any Agent runtime.
 
 ## 3. Declare `[platform]` and measure isolation
 
