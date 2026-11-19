@@ -23,7 +23,6 @@ from flotilla.core.admission import admission_errors
 from flotilla.models.plan import TaskSource
 from flotilla.native.dataset import Dataset, DatasetError
 from flotilla.registry import RegistryError
-from flotilla.runtime.client import plan_for
 from flotilla.scan import scan
 
 
@@ -77,7 +76,7 @@ def inspect_source(cfg: FlotillaConfig, source: TaskSource, configs: ImageConfig
             continue  # a task already known not to open costs no registry read
         # Only now does anything leave the machine: one registry read per image not already cached.
         try:
-            plan = plan_for(cfg, definition, source, configs)
+            plan = cfg.plan_for(definition, source, configs)
         except (PlanError, RegistryError, ValueError, OSError) as exc:
             return TaskReport(
                 task=key,

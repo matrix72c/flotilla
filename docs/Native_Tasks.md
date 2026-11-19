@@ -118,8 +118,8 @@ for key in dataset.tasks():
     task = NativeAttempt.resolve(fleet, dataset.source(key))   # raises on a task that cannot run
 ```
 
-`Flotilla.plan(source)` returns the same trial for a single-role task without the grading contract.
-Both read image configs through the client's cache, so checking a dataset also warms it: a digest
+`deployment.plan(source)` returns the same trial for a single-role task without the grading contract.
+Both read image configs through a digest cache, so checking a dataset also warms it: a digest
 names one config forever, and a second task naming the same image costs a dict lookup.
 
 `flotilla inspect` is the same check as a command, for a shell script or a submit hook that has no

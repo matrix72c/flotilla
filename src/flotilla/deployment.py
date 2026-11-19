@@ -1,9 +1,9 @@
 """One consumer entry point for a deployment.
 
 Consumers load a deployment once and ask it for everything platform-side: the platform
-credential, clients, declared datasets, setup budgets, capacity peaks, dataset validation and
-read-only runtime layer mounts. They never read the configuration's internal tables (backend
-sections, timeout names, storage settings).
+credential, clients, task planning, declared datasets, setup budgets, capacity peaks, dataset
+validation and read-only runtime layer mounts. They never read the configuration's internal
+tables (backend sections, timeout names, storage settings).
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, field
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from flotilla.config import FlotillaConfig
 from flotilla.core.anchor import Anchor
@@ -23,9 +23,13 @@ from flotilla.environment import read_env_file
 from flotilla.models.plan import TaskSource, TrialPlan
 from flotilla.native.dataset import Dataset, platform_key
 from flotilla.platform.base import SharedVolume
+from flotilla.registry import ImageConfigs
 from flotilla.resources import memory
-from flotilla.runtime.client import Flotilla
+from flotilla.runtime.client import Flotilla, with_options
 from flotilla.runtime.types import CleanupError, OpenOptions, RuntimeEvent
+
+if TYPE_CHECKING:
+    from flotilla.compose.task import HarborTask
 
 # Phases that bring one environment from creation to started services (seconds, summed worst case).
 _SETUP_PHASES = ("create", "address", "wire", "hosts", "prepare", "start_max")
@@ -83,6 +87,7 @@ OptionsFactory = Callable[[str, TrialPlan], OpenOptions]
 class Deployment:
     def __init__(self, config: FlotillaConfig) -> None:
         self._config = config
+        self._image_configs: ImageConfigs | None = None
 
     @classmethod
     def load(cls, target: str, *, credentials: str | Path | None = None) -> Deployment:
@@ -131,6 +136,44 @@ class Deployment:
 
     def client(self, *, on_event: Callable[[RuntimeEvent], None] | None = None) -> Flotilla:
         return Flotilla(deployment=self._config, on_event=on_event)
+
+    @property
+    def image_configs(self) -> ImageConfigs:
+        """Image configs by digest, for as long as this deployment object lives.
+
+        A digest names one config forever, so the only cost of a second task naming the same
+        image is a dict lookup. One cache shared by every plan this deployment resolves.
+        """
+        if self._image_configs is None:
+            self._image_configs = ImageConfigs(
+                credentials=self._config.registry.credentials(),
+                store=self._config.registry.config_cache,
+            )
+        return self._image_configs
+
+    def plan_environment(self, task: HarborTask, source: TaskSource, options: OpenOptions | None = None) -> TrialPlan:
+        """Resolve a task directory already read into the trial `open` would create, creating nothing.
+
+        A graded task is read once and planned once per role: `NativeAttempt.resolve` does that
+        and lands each environment here. Read the task through `plan` instead when there is only
+        one environment to plan.
+        """
+        plan = self._config.plan_for(task, source, self.image_configs)
+        return with_options(plan, options or OpenOptions())
+
+    def plan(self, source: TaskSource, options: OpenOptions | None = None) -> TrialPlan:
+        """Read one task directory and resolve it into the trial `open` would create.
+
+        Local and synchronous, so a caller can plan and check a whole dataset before spending a
+        sandbox on any of it, and so the cost of planning is visible rather than hidden inside an
+        await. `options` is the same `OpenOptions` `open` takes; fold the run's own choices into
+        the plan here, or hand them to `open` alongside it.
+        """
+        from flotilla.compose.task import load_task
+
+        options = options or OpenOptions()
+        parameters = {**self._config.runtime_params, **options.parameters}
+        return self.plan_environment(load_task(source.local, compose_environment=parameters), source, options)
 
     @asynccontextmanager
     async def management_anchor(self) -> AsyncIterator[Anchor]:

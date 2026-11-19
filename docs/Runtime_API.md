@@ -7,11 +7,10 @@ Import public types from `flotilla`. Configuration is loaded locally at construc
 | Operation | Behavior |
 |---|---|
 | `Flotilla(deployment=..., on_event=None)` | Owns a configuration snapshot and one runtime; do not share across processes |
-| `fleet.plan(source)` | Resolves a task directory into the trial `open` would create, without creating it |
 | `fleet.reservation(plan)` | Local admission budget of one environment: services x 2 |
 | `await fleet.start()` | Shared, idempotent initialization |
-| `await fleet.open(source, options=None)` | Opens a task directory, or a plan already resolved from one; builds and uploads nothing |
-| `async with fleet.environment(source, options=None)` | Opens and releases on exit |
+| `await fleet.open(plan, options=None)` | Opens a plan resolved from a task directory; builds and uploads nothing |
+| `async with fleet.environment(plan, options=None)` | Opens and releases on exit |
 | `await env.info()` / `await env.check()` | Resource metadata / current health and ownership check |
 | `await env.release(timeout=None)` | Idempotent, confirmed environment cleanup |
 | `await fleet.drain(timeout=None)` | Waits for pending cleanup; does not release active environments |
@@ -19,7 +18,7 @@ Import public types from `flotilla`. Configuration is loaded locally at construc
 
 For production tasks use `NativeAttempt.create(fleet, source)` from `flotilla.native`, where `source = config.resolve_datasets()[name].source(key)`. The task is resolved into one plan per role, plus how it is graded, before any role is opened. Call `await attempt.open("main", options)`, stop the agent, then `await attempt.verify()`. Verification stages hidden tests and declared artifact handoffs; a separate verifier is used only when the task defines one. Always `await attempt.close()` in `finally`; it closes roles before deleting their private workspace.
 
-`TrialPlan` is the in-memory boundary for `fleet.open`: everything one trial runs, resolved from the task directory in this process. `open` also takes a `TaskSource` and resolves it for you; resolve it yourself when you want to check a dataset first, or run one plan several times. [Native tasks](Native_Tasks.md) documents datasets and path binding.
+`TrialPlan` is the in-memory boundary for `fleet.open`: everything one trial runs, resolved from the task directory in this process. `open` takes only a plan; resolve the task directory first with `deployment.plan(source)` for a single environment, or `NativeAttempt.resolve(fleet, source)` for a graded task, which is also how a whole dataset is checked before a sandbox is spent on it, and how one plan is run several times. [Native tasks](Native_Tasks.md) documents datasets and path binding.
 
 The native Anchor requires installed Flotilla and filesystem helpers, not Harbor, Compose, Docker or push credentials. Actual platform acceptance remains separate from package/unit checks.
 
