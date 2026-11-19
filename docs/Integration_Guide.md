@@ -16,12 +16,15 @@ Two consequences follow:
 
 ## Loading a deployment
 
-Load the deployment once per process through `Deployment` and ask it for everything platform-side. Do not read backend tables, timeout names or storage settings from the configuration yourself.
+Wrap the deployment spec once per process in a `Deployment` and ask it for everything platform-side. Do not read backend tables, timeout names or storage settings from the spec yourself.
 
 ```python
 from flotilla import Deployment
 
-deployment = Deployment.load("deployment.toml", credentials="private.env")  # binds only credential_env
+from myproject.deployment import PLATFORM
+
+deployment = Deployment(PLATFORM)
+deployment.bind_credentials("private.env")  # binds only credential_env, nothing else in the file
 fleet = deployment.client(on_event=on_event)
 datasets = deployment.datasets()            # declared [datasets.<name>] by name
 sources = [datasets["demo"].source(key) for key in datasets["demo"].tasks()]
@@ -36,7 +39,7 @@ report = await deployment.validate(sources, sandboxes=True, options=lambda role,
 
 ## One client per process
 
-Create one `Flotilla` per process and keep it for the process lifetime. It owns an anchor sandbox, a background event loop thread for renewal and cleanup, and the concurrency limits from `deployment.toml`. Do not share one across processes, and do not create one per episode.
+Create one `Flotilla` per process and keep it for the process lifetime. It owns an anchor sandbox, a background event loop thread for renewal and cleanup, and the spec's concurrency limits. Do not share one across processes, and do not create one per episode.
 
 ```python
 from flotilla import Flotilla, RuntimeEvent
@@ -46,7 +49,7 @@ def on_event(event: RuntimeEvent) -> None:
     metrics.increment(f"flotilla.{event.kind}")  # called on a separate thread
 
 
-fleet = Flotilla(deployment="deployment.toml", on_event=on_event)
+fleet = Flotilla(deployment=PLATFORM, on_event=on_event)
 await fleet.start()
 try:
     ...  # run episodes
@@ -64,11 +67,11 @@ Name a declared dataset and the task keys inside it. Do not reduce identities to
 different dataset root implicitly when combining selections.
 
 ```python
-from flotilla.config import FlotillaConfig
 from flotilla.native import NativeAttempt
 
-config = FlotillaConfig.load("deployment.toml")
-dataset = config.resolve_datasets()["demo"]
+from myproject.deployment import PLATFORM
+
+dataset = PLATFORM.resolve_datasets()["demo"]
 source = dataset.source("vulhub/cve-2017-7529")
 # Resolving is local and synchronous: check a whole dataset before spending a sandbox on any of it.
 plan = NativeAttempt.resolve(fleet, source).plans["main"]
@@ -164,7 +167,7 @@ An adapter that opens an environment owns it and must release it. An adapter tha
 
 ## After a crash
 
-A process that dies without closing its client leaves its sandboxes and directories behind until their TTL expires. Run `flotilla gc --deployment deployment.toml` from any machine with the deployment config to collect them. GC finds launches both from `launches/` on shared storage and from sandbox labels, so a client that died before creating its directory is still found. It waits for two observations `gc_window` seconds apart before collecting a launch, so it never collects a live client. Use `--launch ID` only after confirming that client has exited. If GC cannot start its own anchor (for example, the anchor image cannot be pulled), it still deletes sandboxes by label, leaves directories in place, and exits 1.
+A process that dies without closing its client leaves its sandboxes and directories behind until their TTL expires. Run `flotilla gc --deployment myproject.deployment:PLATFORM` from any machine that can import the spec to collect them. GC finds launches both from `launches/` on shared storage and from sandbox labels, so a client that died before creating its directory is still found. It waits for two observations `gc_window` seconds apart before collecting a launch, so it never collects a live client. Use `--launch ID` only after confirming that client has exited. If GC cannot start its own anchor (for example, the anchor image cannot be pulled), it still deletes sandboxes by label, leaves directories in place, and exits 1.
 
 ## Testing your integration
 

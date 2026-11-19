@@ -125,7 +125,7 @@ async def publish_fixture(anchor: Anchor, local_root: Path, prefix: str, image: 
             await anchor.upload(f"{prefix}/{mode}/{name}", data, mode=permissions, uid=0, gid=0, stage="prepare")
 
 
-def native_job_config(deployment: Path, root: Path, prefix: str, output: Path) -> dict[str, Any]:
+def native_job_config(deployment: str, root: Path, prefix: str, output: Path) -> dict[str, Any]:
     """Build/validate the exact CLI config without contacting a platform."""
     from harbor.models.job.config import JobConfig
 
@@ -139,7 +139,7 @@ def native_job_config(deployment: Path, root: Path, prefix: str, output: Path) -
         },
         "runtime": {
             "import_path": "flotilla.integrations.harbor_native:NativeFlotillaRuntime",
-            "kwargs": {"deployment": str(deployment)},
+            "kwargs": {"deployment": deployment},
         },
         "environment": {"import_path": "flotilla.integrations.harbor_native:NativeFlotillaEnvironment"},
         "agents": [{"import_path": "tests.contract.native_consumers:NeutralShellAgent"}],
@@ -151,7 +151,7 @@ def native_job_config(deployment: Path, root: Path, prefix: str, output: Path) -
     return data
 
 
-async def run_native(deployment: Path, root: Path, prefix: str, output: Path) -> list[dict[str, str]]:
+async def run_native(deployment: str, root: Path, prefix: str, output: Path) -> list[dict[str, str]]:
     data = native_job_config(deployment, root, prefix, output)
     config = output / "harbor-config.json"
     config.write_text(json.dumps(data, indent=2) + "\n")
@@ -196,7 +196,7 @@ async def run_native(deployment: Path, root: Path, prefix: str, output: Path) ->
 
 
 async def run_sandbox(
-    deployment: Path, root: Path, prefix: str, runtime: dict[str, Any], output: Path
+    deployment: str, root: Path, prefix: str, runtime: dict[str, Any], output: Path
 ) -> list[dict[str, str]]:
     from sandbox_rl.harbor.provider import HarborEnvironmentProvider  # type: ignore[import-not-found]
     from sandbox_rl.harbor.recipe import HarborRecipe  # type: ignore[import-not-found]
@@ -255,10 +255,9 @@ async def run_sandbox(
     return owners
 
 
-async def run(deployment: Path, image: str, runtime_file: Path, output: Path) -> bool:
+async def run(deployment: str, image: str, runtime_file: Path, output: Path) -> bool:
     from sandbox_rl.config.spec.config_groups import AgentRuntimeConfig  # type: ignore[import-not-found]
 
-    deployment = deployment.expanduser().resolve(strict=True)
     cfg = FlotillaConfig.load(deployment)
     runtime = AgentRuntimeConfig.model_validate_json(runtime_file.read_text())
     if runtime.storage_root_identity != cfg.storage.settings().root:
@@ -342,7 +341,7 @@ async def run(deployment: Path, image: str, runtime_file: Path, output: Path) ->
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--deployment", type=Path, required=True)
+    parser.add_argument("--deployment", required=True, help="deployment spec to import, as package.module:attribute")
     parser.add_argument(
         "--runtime-image", required=True, help="Linux fixture image with bash, Python, tar and coreutils"
     )

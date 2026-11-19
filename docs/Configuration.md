@@ -1,10 +1,15 @@
 # Configuration reference
 
-The only deployment file is `deployment.toml`. `flotilla probe` writes nothing: it measures isolation and reports it through its output and exit status. Templates are in [`deployments/examples/`](../deployments/examples/). Validation errors show field paths without echoing input values.
+A deployment is a `FlotillaConfig` a caller constructs; there is no deployment file. Every section below is a field of it, so a type checker reports a missing or misspelled one before anything runs. A worked example is in [`deployments/examples/`](../deployments/examples/).
 
-## deployment.toml
+Commands outside the calling process -- `flotilla probe`, `gc`, `share`, `inspect` -- take `--deployment package.module:attribute` and import the spec. That is how `flotilla gc` reaches the deployment a crashed launch was using: nothing is left to read a file, but the module that defines the spec is still importable. The attribute may be the spec or a function returning one.
 
-Durations are in seconds. Relative paths are resolved against the directory containing `deployment.toml`.
+This page names each field as a bracketed path, because that is how the spec reads as a tree:
+`[opensandbox]` is the `opensandbox=` argument, `[opensandbox.network]` its `network=`, and
+`[datasets.<name>]` one entry of the `datasets=` mapping. Durations are in seconds. A client-side path
+must be absolute: a spec outlives the directory it was written in. Validation errors show field paths without echoing input values.
+
+## Fields
 
 ### `backend` and `[backends.<name>]`
 
@@ -73,7 +78,7 @@ Where one published dataset is, on both sides. Loading a deployment opens nothin
 
 | Key | Meaning |
 |---|---|
-| `local_root` | Local dataset directory, a directory of task directories; relative to deployment.toml |
+| `local_root` | Local dataset directory, a directory of task directories; must be an absolute path |
 | `input` | Optional `[inputs.<name>]` holding the dataset; omitted means the work root `[storage]` |
 | `platform_root` | Dataset location on its root: a relative storage key, an absolute host root confined beneath an absolute `host_path`/`root_subpath`, or explicit `pvc:<claim>/<root_subpath>/<key>` for PVC. Platform-identifier host paths require relative keys |
 
@@ -86,7 +91,7 @@ Typed, layer-agnostic bindings for a consumer's agent runtime. Flotilla validate
 | Key | Meaning |
 |---|---|
 | `input` | Optional `[inputs.<name>]` holding the layers; omitted means the work root `[storage]` |
-| `layers.<name>.local_root` | Optional local directory of the layer (resolved against the deployment TOML); Flotilla only records it |
+| `layers.<name>.local_root` | Optional local directory of the layer, absolute when given; Flotilla only records it |
 | `layers.<name>.platform_root` | Layer location on its root, same forms as a release's `platform_root` |
 
 Agent identity, runtime mount paths and timeouts belong to the consumer's recipe, not to this section. The former opaque `[voyager]` namespace was removed; loading a deployment that still declares it fails with a migration error. Secrets must not be embedded here or in task definitions.
@@ -187,18 +192,14 @@ Per-stage startup deadlines. The whole startup, from admission to ready, is also
 
 ### `[resources]`
 
-```toml
-[resources.default]           # applies to every service without an explicit setting
-cpu = "1"
-memory = "2Gi"
-
-[resources.services.main]     # by service name, for every task
-cpu = "2"
-memory = "4Gi"
-
-[resources.tasks.my-task.services.db]   # one service of one task
-cpu = "4"
-memory = "8Gi"
+```python
+resources=ResourceDefaults(
+    default=Resource(cpu="1", memory="2Gi"),            # every service without an explicit setting
+    services={"main": Resource(cpu="2", memory="4Gi")},  # by service name, for every task
+    tasks={                                              # one service of one task
+        "my-task": TaskResources(services={"db": Resource(cpu="4", memory="8Gi")}),
+    },
+)
 ```
 
 Precedence, lowest first: `[resources.default]`, resources declared in the Compose file, `[resources.services.*]`, `[resources.tasks.*]`, and finally `OpenOptions.resources` at runtime.
@@ -220,13 +221,12 @@ The attempt's own management sandbox: the launch anchor that compiles attempt-ow
 
 The launch anchor that reads task metadata can be sized and placed separately from the ordinary task runtime:
 
-```toml
-[prepare]
-management_profile = "management"
-management_resources = { cpu = "2", memory = "4Gi" }
-
-[opensandbox.management_extensions]
-nodeSelector = { "example.com/pool" = "metadata" }
+```python
+prepare=Prepare(management_profile="management", management_resources=Resource(cpu="2", memory="4Gi")),
+opensandbox=OpenSandbox(
+    # Keep the rest of the backend table as it is.
+    management_extensions={"nodeSelector": {"example.com/pool": "metadata"}},
+),
 ```
 
 These are operator-owned deployment settings, not Compose fields or task runtime parameters. The internal profile is closed (`default` or `management`); selecting it does not grant task privileged permission, and combining management with `privileged=True` is rejected. Ordinary task, probe, bootstrap and GC requests retain their existing extensions and resource allocations. Management extensions may override global deployment extensions but cannot set Flotilla-managed placement-group or shared-memory keys.

@@ -22,6 +22,9 @@ from flotilla.platform.clock import SystemClock
 from flotilla.probe import probe_deployment
 from flotilla.share.release import ReleaseError, VerifyReport, gc_releases, publish_release, verify_release
 
+#: What every command takes instead of a configuration file: where to import the spec from.
+DEPLOYMENT_HELP = "deployment spec to import, as package.module:attribute"
+
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -30,7 +33,7 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     command = sub.add_parser("inspect", help="inspect task environments and resources")
     command.add_argument("tasks", nargs="+", type=Path)
-    command.add_argument("--deployment", required=True, type=Path)
+    command.add_argument("--deployment", required=True, help=DEPLOYMENT_HELP)
     command.add_argument("--out", type=Path)
     anc = sub.add_parser("anchor", help="installed-package Anchor tools")
     anchor_sub = anc.add_subparsers(dest="anchor_command", required=True)
@@ -43,7 +46,7 @@ def _build_parser() -> argparse.ArgumentParser:
     ab.add_argument("--skopeo", default="skopeo", help="Skopeo command, parsed as argv")
     ab.add_argument("--manifest-format", choices=("v2s2", "oci"), default="v2s2")
     g = sub.add_parser("gc", help="clean up leftover launches via a temporary anchor")
-    g.add_argument("--deployment", required=True, type=Path, help="deployment configuration (TOML)")
+    g.add_argument("--deployment", required=True, help=DEPLOYMENT_HELP)
     g.add_argument(
         "--launch", help="collect only this launch, skipping the two-observation wait (operator confirms it has exited)"
     )
@@ -54,7 +57,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="remove share/staging entries older than this many seconds",
     )
     p = sub.add_parser("probe", help="measure a deployment's isolation; nonzero exit means it was not demonstrated")
-    p.add_argument("--deployment", required=True, type=Path, help="deployment configuration (TOML)")
+    p.add_argument("--deployment", required=True, help=DEPLOYMENT_HELP)
     p.add_argument("--env", type=Path, help="explicit platform credential environment file")
     p.add_argument("--image", help="explicit override of [probe].image (digest-pinned)")
     p.add_argument(
@@ -67,20 +70,15 @@ def _build_parser() -> argparse.ArgumentParser:
     share_sub = sh.add_subparsers(dest="share_command", required=True)
     sp = share_sub.add_parser("publish", help="publish a directory as an immutable share release")
     sp.add_argument("dir", type=Path, help="release content root (becomes the contents of /.flotilla)")
-    sp.add_argument("--deployment", required=True, type=Path, help="deployment configuration (TOML)")
+    sp.add_argument("--deployment", required=True, help=DEPLOYMENT_HELP)
     sp.add_argument("--release", help="release name; defaults to share.release in the config")
     sp.add_argument("--component", action="append", default=[], help="component version as name=version; repeatable")
     sv = share_sub.add_parser("verify", help="fully verify a release against the digest pinned in the config")
-    sv.add_argument("--deployment", required=True, type=Path, help="deployment configuration (TOML)")
+    sv.add_argument("--deployment", required=True, help=DEPLOYMENT_HELP)
     sv.add_argument("--release", help="release to verify; requires --sha256")
     sv.add_argument("--sha256", help="sha256 of that release's RELEASE.json; use with --release")
     sg = share_sub.add_parser("gc", help="delete releases other than the configured one and --keep")
-    sg.add_argument(
-        "--deployment",
-        required=True,
-        type=Path,
-        help="deployment configuration (TOML); its share.release is always kept",
-    )
+    sg.add_argument("--deployment", required=True, help=f"{DEPLOYMENT_HELP}; its share.release is always kept")
     sg.add_argument("--keep", action="append", default=[], help="additional release to keep; repeatable")
     sg.add_argument("--dry-run", action="store_true", help="list releases that would be deleted without deleting them")
     return parser

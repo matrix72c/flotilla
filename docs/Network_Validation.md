@@ -1,6 +1,6 @@
 # Network validation
 
-Use a dedicated deployment and isolated probe labels. The only handwritten inputs are in `deployment.toml`; invoke `flotilla probe --deployment deployment.toml`, which writes the capabilities path that deployment declares. The report records effective inputs and the relevant configuration fingerprint without tokens or complete private responses.
+Use a dedicated deployment and isolated probe labels. Every input is a field of the deployment spec; invoke `flotilla probe --deployment package.module:attribute`, which writes nothing and reports what it observed. The output names the inputs it used, without tokens or complete private responses.
 
 ## Positive controls are mandatory
 
@@ -16,14 +16,15 @@ For HTTPS and NTP, probe resolves the hostname once under the allowed policy, se
 
 For example, if these public services are approved and reachable from your deployment:
 
-```toml
-[probe]
-# Keep your other probe inputs, including the pinned image.
-dns_name = "pypi.org"
-external_targets = [
-  { host = "pypi.org", port = 443, protocol = "tcp", service = "https" },
-  { host = "time.cloudflare.com", port = 123, protocol = "udp", service = "ntp" },
-]
+```python
+Probe(
+    # Keep your other probe inputs, including the pinned image.
+    dns_name="pypi.org",
+    external_targets=[
+        {"host": "pypi.org", "port": 443, "protocol": "tcp", "service": "https"},
+        {"host": "time.cloudflare.com", "port": 123, "protocol": "udp", "service": "ntp"},
+    ],
+)
 ```
 
 These are explicit examples, not built-in defaults or a guarantee of availability. Probe never guesses targets from `[network].external` or a hard-coded public address. Test targets apply only to probe instances; they do not expand workload policy. The probe image needs Python's standard-library TLS support and a valid CA trust store; probe never installs packages remotely.

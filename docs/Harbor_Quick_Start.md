@@ -14,10 +14,13 @@ Flotilla pins [Harbor d78eb9c262e7074944106d16bff0ba6426bb2d34](https://github.c
 
 Use [Quick start](Quick_Start.md) to probe the deployment. Publish your task directories through your existing storage tools, preserving file modes, then declare where they are on both sides:
 
-```toml
-[datasets.tb2]
-local_root = "/srv/eval/datasets/tb2"
-platform_root = "pvc:YOUR-CLAIM/YOUR-ROOT/datasets/tb2"
+```python
+datasets={
+    "tb2": DatasetBinding(
+        local_root="/srv/eval/datasets/tb2",
+        platform_root="pvc:YOUR-CLAIM/YOUR-ROOT/datasets/tb2",
+    )
+}
 ```
 
 This example uses PVC storage; the claim and configured root subpath must match `[storage]`. For host-path storage, use its absolute host path (or a relative key under that configured root). A PVC binding must use the explicit `pvc:` form. Declaring a dataset uploads and synchronizes nothing. Keep it immutable while jobs or restored trials reference it.
@@ -36,14 +39,14 @@ agents:
 task_source:
   import_path: flotilla.integrations.harbor_native:FlotillaTaskSource
   kwargs:
-    dataset: tb2                      # a [datasets.<name>] the deployment declares
-    deployment: /srv/eval/deployment.toml
-    # selection: /srv/eval/tb2-subset.txt    # optional: task keys, one per line
+    dataset: tb2                      # a dataset the deployment spec declares
+    deployment: myproject.deployment:PLATFORM    # where to import the spec from
+    # selection: /srv/eval/tb2-subset.txt        # optional: task keys, one per line
     metadata_workers: 8
 runtime:
   import_path: flotilla.integrations.harbor_native:NativeFlotillaRuntime
   kwargs:
-    deployment: /srv/eval/deployment.toml
+    deployment: myproject.deployment:PLATFORM
 environment:
   import_path: flotilla.integrations.harbor_native:NativeFlotillaEnvironment
   delete: true

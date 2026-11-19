@@ -7,7 +7,6 @@ import json
 from pathlib import Path
 
 import pytest
-import toml  # type: ignore[import-untyped]
 from harbor.models.task.config import EnvironmentConfig, NetworkPolicy
 from harbor.models.trial.paths import TrialPaths
 
@@ -19,6 +18,7 @@ from flotilla.core import labels
 from flotilla.integrations.harbor import FlotillaEnvironment
 from flotilla.integrations.harbor_source import task_environments
 from flotilla.platform.base import ExecResult, FlotillaError, ProcessSpec
+from flotilla.testing.config import importable
 from flotilla.testing.planning import planned_task
 from flotilla.testing.platform import FakePlatform, SharedTree
 from flotilla.testing.runtime import deployment as runtime_deployment
@@ -49,15 +49,14 @@ def test_scan_checks_verifier_context_and_continues_after_invalid_harbor_input(
     output = tmp_path / "scan.jsonl"
     from flotilla.testing.config import config_data
 
-    config = config_data()
-    deployment_path = tmp_path / "inspect.toml"
-    deployment_path.write_text(toml.dumps(config))
-    assert main(["inspect", str(tasks / "valid"), "--deployment", str(deployment_path), "--out", str(output)]) == 0
+    cfg = FlotillaConfig.from_mapping(config_data())
+    deployment = importable(cfg)
+    assert main(["inspect", str(tasks / "valid"), "--deployment", deployment, "--out", str(output)]) == 0
     # Invalid sources are rejected independently by the same library resolver.
     from flotilla.prepare.inspect import inspect
 
     for name in ("bad-verifier",):
-        assert all(entry.status == "accepted" for entry in inspect(FlotillaConfig.load(deployment_path), tasks / name))
+        assert all(entry.status == "accepted" for entry in inspect(cfg, tasks / name))
         assert task_environments(tasks / name)[1].project.rejected
 
 
@@ -100,8 +99,7 @@ def adapter(
     planned: bool = True,
     **kwargs: object,
 ) -> FlotillaEnvironment:
-    config = tmp_path / "deployment.toml"
-    config.write_text(toml.dumps(cfg.model_dump(exclude_none=True, exclude={"base_dir"})))
+    deployment = importable(cfg)
     path = source(tmp_path) if not (tmp_path / "dataset" / "task").exists() else tmp_path / "dataset" / "task"
     compiled = planned_task(path, cfg, environments=task_environments)
     return FlotillaEnvironment(
@@ -111,7 +109,7 @@ def adapter(
         trial_paths=TrialPaths(tmp_path / "trial"),
         task_env_config=EnvironmentConfig(docker_image="r.io/main:1"),
         network_policy=network_policy,
-        deployment=str(config),
+        deployment=deployment,
         plan=compiled["main" if environment == "environment" else "verifier"] if planned else None,
         fleet=fleet,
         **kwargs,  # type: ignore[arg-type]

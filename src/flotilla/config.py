@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
+import importlib
 import ipaddress
-import json
 import logging
 import os
 import re
-import tomllib
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
 from pathlib import Path
@@ -444,6 +443,7 @@ class DatasetBinding(_Model):
     can infer the other: a client path says nothing about how the platform mounts the storage.
     """
 
+    #: Absolute: a spec is shared between processes that do not share a working directory.
     local_root: Path
     platform_root: str = Field(min_length=1)
     # Name of the [inputs.<name>] root holding the dataset; None means the work root ([storage]).
@@ -457,6 +457,7 @@ class RuntimeLayerBinding(_Model):
     """
 
     platform_root: str = Field(min_length=1)
+    #: Absolute when given, for the same reason as a dataset's.
     local_root: Path | None = None
 
 
@@ -498,8 +499,24 @@ class FlotillaConfig(_Model):
     reaper: Reaper = Reaper()
     resources: ResourceDefaults = ResourceDefaults()
 
-    #: Config file directory (set by `load`) for resolving relative paths; not part of the TOML.
-    base_dir: Path | None = Field(default=None, exclude=True)
+    @model_validator(mode="after")
+    def _local_roots(self) -> FlotillaConfig:
+        """A client-side path must be absolute: a spec outlives the directory it was written in.
+
+        A relative one used to resolve against the deployment file's directory. Without that file
+        there is no such anchor, and resolving against the working directory would make one spec
+        mean different things in the client, a Harbor worker and `flotilla gc`.
+        """
+        relative = [f"datasets.{n}" for n, b in self.datasets.items() if not b.local_root.is_absolute()]
+        if self.agent_runtime is not None:
+            relative += [
+                f"agent_runtime.layers.{n}"
+                for n, layer in self.agent_runtime.layers.items()
+                if layer.local_root is not None and not layer.local_root.is_absolute()
+            ]
+        if relative:
+            raise ValueError(f"local_root must be an absolute path: {', '.join(sorted(relative))}")
+        return self
 
     @model_validator(mode="after")
     def _timing_against_platform(self) -> FlotillaConfig:
@@ -568,29 +585,41 @@ class FlotillaConfig(_Model):
         return self
 
     @classmethod
-    def load(cls, path: str | Path) -> FlotillaConfig:
-        path = Path(path)
+    def load(cls, target: str) -> FlotillaConfig:
+        """Import a spec a caller already wrote, named `package.module:attribute`.
+
+        A caller constructs `FlotillaConfig` directly, so there is no deployment file to parse --
+        and nothing worth inventing a second format for. What a separate process still needs is a
+        way to name the spec it should use, which is what this is: `flotilla gc` exists precisely
+        because a crashed launch leaves nobody to call the SDK, and it has to reach the same
+        deployment that crashed. Importing is as trusted as the recipe that holds the spec.
+        """
+        module_name, separator, attribute = target.partition(":")
+        if not separator or not module_name or not attribute:
+            raise ConfigError([f"a deployment must be named package.module:attribute, not {target!r}"])
         try:
-            text = path.read_text()
-        except OSError as exc:
-            # An unreadable config file is a usage error: report it as a config error, without a traceback.
-            raise ConfigError([f"cannot read deployment configuration {path}: {exc.strerror or exc}"]) from exc
-        if path.suffix == ".json":
-            # A deployment a consumer generated rather than wrote by hand.
-            try:
-                data = json.loads(text)
-            except json.JSONDecodeError as exc:
-                raise ConfigError([f"{path} is not valid JSON: {exc}"]) from exc
-        else:
-            try:
-                data = tomllib.loads(text)
-            except tomllib.TOMLDecodeError as exc:
-                raise ConfigError([f"{path} is not valid TOML: {exc}"]) from exc
-        return cls.model_validate({**data, "base_dir": path.resolve().parent})
+            module = importlib.import_module(module_name)
+        except ImportError as exc:
+            raise ConfigError([f"cannot import {module_name}: {exc}"]) from exc
+        try:
+            spec = getattr(module, attribute)
+        except AttributeError:
+            raise ConfigError([f"{module_name} defines no {attribute}"]) from None
+        if callable(spec) and not isinstance(spec, FlotillaConfig):
+            spec = spec()
+        if not isinstance(spec, FlotillaConfig):
+            raise ConfigError([f"{target} is {type(spec).__name__}, not a FlotillaConfig"])
+        return spec
 
     @classmethod
-    def from_mapping(cls, data: Mapping[str, Any], *, base_dir: Path | None = None) -> FlotillaConfig:
-        return cls.model_validate({**data, "base_dir": base_dir})
+    def from_mapping(cls, data: Mapping[str, Any]) -> FlotillaConfig:
+        """Validate a mapping as a spec, the inverse of `model_dump(mode="json")`.
+
+        For a caller holding a spec as plain data: a recipe reading its own file, or a process
+        receiving one over a wire. A spec names no relative path, so nothing has to be resolved
+        on the way in or out.
+        """
+        return cls.model_validate(data)
 
     @property
     def backend_settings(self) -> BackendSettings:
@@ -612,35 +641,14 @@ class FlotillaConfig(_Model):
             raise ConfigError([f"backend {self.backend!r} has no [opensandbox] settings"])
         return self.opensandbox
 
-    def to_mapping(self) -> dict[str, Any]:
-        """JSON-compatible config with absolute local paths, for a child process without `base_dir`."""
-        data = self.model_dump(mode="json", exclude={"base_dir"})
-        for name, binding in self.datasets.items():
-            root = binding.local_root
-            if not root.is_absolute() and self.base_dir is not None:
-                root = self.base_dir / root
-            data["datasets"][name]["local_root"] = str(root.absolute())
-        if self.agent_runtime is not None:
-            for layer_name, layer in self.agent_runtime.layers.items():
-                if layer.local_root is None:
-                    continue
-                local = layer.local_root
-                if not local.is_absolute() and self.base_dir is not None:
-                    local = self.base_dir / local
-                data["agent_runtime"]["layers"][layer_name]["local_root"] = str(local.absolute())
-        return data
-
     def resolve_datasets(self) -> dict[str, Dataset]:
         """The declared datasets, each resolved against the storage root it lives on."""
         from flotilla.native.dataset import datasets as resolve
 
         bindings = {}
         for name, binding in self.datasets.items():
-            root = binding.local_root
-            if not root.is_absolute() and self.base_dir is not None:
-                root = self.base_dir / root
             bindings[name] = {
-                "local_root": root,
+                "local_root": binding.local_root,
                 "platform_root": binding.platform_root,
                 "root": binding.input or WORK_ROOT,
             }

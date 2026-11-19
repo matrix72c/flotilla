@@ -10,8 +10,10 @@ import pytest
 
 from flotilla.cli import main
 from flotilla.compose.task import TaskError, find_tasks, load_task
+from flotilla.config import FlotillaConfig
 from flotilla.platform.base import Capabilities
 from flotilla.scan import scan_task
+from flotilla.testing.config import importable
 
 COMPOSE = """
 services:
@@ -165,14 +167,20 @@ def test_scan_cli_writes_one_line_per_task(
     _task(tasks, "unknown-network", compose="services:\n  main:\n    networks: [missing]\n")
     (_task(tasks, "broken") / "task.toml").write_text("[task\n")
     out = tmp_path / "scan.jsonl"
-    deployment = tmp_path / "deployment.toml"
-    deployment.write_text(
-        '[opensandbox]\nendpoint="http://os.test"\ncredential_env="FLOTILLA_CRED"\n'
-        '[opensandbox.network]\nsandbox_cidrs=["10.0.0.0/16"]\n'
-        '[storage]\nhost_path="/mnt/shared"\n[share]\nrelease="test"\n'
-        f'release_sha256="{"a" * 64}"\n'
+    deployment = importable(
+        FlotillaConfig.from_mapping(
+            {
+                "opensandbox": {
+                    "endpoint": "http://os.test",
+                    "credential_env": "FLOTILLA_CRED",
+                    "network": {"sandbox_cidrs": ["10.0.0.0/16"]},
+                },
+                "storage": {"host_path": "/mnt/shared"},
+                "share": {"release": "test", "release_sha256": "a" * 64},
+            }
+        )
     )
-    assert main(["inspect", str(tasks), "--deployment", str(deployment), "--out", str(out)]) == 1
+    assert main(["inspect", str(tasks), "--deployment", deployment, "--out", str(out)]) == 1
     lines = {row["path"].rsplit("/", 1)[1]: row for row in json.loads(out.read_text())["environments"]}
     assert {k: v["status"] for k, v in lines.items()} == {
         "broken": "rejected",

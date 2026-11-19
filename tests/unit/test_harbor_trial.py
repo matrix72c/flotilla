@@ -10,7 +10,6 @@ import json
 from pathlib import Path
 
 import pytest
-import toml  # type: ignore[import-untyped]
 from harbor.models.trial.config import TrialConfig
 from harbor.trial.trial import Trial
 
@@ -20,6 +19,7 @@ from flotilla.core.plan import TrialPlan
 from flotilla.integrations.harbor import FlotillaEnvironment
 from flotilla.integrations.harbor_source import task_environments
 from flotilla.platform.base import ErrorCategory, FlotillaError, InstanceSpec
+from flotilla.testing.config import importable
 from flotilla.testing.harbor_local import attach_local_files
 from flotilla.testing.planning import planned_task
 from flotilla.testing.platform import FakePlatform, SharedTree
@@ -48,8 +48,7 @@ async def test_native_harbor_trial(
 ) -> None:
     cfg, platform, _ = deployment
     attach_local_files(platform, tmp_path / "instances")
-    deployment_file = tmp_path / "deployment.toml"
-    deployment_file.write_text(toml.dumps(cfg.model_dump(exclude_none=True, exclude={"base_dir"})))
+    deployment_target = importable(cfg)
     source = tmp_path / "neutral"
     (source / "environment").mkdir(parents=True)
     (source / "tests").mkdir()
@@ -124,7 +123,7 @@ async def test_native_harbor_trial(
             "agent": {"name": "nop"},
             "environment": {
                 "import_path": "flotilla.integrations.harbor:FlotillaEnvironment",
-                "kwargs": {"deployment": str(deployment_file)},
+                "kwargs": {"deployment": deployment_target},
             },
         }
     )

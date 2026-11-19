@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+import sys
+import types
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +13,7 @@ import pytest
 from flotilla.config import DatasetBinding, FlotillaConfig
 from flotilla.platform.base import ExecAttempt, ExecResult, InstanceHandle, ProcessSpec
 from flotilla.runtime.client import Flotilla
+from flotilla.testing.config import importable
 from flotilla.testing.planning import APP, FakeConfigs
 from flotilla.testing.platform import FakePlatform, SharedTree
 from flotilla.testing.runtime import deployment as deployment
@@ -47,7 +50,9 @@ def documented_example(
         _tree.dirs.update({key, f"{key}/demo", f"{key}/demo/redis", tests_key, f"{tests_key}/."})
         _tree.files.add(f"{key}/demo/redis/tests/test.sh")
         platform.tree_contents[f"{key}/demo/redis/tests/test.sh"] = b"#!/bin/sh\nexit 0\n"
-    monkeypatch.setattr(FlotillaConfig, "load", lambda _: cfg)
+    # The examples import the spec from a module the reader writes; stand in for exactly that.
+    importable(cfg, name="myproject.deployment", attribute="PLATFORM")
+    monkeypatch.setitem(sys.modules, "myproject", types.ModuleType("myproject"))
     monkeypatch.chdir(tmp_path)
 
     original_init = Flotilla.__init__

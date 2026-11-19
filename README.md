@@ -57,18 +57,32 @@ services:
 
 Publish that directory tree to shared storage with your existing tools, and declare where it is on
 both sides. Nothing is generated in between, so the directory the platform mounts is the one you
-published:
+published.
 
-```toml
-[datasets.example]
-local_root = "./tasks"
-platform_root = "/shared/datasets/example"
+A deployment is a `FlotillaConfig` your code constructs. Whoever runs your sandbox platform gives you
+its values; put them in a module of your own, next to the rest of your configuration:
+
+```python
+# myproject/deployment.py
+from flotilla.config import DatasetBinding, FlotillaConfig, OpenSandbox, OpenSandboxNetwork, Storage
+
+PLATFORM = FlotillaConfig(
+    opensandbox=OpenSandbox(
+        endpoint="https://sandbox.example.com",
+        credential_env="SANDBOX_CREDENTIAL",
+        network=OpenSandboxNetwork(sandbox_cidrs=["10.42.0.0/16"]),
+    ),
+    storage=Storage(host_path="/shared"),
+    datasets={"example": DatasetBinding(local_root="/srv/tasks", platform_root="/shared/datasets/example")},
+    reaper={"anchor_image": "registry.example.com/team/anchor@sha256:..."},
+)
 ```
 
-Check the deployment's capabilities once, before running anything on it:
+Measure the deployment's isolation once, before running anything on it. Commands outside your process
+name the spec by where to import it from:
 
 ```sh
-flotilla probe --deployment deployment.toml --env sandbox.env
+flotilla probe --deployment myproject.deployment:PLATFORM --env sandbox.env
 ```
 
 See [Native tasks](docs/Native_Tasks.md) for path binding, installation and credentials.
@@ -77,14 +91,14 @@ See [Native tasks](docs/Native_Tasks.md) for path binding, installation and cred
 import asyncio
 
 from flotilla import Flotilla, OpenOptions
-from flotilla.config import FlotillaConfig
 from flotilla.native import NativeAttempt
+
+from myproject.deployment import PLATFORM
 
 
 async def main():
-    config = FlotillaConfig.load("deployment.toml")
-    dataset = config.resolve_datasets()["example"]
-    async with Flotilla(deployment=config) as fleet:
+    dataset = PLATFORM.resolve_datasets()["example"]
+    async with Flotilla(deployment=PLATFORM) as fleet:
         attempt = await NativeAttempt.create(fleet, dataset.source("demo/redis"))
         try:
             env = await attempt.open("main", OpenOptions(startup_timeout=600, lifetime=300))
@@ -109,7 +123,7 @@ source/runtime interfaces.
 ## Features
 
 - **Compose semantics, checked up front.** `depends_on` with health conditions, healthchecks, multiple and internal networks, aliases, named volumes, bind mounts, `env_file`, `.env` interpolation, resource limits, and `user`. Every key is classified as equivalent, warned, or rejected, and a rejected key fails the task with its field path before anything is created. The Compose subset is parsed by Flotilla itself, with no `docker compose` binary; `flotilla inspect` shows the result locally. See [Compose support](docs/Compose_Support.md).
-- **Explicit isolation.** Network policies are compiled from the Compose networks and the deployment's egress policy: none, an allowlist, or any. A task can turn off internet access entirely. Security properties the platform cannot demonstrate must be accepted by name in the deployment configuration.
+- **Explicit isolation.** Network policies are compiled from the Compose networks and the deployment's egress policy: none, an allowlist, or any. A task can turn off internet access entirely. An isolation property `flotilla probe` cannot demonstrate must be accepted by name in the spec.
 - **Confirmed cleanup.** Every sandbox and directory is labeled with its owner. A lost create response is reconciled, capacity is released only after deletion is confirmed, and `flotilla gc` collects what a crashed process left behind.
 - **No silent replays.** A command is never sent twice. `timed_out=True` means the remote process was confirmed stopped; if that cannot be confirmed, you get `ExecOutcomeUnknown` and the environment is retired.
 - **Built for many concurrent environments.** One client manages admission, create and exec rate limits, sandbox renewal, and per-service resource defaults for every environment it opens.
@@ -136,7 +150,7 @@ Then pick a path:
 | You have | Start with |
 |---|---|
 | One Linux machine with Docker, and want to try it | [Local quick start](docs/Local_Quick_Start.md): run OpenSandbox and Flotilla on one machine |
-| A `deployment.toml` from whoever runs your sandbox platform | [Quick start](docs/Quick_Start.md): write a task and run it from Python |
+| Deployment values from whoever runs your sandbox platform | [Quick start](docs/Quick_Start.md): write a task and run it from Python |
 | Harbor tasks such as Terminal-Bench | [Harbor quick start](docs/Harbor_Quick_Start.md) |
 | A sandbox platform to set up for your team | [Deployment guide](docs/Deployment.md) |
 
@@ -152,7 +166,7 @@ Then pick a path:
 **Operating a deployment**
 
 - [Deployment guide](docs/Deployment.md): one-time setup of images, the share release, and the capability probe.
-- [Configuration reference](docs/Configuration.md): the single `deployment.toml` and generated capability evidence.
+- [Configuration reference](docs/Configuration.md): every field of a deployment spec.
 - [Platform requirements](docs/Platform_Requirements.md) and [network validation](docs/Network_Validation.md): what a deployment must enable, feature by feature, and how to verify each.
 - [OpenSandbox backend](docs/backends/opensandbox.md), including [read-only root filesystems and tmpfs](docs/Readonly_Rootfs_and_Tmpfs.md).
 

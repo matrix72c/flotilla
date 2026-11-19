@@ -20,7 +20,6 @@ import asyncio
 import uuid
 from contextlib import suppress
 from dataclasses import dataclass, replace
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -52,7 +51,7 @@ _PATH = "/usr/local/bin:/usr/bin:/bin"
 
 
 async def probe_deployment(
-    deployment: str | Path | FlotillaConfig,
+    deployment: str | FlotillaConfig,
     *,
     image: str | None = None,
     hosts_recheck: float | None = None,

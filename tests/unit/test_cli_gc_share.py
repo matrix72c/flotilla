@@ -8,42 +8,36 @@ platform; these can be tested because both paths return before reading the confi
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
 
 from flotilla.cli import main
 from flotilla.config import FlotillaConfig
+from flotilla.testing.config import importable
 from flotilla.testing.platform import FakePlatform, ManualClock, SharedTree
 
 SHA = "0" * 64
 
 
-def _deployment(tmp_path: Path, **extra: str) -> Path:
-    """A minimal working deployment config, with the capability report written next to it."""
-    lines = [
-        "[opensandbox]",
-        'endpoint = "http://os.test"',
-        'credential_env = "FLOTILLA_CRED"',
-        "",
-        "[opensandbox.network]",
-        'sandbox_cidrs = ["10.0.0.0/16"]',
-        'platform_cidrs = ["169.254.169.254/32"]',
-        "",
-        "[storage]",
-        'volumes = "host"',
-        'host_path = "/srv/flotilla"',
-        "",
-        "[share]",
-        'release = "2026-10-07.1"',
-        f'release_sha256 = "{SHA}"',
-        "",
-        "[reaper]",
-        'anchor_image = "reg/flotilla@sha256:' + "a" * 64 + '"',
-    ]
-    path = tmp_path / "flotilla.toml"
-    path.write_text("\n".join(lines) + "\n")
-    return path
+def _deployment(**extra: Any) -> str:
+    """A minimal working spec, named the way `flotilla gc` takes one."""
+    return importable(
+        FlotillaConfig.from_mapping(
+            {
+                "opensandbox": {
+                    "endpoint": "http://os.test",
+                    "credential_env": "FLOTILLA_CRED",
+                    "network": {"sandbox_cidrs": ["10.0.0.0/16"], "platform_cidrs": ["169.254.169.254/32"]},
+                },
+                "storage": {"volumes": "host", "host_path": "/srv/flotilla"},
+                "share": {"release": "2026-10-07.1", "release_sha256": SHA},
+                "reaper": {"anchor_image": "reg/flotilla@sha256:" + "a" * 64},
+                **extra,
+            }
+        )
+    )
 
 
 # ───────────────────────────── Argument parsing ─────────────────────────────
@@ -85,31 +79,31 @@ def test_both_commands_are_registered() -> None:
 
 def test_share_verify_release_without_sha256_exits_2(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """--release requires --sha256 too: the config pins a different release, so verifying with it is meaningless."""
-    cfg = _deployment(tmp_path)
-    code = main(["share", "verify", "--deployment", str(cfg), "--release", "other"])
+    cfg = _deployment()
+    code = main(["share", "verify", "--deployment", cfg, "--release", "other"])
     assert code == 2
     assert "--release requires --sha256" in capsys.readouterr().err
 
 
 def test_share_verify_rejects_non_hex_sha256(tmp_path: Path) -> None:
     """The --sha256 shape is enforced by config validation; confirm it is rejected (ConfigError path -> 2)."""
-    cfg = _deployment(tmp_path)
-    assert main(["share", "verify", "--deployment", str(cfg), "--release", "other", "--sha256", "nope"]) == 2
+    cfg = _deployment()
+    assert main(["share", "verify", "--deployment", cfg, "--release", "other", "--sha256", "nope"]) == 2
 
 
 # ───────────────────────────── gc dispatch ─────────────────────────────
 
 
-def test_gc_launch_of_missing_config_exits_2(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """A missing config file is reported as a config error (exit code 2), not a traceback."""
-    assert main(["gc", "--deployment", str(tmp_path / "nope.toml"), "--launch", "L9"]) == 2
-    assert "cannot read deployment configuration" in capsys.readouterr().err
+def test_gc_of_an_unimportable_deployment_exits_2(capsys: pytest.CaptureFixture[str]) -> None:
+    """A name that imports nothing is a config error (exit code 2), not a traceback."""
+    assert main(["gc", "--deployment", "flotilla.no_such_deployment:SPEC", "--launch", "L9"]) == 2
+    assert "cannot import" in capsys.readouterr().err
 
 
 def test_share_publish_bad_component_exits_2(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """--component without `=` exits 2 before connecting (an unset credential must not mask this usage error)."""
-    cfg = _deployment(tmp_path)
-    assert main(["share", "publish", str(tmp_path), "--deployment", str(cfg), "--component", "nope"]) == 2
+    cfg = _deployment()
+    assert main(["share", "publish", str(tmp_path), "--deployment", cfg, "--component", "nope"]) == 2
     captured = capsys.readouterr()
     assert "name=version" in captured.err
     assert "credential" not in captured.err
@@ -143,12 +137,12 @@ async def test_share_gc_preview_matches_real_deletion(
 ) -> None:
     from flotilla import cli
 
-    cfg = _deployment(tmp_path)
+    cfg = _deployment()
     tree.dirs.update({"share/releases", "share/releases/2026-10-07.1", "share/releases/stale"})
     monkeypatch.setattr(cli, "SystemClock", lambda: clock)
     monkeypatch.setattr(FlotillaConfig, "build_platform", lambda *_, **__: platform)
     monkeypatch.setattr(platform, "aclose", AsyncMock(), raising=False)
-    argv = ["share", "gc", "--deployment", str(cfg)]
+    argv = ["share", "gc", "--deployment", cfg]
     parser = cli._build_parser()
     assert await clock.run(cli._share(parser.parse_args([*argv, "--dry-run"]))) == 0
     assert "would remove ['stale']" in capsys.readouterr().out
@@ -190,7 +184,7 @@ async def test_gc_without_anchor_deletes_sandboxes_and_leaves_directories(
     monkeypatch.setattr(cli, "SystemClock", lambda: clock)
     monkeypatch.setattr(FlotillaConfig, "build_platform", lambda *_, **__: platform)
     monkeypatch.setattr(platform, "aclose", AsyncMock(), raising=False)
-    args = cli._build_parser().parse_args(["gc", "--deployment", str(_deployment(tmp_path)), "--launch", "L0"])
+    args = cli._build_parser().parse_args(["gc", "--deployment", _deployment(), "--launch", "L0"])
     assert await clock.run(cli._gc(args)) == 1  # directories could not be collected
     captured = capsys.readouterr()
     assert "anchor unavailable" in captured.err and "directory left" in captured.out

@@ -33,7 +33,7 @@ Rejected before any sandbox is created, with a field path: devices other than `/
 
 ## Isolation evidence
 
-`flotilla probe` creates real sandboxes against `deployment.toml` and measures seven isolation properties: `external_none`, `network_acceptance`, `inbound_isolation`, `read_only`, `subdir_isolation`, `no_auto_mount` and `exec_auth`. It prints what each observation was and exits nonzero when one did not hold and `security.accept_insecure` does not name it. Confirmed cleanup is required unconditionally, and cannot be waived: a deployment whose resources are not confirmed deleted is refused.
+`flotilla probe` creates real sandboxes against the deployment spec it is given and measures seven isolation properties: `external_none`, `network_acceptance`, `inbound_isolation`, `read_only`, `subdir_isolation`, `no_auto_mount` and `exec_auth`. It prints what each observation was and exits nonzero when one did not hold and `security.accept_insecure` does not name it. Confirmed cleanup is required unconditionally, and cannot be waived: a deployment whose resources are not confirmed deleted is refused.
 
 Nothing is written. The evidence is values in memory for the length of the probe run, so there is no report file, no schema and no version to maintain, and a client in another process has no way to re-derive the observations. That makes the probe an operator step against a deployment, and its exit status the gate — not a file a later startup re-reads and re-checks.
 

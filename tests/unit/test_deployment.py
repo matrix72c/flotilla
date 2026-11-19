@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar
@@ -10,10 +11,12 @@ from typing import Any, ClassVar
 import pytest
 
 from flotilla import Flotilla, OpenOptions
+from flotilla.config import FlotillaConfig
 from flotilla.core.plan import ExecContext, TaskSource, TrialPlan, Unit
 from flotilla.deployment import Deployment, RuntimeLayers, memory_gib
 from flotilla.native.runtime import NativeAttempt
 from flotilla.platform.base import Resources
+from flotilla.testing.config import importable
 from flotilla.testing.planning import FakeConfigs
 
 IMAGE = "example.invalid/unit@sha256:" + "c" * 64
@@ -49,18 +52,28 @@ def build_dataset(base: Path, *, services: int = 1, cpu: str = "1", shared: bool
     return base / "dataset"
 
 
-def write_deployment(root: Path, dataset: Path, *, runtime: str = "", extra: str = "") -> Path:
-    path = root / "deployment.toml"
-    path.write_text(
-        '[opensandbox]\nendpoint="http://fixture.test"\ncredential_env="TEST_CREDENTIAL"\n'
-        '[opensandbox.network]\nlink="sandbox"\n'
-        '[storage]\nhost_path="/srv/shared"\n'
-        '[reaper]\nanchor_image="fixture/anchor:1"\n'
-        f'[datasets.rel]\nlocal_root="{os.path.relpath(dataset, root)}"\nplatform_root="datasets/rel"\n'
-        + runtime
-        + extra
-    )
-    return path
+def write_deployment(dataset: Path, *, runtime: bool = False, datasets: Mapping[str, Path] = {}) -> str:
+    """A spec a consumer constructed, published where `Deployment.load` can import it."""
+    bindings = {"rel": dataset, **datasets}
+    spec: dict[str, Any] = {
+        "opensandbox": {
+            "endpoint": "http://fixture.test",
+            "credential_env": "TEST_CREDENTIAL",
+            "network": {"link": "sandbox"},
+        },
+        "storage": {"host_path": "/srv/shared"},
+        "reaper": {"anchor_image": "fixture/anchor:1"},
+        "datasets": {
+            name: {"local_root": str(path), "platform_root": f"datasets/{name}"} for name, path in bindings.items()
+        },
+    }
+    if runtime:
+        spec["inputs"] = {"runtimes": {"host_path": "@user:owner", "root_subpath": "runtimes"}}
+        spec["agent_runtime"] = {
+            "input": "runtimes",
+            "layers": {"node": {"platform_root": "node/n1"}, "lagent": {"platform_root": "lagent/l1"}},
+        }
+    return importable(FlotillaConfig.from_mapping(spec))
 
 
 @pytest.fixture(autouse=True)
@@ -75,22 +88,14 @@ def offline_registry(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(Flotilla, "__init__", patched)
 
 
-RUNTIME = (
-    '[inputs.runtimes]\nhost_path="@user:owner"\nroot_subpath="runtimes"\n'
-    '[agent_runtime]\ninput="runtimes"\n'
-    '[agent_runtime.layers.node]\nplatform_root="node/n1"\n'
-    '[agent_runtime.layers.lagent]\nplatform_root="lagent/l1"\n'
-)
-
-
 @pytest.fixture
-def published(tmp_path: Path) -> tuple[Path, Path]:
+def published(tmp_path: Path) -> tuple[str, Path]:
     dataset = build_dataset(tmp_path / "data")
-    return write_deployment(tmp_path, dataset, runtime=RUNTIME), dataset
+    return write_deployment(dataset, runtime=True), dataset
 
 
 def test_credentials_bind_only_the_platform_variable(
-    tmp_path: Path, published: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, published: tuple[str, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     path, _ = published
     monkeypatch.delenv("TEST_CREDENTIAL", raising=False)
@@ -109,7 +114,7 @@ def test_credentials_bind_only_the_platform_variable(
         Deployment.load(path, credentials=secrets)
 
 
-def test_budgets_and_limits(published: tuple[Path, Path]) -> None:
+def test_budgets_and_limits(published: tuple[str, Path]) -> None:
     deployment = Deployment.load(published[0])
     config = deployment.config
     t = config.timeouts
@@ -121,7 +126,7 @@ def test_budgets_and_limits(published: tuple[Path, Path]) -> None:
     assert overhead["cpu"] > 0 and overhead["memory_gib"] > 0
 
 
-def test_declared_datasets_are_reachable_by_name(published: tuple[Path, Path]) -> None:
+def test_declared_datasets_are_reachable_by_name(published: tuple[str, Path]) -> None:
     deployment = Deployment.load(published[0])
     datasets = deployment.datasets()
     assert sorted(datasets) == ["rel"]
@@ -134,7 +139,7 @@ def test_memory_units(value: str, expected: float) -> None:
     assert memory_gib(value) == expected
 
 
-def test_runtime_layers_and_mounts(published: tuple[Path, Path]) -> None:
+def test_runtime_layers_and_mounts(published: tuple[str, Path]) -> None:
     deployment = Deployment.load(published[0])
     layers = deployment.runtime_layers()
     assert layers.root == "runtimes"
@@ -159,7 +164,7 @@ def test_runtime_layers_and_mounts(published: tuple[Path, Path]) -> None:
 
 
 def test_runtime_layers_require_a_section(tmp_path: Path) -> None:
-    path = write_deployment(tmp_path, build_dataset(tmp_path / "data"))
+    path = write_deployment(build_dataset(tmp_path / "data"))
     with pytest.raises(ValueError, match="no \\[agent_runtime\\]"):
         Deployment.load(path).runtime_layers()
 
@@ -195,7 +200,7 @@ async def _clean_close(self: Any, timeout: float | None = None) -> Any:
 
 @pytest.mark.asyncio
 async def test_validate_reports_tasks_and_never_opens_the_verifier(
-    published: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+    published: tuple[str, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr("flotilla.native.runtime.NativeAttempt", FakeAttempt)
     monkeypatch.setattr(Flotilla, "close", _clean_close)
@@ -226,7 +231,7 @@ async def test_validate_starts_main_when_it_is_also_the_verifier(
     monkeypatch.setattr("flotilla.native.runtime.NativeAttempt", FakeAttempt)
     monkeypatch.setattr(Flotilla, "close", _clean_close)
     FakeAttempt.opened = []
-    path = write_deployment(tmp_path, build_dataset(tmp_path / "data", shared=True))
+    path = write_deployment(build_dataset(tmp_path / "data", shared=True))
     deployment = Deployment.load(path)
     (result,) = await deployment.validate([deployment.datasets()["rel"].source("ds/task-a")], sandboxes=True)
     assert result.passed and FakeAttempt.opened == ["main"]
@@ -235,11 +240,7 @@ async def test_validate_starts_main_when_it_is_also_the_verifier(
 def test_dataset_peak_keeps_duplicates_and_is_local(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     ordinary = build_dataset(tmp_path / "data")
     hot = build_dataset(tmp_path / "hot", services=3, cpu="2")
-    path = write_deployment(tmp_path, ordinary)
-    path.write_text(
-        path.read_text()
-        + f'[datasets.hot]\nlocal_root="{os.path.relpath(hot, tmp_path)}"\nplatform_root="datasets/hot"\n'
-    )
+    path = write_deployment(ordinary, datasets={"hot": hot})
 
     def forbidden(*args: Any, **kwargs: Any) -> None:
         pytest.fail("capacity inspection must not create attempts")

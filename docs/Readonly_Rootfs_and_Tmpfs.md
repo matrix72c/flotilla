@@ -8,10 +8,11 @@ The internal mapping follows the platform's **17. Sandbox read-only root filesys
 
 Add this key to the existing `[opensandbox]` table in the private deployment configuration:
 
-```toml
-[opensandbox]
-# Keep the existing endpoint, credential_env, capabilities and other settings.
-filesystem_protocol = "sandbox-system-v1"
+```python
+OpenSandbox(
+    # Keep the existing endpoint, credential_env and other settings.
+    filesystem_protocol="sandbox-system-v1",
+)
 ```
 
 This is independent of `[opensandbox.execd].protocol`. The default filesystem protocol is `"upstream"`, which sends neither `readOnlyRootFilesystem` nor `tmpfsMounts`, including for ordinary tasks with false/empty requirements. Upstream mode rejects tasks requiring the new capabilities even if a capability file claims they are available.
@@ -19,7 +20,7 @@ This is independent of `[opensandbox.execd].protocol`. The default filesystem pr
 Configure the pinned probe image in `[probe].image`, then regenerate evidence with the exact deployment that will run tasks:
 
 ```sh
-flotilla probe --deployment deployment.toml
+flotilla probe --deployment myproject.deployment:PLATFORM
 ```
 
 Filesystem checks run when the explicitly selected protocol can express them; unsupported modes produce `skipped`, not an automatic protocol/runtime fallback. There are no handwritten declaration flags. The image needs the standard probe tools including Python 3, `stat` (`-f`), `dd`, `grep`, `touch`, `/tmp`, and `/var/tmp`, plus working configured share mounts.
@@ -102,7 +103,7 @@ A task that declares tmpfs requires native support; there is no disk-directory a
 After probing, run the opt-in public API contract to cover image preparation, service logs, directory transfers, actual mount behavior and confirmed cleanup:
 
 ```sh
-python -m tests.contract.filesystem --deployment deployment.toml \
+python -m tests.contract.filesystem --deployment myproject.deployment:PLATFORM \
   --image "$CONTRACT_IMAGE" --out artifacts/filesystem-contract.json
 ```
 

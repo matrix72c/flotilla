@@ -330,7 +330,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--deployment", type=Path, required=True)
+    parser.add_argument("--deployment", required=True, help="deployment spec to import, as package.module:attribute")
     parser.add_argument("--image", required=True)
     parser.add_argument("--multi-service", action="store_true", help="Test web/app/db networking; requires link")
     parser.add_argument("--out", type=Path, required=True, help="New directory for fixture and incremental report")
