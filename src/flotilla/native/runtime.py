@@ -10,9 +10,9 @@ from typing import TYPE_CHECKING
 
 from harbor.models.task.config import TaskConfig
 
+from flotilla.compose.harbor_source import task_environments
 from flotilla.compose.task import TASK_FILE
 from flotilla.compose.verification import artifacts_of, verification_of
-from flotilla.integrations.harbor_source import task_environments
 from flotilla.models.plan import TaskSource, TrialPlan
 from flotilla.models.platform import SharedVolume
 from flotilla.models.verification import Artifact, Verification, check_against_plans
