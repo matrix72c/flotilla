@@ -236,6 +236,7 @@ def _unit(
         tmpfs_mounts=tmpfs,
         shm_size_bytes=svc.shm_size_bytes,
         devices=frozenset(svc.devices),
+        udp_ports=svc.udp_ports,
         extra_hosts=dict(svc.extra_hosts),
     )
 

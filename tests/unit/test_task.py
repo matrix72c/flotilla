@@ -11,9 +11,9 @@ import pytest
 from flotilla.cli import main
 from flotilla.compose.task import TaskError, find_tasks, load_task
 from flotilla.config import FlotillaConfig
-from flotilla.platform.base import Capabilities
-from flotilla.scan import scan_task
+from flotilla.scan import scan
 from flotilla.testing.config import importable
+from flotilla.testing.planning import _caps
 
 COMPOSE = """
 services:
@@ -145,13 +145,12 @@ def test_separate_verifier_artifacts_are_supported(tmp_path: Path, toml: str, re
     assert _rejects(_task(tmp_path, "v", toml)) == rejected
 
 
-def test_scan_task_merges_task_and_deployment_findings(tmp_path: Path, caps: Capabilities) -> None:
+def test_scan_merges_task_and_project_findings(tmp_path: Path) -> None:
     path = _task(tmp_path, "m", '[environment]\nnetwork_mode = "allowlist"\n', compose=COMPOSE)
-    result = scan_task(load_task(path), caps)
-    assert result.status == "rejected"
-    assert result.services == ("db", "main")
-    line = result.to_json()
-    assert any(f["path"] == "task.toml:environment.network_mode" for f in line["findings"])
+    task = load_task(path)
+    findings = scan(task.project, _caps(), extra=task.findings)
+    assert any(f.path == "task.toml:environment.network_mode" for f in findings if f.kind == "reject")
+    assert sorted(task.project.services) == ["db", "main"]
 
 
 # ───────────────────────────── CLI ─────────────────────────────

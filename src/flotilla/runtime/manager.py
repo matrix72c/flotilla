@@ -12,7 +12,8 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from flotilla.config import FlotillaConfig
-from flotilla.core import labels, network
+from flotilla.core import labels
+from flotilla.core.admission import admission_errors
 from flotilla.core.anchor import Anchor
 from flotilla.core.deletion import Deleter
 from flotilla.core.plan import TrialPlan
@@ -165,39 +166,8 @@ class Manager:
             raise invalid("the plan's workspace root is not the workspace this attempt owns")
         if set(request.exec_env) - set(plan.units):
             raise invalid("exec_env contains unknown services")
-        members = network.link_members(plan)
-        caps = self.platform.caps
-        for name, unit in plan.units.items():
-            try:
-                caps.require_filesystem(
-                    unit.readonly_rootfs,
-                    unit.tmpfs_mounts,
-                    privileged=unit.privileged_runtime,
-                    memory=unit.resources.memory,
-                    volume_paths=tuple(m.target for m in unit.mounts)
-                    + tuple(m.mount_path for m in plan.external_mounts.get(name, ()))
-                    + tuple(m.mount_path for m in plan.workspace_mounts.get(name, ())),
-                    shm_size_bytes=unit.shm_size_bytes,
-                )
-                if unit.readonly_rootfs and not caps.shared_volume:
-                    raise ValueError("readonly_rootfs requires shared storage for framework scratch space")
-            except ValueError as exc:
-                raise invalid(f"{name}: {exc}") from exc
-        if network.topology(plan) is not None and (not caps.link or len(members) > caps.link_max_members):
-            raise invalid("deployment cannot connect this task's services")
-        if (any(plan.external_mounts.values()) or any(plan.workspace_mounts.values())) and not caps.shared_volume:
-            raise invalid("deployment does not support external shared volumes")
-        if plan.volumes and not caps.shared_volume:
-            raise invalid("deployment does not support shared trial volumes")
-        if any(unit.privileged for unit in plan.units.values()) and not caps.privileged_runtime:
-            raise invalid("deployment does not support privileged services")
-        for name, unit in plan.units.items():
-            if missing := sorted(unit.devices - caps.devices):
-                raise invalid(f"{name}: deployment does not support devices {missing}")
-        if (request.disable_internet or set(plan.units) - plan.external_units) and not caps.supports_no_network:
-            raise invalid("no-network requires deny-all egress with only declared cluster DNS exceptions")
-        if set(plan.units) - members and not caps.supports_network_none:
-            raise invalid("network_mode none requires inbound isolation or sandbox ingress enforcement")
+        for error in admission_errors(plan, self.platform.caps, disable_internet=request.disable_internet):
+            raise invalid(error)
         return plan
 
     async def open(self, eid: str, request: RunRequest, *, admission_s: float, startup_s: float) -> EnvironmentInfo:

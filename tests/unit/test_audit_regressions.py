@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -12,8 +13,14 @@ from flotilla.compose.normalize import normalize
 from flotilla.compose.plan_task import PlanError, synthesize_command
 from flotilla.compose.task import load_task
 from flotilla.config import ResourceDefaults
+from flotilla.core.admission import admission_errors
+from flotilla.platform.base import Capabilities
 from flotilla.scan import scan
-from flotilla.testing.planning import APP, FakeConfigs, _caps, _task, plan
+from flotilla.testing.planning import APP, FakeConfigs, _caps, _task, plan, plan_project
+
+
+def _errors(project: Any, caps: Capabilities) -> list[str]:
+    return list(admission_errors(plan_project(project), caps))
 
 
 def test_a_volume_name_that_is_a_path_never_reaches_storage(tmp_path: Path) -> None:
@@ -38,9 +45,8 @@ def test_sibling_prefix_symlink_is_rejected_before_build(tmp_path: Path) -> None
         "image": APP,
         "volumes": [{"type": "bind", "source": "./escape", "target": "/data"}],
     }
-    result = scan("t", normalize({"services": {"main": service}}), _caps(), env_dir=str(env))
-    assert result.status == "rejected"
-    assert any("escapes" in f.reason for f in result.findings)
+    findings = scan(normalize({"services": {"main": service}}), _caps(), env_dir=str(env))
+    assert any("escapes" in f.reason for f in findings if f.kind == "reject")
 
 
 def test_string_command_and_explicit_empty_preserve_entrypoint() -> None:
@@ -83,7 +89,7 @@ def test_tmpfs_is_not_derived_without_approximating_container_identity(tmp_path:
 """,
     )
     task = load_task(path)
-    assert scan(task.name, task.project, replace(_caps(), native_tmpfs=True)).status == "accepted"
+    assert not _errors(task.project, replace(_caps(), native_tmpfs=True))
     result = plan(task)
     # Mount-point directories are runtime responsibilities: nothing is derived from the image.
     assert [m.mount_path for m in result.units["main"].tmpfs_mounts] == ["/cache", "/scratch"]

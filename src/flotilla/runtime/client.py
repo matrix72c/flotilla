@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager, suppress
 from types import TracebackType
 from typing import TYPE_CHECKING, Any
 
-from flotilla.compose.plan_task import AgentOverlay, plan_task
+from flotilla.compose.plan_task import AgentOverlay, ImageConfigSource, plan_task
 from flotilla.compose.task import HarborTask, load_task
 from flotilla.config import FlotillaConfig
 from flotilla.core.plan import TaskSource, TrialPlan
@@ -65,6 +65,37 @@ def with_options(plan: TrialPlan, options: OpenOptions) -> TrialPlan:
             },
         )
     return plan
+
+
+def plan_for(
+    cfg: FlotillaConfig,
+    task: HarborTask,
+    source: TaskSource,
+    configs: ImageConfigSource,
+    options: OpenOptions | None = None,
+) -> TrialPlan:
+    """Resolve `task` into the plan `open` would run, against this deployment's overlay and resources.
+
+    The one place a task directory becomes a trial plan: `Flotilla.plan_environment` and `flotilla
+    inspect` both land here, so a task that plans for one plans for the other.
+    """
+    options = options or OpenOptions()
+    declared = {name: svc.resources for name, svc in task.project.services.items()}
+    overlay = cfg.agent_overlay
+    plan = plan_task(
+        task,
+        source,
+        configs=configs,
+        resources=cfg.resources.for_services(task.name, declared),
+        overlay=AgentOverlay(
+            env=overlay.env,
+            services=None if overlay.services is None else frozenset(overlay.services),
+        ),
+        external_mounts=options.external_mounts,
+        workspace_mounts=options.workspace_mounts,
+        workspace_root=options.workspace_root,
+    )
+    return with_resources(plan, options.resources)
 
 
 def with_resources(plan: TrialPlan, overrides: Mapping[str, Mapping[str, str]]) -> TrialPlan:
@@ -239,23 +270,7 @@ class Flotilla:
 
     def plan_environment(self, task: HarborTask, source: TaskSource, options: OpenOptions | None = None) -> TrialPlan:
         """The same, for a task directory already read: a graded task reads it once per role."""
-        options = options or OpenOptions()
-        declared = {name: svc.resources for name, svc in task.project.services.items()}
-        overlay = self._deployment.agent_overlay
-        plan = plan_task(
-            task,
-            source,
-            configs=self.image_configs,
-            resources=self._deployment.resources.for_services(task.name, declared),
-            overlay=AgentOverlay(
-                env=overlay.env,
-                services=None if overlay.services is None else frozenset(overlay.services),
-            ),
-            external_mounts=options.external_mounts,
-            workspace_mounts=options.workspace_mounts,
-            workspace_root=options.workspace_root,
-        )
-        return with_resources(plan, options.resources)
+        return plan_for(self._deployment, task, source, self.image_configs, options)
 
     async def open(self, source: TaskSource | TrialPlan, options: OpenOptions | None = None) -> Environment:
         """Open an environment for a task directory, or for a plan already resolved from one."""

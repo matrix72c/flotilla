@@ -10,8 +10,10 @@ import pytest
 
 from flotilla import Flotilla
 from flotilla.compose.normalize import normalize
+from flotilla.compose.plan_task import PlanError
 from flotilla.compose.task import load_task
 from flotilla.config import FlotillaConfig
+from flotilla.core.admission import admission_errors
 from flotilla.platform.base import (
     Capabilities,
     ErrorCategory,
@@ -22,11 +24,15 @@ from flotilla.platform.base import (
 )
 from flotilla.runtime.manager import Manager
 from flotilla.runtime.types import RunRequest
-from flotilla.scan import scan
-from flotilla.testing.planning import APP, _caps, _task, plan
+from flotilla.testing.planning import APP, _caps, _task, plan, plan_project
 from flotilla.testing.platform import FakePlatform, SharedTree
 from flotilla.testing.runtime import deployment as deployment
 from flotilla.testing.runtime import task
+
+
+def _errors(project: Any, caps: Capabilities) -> list[str]:
+    return list(admission_errors(plan_project(project), caps))
+
 
 OSWORLD = {
     "image": "r.io/osworld",
@@ -99,15 +105,14 @@ def _device_caps(caps: Capabilities) -> Capabilities:
     return replace(caps, privileged_runtime=True, devices=frozenset({"fuse", "kvm", "tun"}))
 
 
-def test_scan_requires_device_evidence(caps: Capabilities) -> None:
+def test_admission_requires_device_evidence(caps: Capabilities) -> None:
     project = normalize({"services": {"main": OSWORLD}})
-    result = scan("osworld", project, caps)
-    assert result.status == "rejected"
-    assert [f.path for f in result.findings if f.kind == "reject"] == ["services.main.devices"]
-    assert scan("osworld", project, replace(_device_caps(caps), devices=frozenset({"kvm"}))).status == "rejected"
-    assert scan("osworld", project, _device_caps(caps)).status == "accepted"
+    assert _errors(project, caps) == ["main: deployment does not support devices ['kvm', 'tun']"]
+    assert _errors(project, replace(_device_caps(caps), devices=frozenset({"kvm"})))
+    assert not _errors(project, _device_caps(caps))
     readonly = normalize({"services": {"main": {**OSWORLD, "read_only": True}}})
-    assert scan("osworld", readonly, replace(_device_caps(caps), readonly_rootfs=True)).status == "rejected"
+    with pytest.raises(PlanError, match="readonly_rootfs"):
+        plan_project(readonly)  # readonly rootfs on the privileged runtime is refused at planning
 
 
 def test_devices_roundtrip_to_the_plan(tmp_path: Path) -> None:
@@ -115,9 +120,9 @@ def test_devices_roundtrip_to_the_plan(tmp_path: Path) -> None:
         f"services:\n  main:\n    image: {APP}\n    devices: [/dev/net/tun, /dev/kvm]\n    mem_limit: 1g\n    cpus: 1\n"
     )
     task = load_task(_task(tmp_path, "dev", compose=compose))
-    # Planning does not consult the deployment; the capability scan is what refuses the task.
-    assert scan(task.name, task.project, _caps()).status == "rejected"
-    assert scan(task.name, task.project, _device_caps(_caps())).status == "accepted"
+    # Planning does not consult the deployment; admission is what refuses the task.
+    assert _errors(task.project, _caps())
+    assert not _errors(task.project, _device_caps(_caps()))
     unit = plan(task).units["main"]
     assert unit.devices == {"kvm", "tun"} and unit.privileged_runtime and not unit.privileged
 
