@@ -10,7 +10,7 @@ from dataclasses import replace
 import pytest
 
 from flotilla.core import process
-from flotilla.core.plan import Dependency, ExecContext, Healthcheck, TrialPlan, Unit
+from flotilla.models.plan import Dependency, ExecContext, Healthcheck, TrialPlan, Unit
 from flotilla.platform.base import (
     ErrorCategory,
     ExecOutcomeUnknown,

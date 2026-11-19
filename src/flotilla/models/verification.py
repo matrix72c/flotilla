@@ -12,28 +12,13 @@ be caught before anything is created, not after a sandbox is already running wit
 
 from __future__ import annotations
 
-import posixpath
 from collections.abc import Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from flotilla.core.plan import TrialPlan
-from flotilla.platform.filesystem import overlaps
-
-
-def relative_path(value: str) -> str:
-    if not isinstance(value, str) or not value or any(p in ("", ".", "..") for p in value.split("/")):
-        raise ValueError(f"expected canonical relative path: {value!r}")
-    if "\\" in value or any(ord(c) < 32 or ord(c) == 127 for c in value):
-        raise ValueError("paths cannot contain backslashes or control characters")
-    return value
-
-
-def absolute_path(value: str) -> str:
-    if not value.startswith("/") or value.startswith("//") or posixpath.normpath(value) != value:
-        raise ValueError("expected canonical absolute path")
-    relative_path(value[1:])
-    return value
+from flotilla.models.filesystem import overlaps
+from flotilla.models.paths import absolute_path, relative_path
+from flotilla.models.plan import TrialPlan
 
 
 class Model(BaseModel):

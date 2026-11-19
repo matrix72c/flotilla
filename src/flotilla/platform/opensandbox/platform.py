@@ -159,7 +159,7 @@ class OpenSandboxPlatform:
 
     async def probe_create(self, spec: InstanceSpec) -> InstanceHandle:
         """Management-only pending operation, without manufacturing capability evidence."""
-        from flotilla.platform.filesystem import validate_mounts
+        from flotilla.models.filesystem import validate_mounts
         from flotilla.platform.opensandbox.filesystem import INTERNAL_LIMITS
 
         if "flotilla/probe" not in spec.labels:

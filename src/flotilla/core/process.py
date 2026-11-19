@@ -8,8 +8,8 @@ import shlex
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from flotilla.core.plan import Condition, Healthcheck, TrialPlan, Unit
 from flotilla.core.waiting import run_all
+from flotilla.models.plan import Condition, Healthcheck, TrialPlan, Unit
 from flotilla.platform.base import (
     RUNTIME_MOUNT,
     Clock,

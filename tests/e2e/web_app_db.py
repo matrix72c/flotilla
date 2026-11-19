@@ -39,9 +39,9 @@ from flotilla.config import FlotillaConfig
 from flotilla.core import labels
 from flotilla.core.anchor import Anchor
 from flotilla.core.deletion import Deleter
-from flotilla.core.plan import Dependency, ExecContext, Healthcheck, Mount, Network, TrialPlan, TrialVolume, Unit
 from flotilla.core.reaper import Reaper
 from flotilla.core.trial import Ready, Trial
+from flotilla.models.plan import Dependency, ExecContext, Healthcheck, Mount, Network, TrialPlan, TrialVolume, Unit
 from flotilla.platform.base import FlotillaError, Platform, ProcessSpec, Resources
 from flotilla.platform.clock import SystemClock
 from flotilla.platform.opensandbox import build

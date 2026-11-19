@@ -27,7 +27,8 @@ from flotilla.compose.image_meta import _identity, parse_config
 from flotilla.compose.layout import Layout, classify
 from flotilla.compose.model import MAIN, ImageMeta, Project, Service
 from flotilla.compose.task import HarborTask
-from flotilla.core.plan import (
+from flotilla.models.filesystem import unsized_tmpfs_bytes
+from flotilla.models.plan import (
     Dependency,
     ExecContext,
     Healthcheck,
@@ -38,8 +39,7 @@ from flotilla.core.plan import (
     TrialVolume,
     Unit,
 )
-from flotilla.platform.base import Resources
-from flotilla.platform.filesystem import unsized_tmpfs_bytes
+from flotilla.models.platform import Resources
 
 #: Image `USER` / Compose `user` values that mean root. Docker resolves `USER` by name inside the
 #: image, so the string and numeric spellings are the same identity and neither needs a lookup.

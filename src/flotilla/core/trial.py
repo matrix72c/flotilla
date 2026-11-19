@@ -10,9 +10,9 @@ from dataclasses import dataclass, replace
 from flotilla.core import hosts, labels, network, process, volumes
 from flotilla.core.anchor import Anchor
 from flotilla.core.errors import at_stage
-from flotilla.core.plan import TrialPlan
 from flotilla.core.reaper import Reaper
 from flotilla.core.waiting import Expired, run_all, wait_running, within
+from flotilla.models.plan import TrialPlan
 from flotilla.platform.base import (
     RUNTIME_MOUNT,
     Clock,

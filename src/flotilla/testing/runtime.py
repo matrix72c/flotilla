@@ -11,7 +11,7 @@ import pytest
 from flotilla import Flotilla
 from flotilla.config import FlotillaConfig
 from flotilla.core import labels
-from flotilla.core.plan import ExecContext, TrialPlan, Unit
+from flotilla.models.plan import ExecContext, TrialPlan, Unit
 from flotilla.platform.base import ExecResult, ProcessSpec, Resources
 from flotilla.platform.clock import SystemClock
 from flotilla.runtime.manager import Manager

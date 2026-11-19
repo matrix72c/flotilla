@@ -10,8 +10,8 @@ import pytest
 
 from flotilla import Flotilla
 from flotilla.config import FlotillaConfig
-from flotilla.core.plan import ExecContext, Healthcheck, Unit
 from flotilla.core.process import wait_healthy
+from flotilla.models.plan import ExecContext, Healthcheck, Unit
 from flotilla.platform.base import (
     CommandBusy,
     ErrorCategory,

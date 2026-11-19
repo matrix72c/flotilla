@@ -5,9 +5,9 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
-from flotilla.core.plan import TrialPlan
 from flotilla.core.reaper import CleanupRecord
-from flotilla.platform.base import SharedVolume
+from flotilla.models.plan import TrialPlan
+from flotilla.models.platform import SharedVolume
 
 
 @dataclass(frozen=True)

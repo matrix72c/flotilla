@@ -250,7 +250,7 @@ async def test_explicit_development_acceptance_allows_operations_and_records_gap
     cfg = cfg.model_copy(update={"security": cfg.security.model_copy(update={"accept_insecure": frozenset(gaps)})})
     from dataclasses import replace
 
-    from flotilla.core.plan import Network
+    from flotilla.models.plan import Network
 
     # A general development waiver does not promise Compose network_mode: none isolation.
     connected = replace(

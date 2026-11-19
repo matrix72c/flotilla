@@ -10,8 +10,8 @@ from typing import TYPE_CHECKING, Any
 
 from flotilla.core.anchor import Anchor
 from flotilla.core.waiting import finish_past_cancel
-from flotilla.native.dataset import RESERVED
-from flotilla.native.models import relative_path
+from flotilla.models.dataset import RESERVED
+from flotilla.models.paths import relative_path
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine

@@ -16,12 +16,12 @@ from flotilla.core import labels
 from flotilla.core.admission import admission_errors
 from flotilla.core.anchor import Anchor
 from flotilla.core.deletion import Deleter
-from flotilla.core.plan import TrialPlan
 from flotilla.core.reaper import Reaper
 from flotilla.core.runtime import Monitor
 from flotilla.core.trial import Ready, Trial
 from flotilla.core.volumes import RESERVED_KEYS
 from flotilla.core.waiting import RateLimiter, retrieve
+from flotilla.models.plan import TrialPlan
 from flotilla.platform.base import (
     WORK_ROOT,
     Clock,

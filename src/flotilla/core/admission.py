@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 from flotilla.core import network
-from flotilla.core.plan import TrialPlan
+from flotilla.models.plan import TrialPlan
 from flotilla.platform.base import Capabilities
 
 

@@ -10,8 +10,8 @@ from datetime import datetime, timedelta
 
 from flotilla.core import process
 from flotilla.core.anchor import Anchor
-from flotilla.core.plan import TrialPlan
 from flotilla.core.waiting import Backoff, Expired, describe, run_all, within
+from flotilla.models.plan import TrialPlan
 from flotilla.platform.base import (
     Clock,
     ErrorCategory,

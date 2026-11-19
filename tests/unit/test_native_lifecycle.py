@@ -14,7 +14,7 @@ import pytest
 from flotilla import Flotilla
 from flotilla.config import FlotillaConfig, Storage
 from flotilla.core import labels
-from flotilla.core.plan import TaskSource, TrialPlan
+from flotilla.models.plan import TaskSource, TrialPlan
 from flotilla.native import Dataset, NativeAttempt
 from flotilla.platform.base import (
     ExecResult,

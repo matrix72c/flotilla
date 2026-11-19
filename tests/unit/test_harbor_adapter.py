@@ -14,9 +14,9 @@ from flotilla.cli import main
 from flotilla.compose.task import TaskError
 from flotilla.config import FlotillaConfig
 from flotilla.core import labels
-from flotilla.core.plan import TaskSource
 from flotilla.integrations.harbor import FlotillaEnvironment
 from flotilla.integrations.harbor_source import task_environments
+from flotilla.models.plan import TaskSource
 from flotilla.platform.base import ExecResult, FlotillaError, ProcessSpec
 from flotilla.runtime.environment import Environment
 from flotilla.runtime.types import OpenOptions

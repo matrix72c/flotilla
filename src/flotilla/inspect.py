@@ -19,8 +19,8 @@ from flotilla.compose.plan_task import ImageConfigSource, PlanError
 from flotilla.compose.task import TaskError, find_tasks
 from flotilla.config import FlotillaConfig
 from flotilla.core.admission import admission_errors
-from flotilla.core.plan import TaskSource
 from flotilla.integrations.harbor_source import task_environments
+from flotilla.models.plan import TaskSource
 from flotilla.native.dataset import Dataset, DatasetError
 from flotilla.registry import RegistryError
 from flotilla.runtime.client import plan_for
