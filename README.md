@@ -175,6 +175,7 @@ Then pick a path:
 
 **Extending Flotilla**
 
+- [SDK surface](docs/SDK.md): what may be imported from `flotilla`, `flotilla.native`, and `flotilla.testing`, and the stability commitments.
 - [Integration guide](docs/Integration_Guide.md): use Flotilla from an evaluation runner or RL framework.
 - [Writing a backend](docs/Writing_a_Backend.md): support another sandbox platform.
 - [Architecture](docs/Architecture.md): internals and terminology.

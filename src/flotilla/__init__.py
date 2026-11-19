@@ -5,7 +5,14 @@ from __future__ import annotations
 from flotilla._version import __version__
 from flotilla.deployment import DatasetPeak, Deployment, RuntimeLayers, TaskValidation
 from flotilla.models.plan import TaskSource, TrialPlan
-from flotilla.models.platform import ErrorCategory, ExecOutcomeUnknown, ExecResult, FlotillaError, ProcessStatus
+from flotilla.models.platform import (
+    CommandBusy,
+    ErrorCategory,
+    ExecOutcomeUnknown,
+    ExecResult,
+    FlotillaError,
+    ProcessStatus,
+)
 from flotilla.runtime.client import Flotilla
 from flotilla.runtime.environment import Environment, Process, Service
 from flotilla.runtime.types import (
@@ -23,6 +30,7 @@ __all__ = [
     "AdmissionTimeout",
     "CleanupError",
     "CleanupReport",
+    "CommandBusy",
     "DatasetPeak",
     "Deployment",
     "Environment",

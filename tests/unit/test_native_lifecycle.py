@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import io
 import shutil
-import tarfile
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -16,16 +14,10 @@ from flotilla.config import FlotillaConfig, Storage
 from flotilla.core import labels
 from flotilla.models.plan import TaskSource, TrialPlan
 from flotilla.native import Dataset, NativeAttempt
-from flotilla.platform.base import (
-    ExecResult,
-    FlotillaError,
-    InstanceHandle,
-    InstanceSpec,
-    ProcessSpec,
-    SharedVolume,
-)
+from flotilla.platform.base import FlotillaError, InstanceSpec, SharedVolume
 from flotilla.runtime.manager import Manager
 from flotilla.runtime.types import OpenOptions, RunRequest
+from flotilla.testing.attempt import AttemptHarness, prepared_source, write_task
 from flotilla.testing.planning import DATASET_ROOT, FakeConfigs
 from flotilla.testing.platform import FakePlatform, SharedTree
 from flotilla.testing.runtime import deployment as deployment
@@ -40,156 +32,9 @@ Deployment = tuple[FlotillaConfig, FakePlatform, SharedTree]
 INPUT_KEY = "environment/input"
 
 
-def build_dataset(base: Path, *, verifier: bool = True, shared_verifier: bool = False) -> Path:
-    """One published task: a read-only bind input, an instruction, and optionally hidden tests."""
-    task = base / "dataset" / "ds" / "task-a"
-    files = task / "environment" / "input"
-    (files / "nested").mkdir(parents=True)
-    (files / "data.txt").write_text("static input")
-    (task / "instruction.md").write_text("Solve the task.\n")
-    config = f'[environment]\ndocker_image = "{IMAGE}"\ncpus = 1\nmemory_mb = 128\n'
-    if verifier or shared_verifier:
-        (task / "tests").mkdir()
-        (task / "tests/test.sh").write_text("#!/bin/sh\nexit 0\n")
-    if verifier:
-        config += '[verifier]\nenvironment_mode = "separate"\nenv = {TASK_TOKEN = "native"}\n'
-        # Its own Compose project, so the agent's task input is not in the verifier's sandbox.
-        (task / "tests/docker-compose.yaml").write_text(f"services:\n  main:\n    image: {IMAGE}\n")
-    (task / "task.toml").write_text(config)
-    (task / "environment/docker-compose.yaml").write_text(
-        "services:\n  main:\n    volumes:\n      - ./input:/input:ro\n"
-    )
-    return base / "dataset"
-
-
 def volume_of(spec: InstanceSpec, mount_path: str) -> SharedVolume | None:
     matches = [v for v in spec.volumes if v.mount_path == mount_path]
     return matches[0] if matches else None
-
-
-class NativeHarness:
-    """Fake-platform shims for the consume-only lifecycle, local to these tests.
-
-    Anchor side: emulates the installed helper's `--clear-directory`, `cp -a -- src/. dest`
-    (the one SharedTree does not model) and can inject a mid-create directory failure.
-    Unit side: interprets the verification command (asserting the handoff content),
-    serves output reads and optional-output probes from a side table, and builds
-    real tars for download_dir from the shared tree.
-    """
-
-    def stage_dataset(self, key: str, root: Path) -> None:
-        """Place a dataset copy on the fake shared storage as tree entries for anchor operations."""
-        for path in sorted(root.rglob("*")):
-            entry = f"{key}/{path.relative_to(root).as_posix()}"
-            info = path.lstat()
-            if path.is_dir():
-                self.tree.dirs.add(entry)
-            else:
-                self.tree.files.add(entry)
-                self.platform.tree_contents[entry] = path.read_bytes()
-                self.tree.modes[entry] = oct(info.st_mode & 0o777)
-            self.tree.owners[entry] = f"{info.st_uid}:{info.st_gid}"
-
-    def __init__(self, deployment: Deployment, monkeypatch: pytest.MonkeyPatch) -> None:
-        _, self.platform, self.tree = deployment
-        self.unit_files: dict[tuple[str, str], bytes] = {}
-        self.verification_specs: list[ProcessSpec] = []
-        self.with_optional = False
-        self.workspace_key: str | None = None
-        self.fail_chown_of: str | None = None
-        platform, _tree = self.platform, self.tree
-        original_exec, original_read = platform.exec, platform.read_file
-
-        async def execute(handle: InstanceHandle, proc: ProcessSpec, **kwargs: Any) -> ExecResult:
-            spec = platform.spec_of(handle.iid)
-            argv = proc.argv
-            if spec.labels.get(labels.ROLE) == labels.ROLE_ANCHOR:
-                if argv[:2] == ("/.flotilla/bin/busybox", "find") and argv[3:] == ("-mindepth", "1", "-delete"):
-                    return self._helper(argv)
-                if argv[0] == "cp" and argv[-2].endswith("/."):
-                    return self._copy_contents(argv)
-                if argv[0] == "chown" and self.fail_chown_of and argv[-1].endswith(self.fail_chown_of):
-                    return ExecResult(1, b"", b"injected failure")
-                return await original_exec(handle, proc, **kwargs)
-            return self._unit_exec(spec, handle.iid, proc)
-
-        async def read(handle: InstanceHandle, path: str, **kwargs: Any) -> bytes:
-            data = self.unit_files.get((handle.iid, path))
-            if data is not None:
-                return data
-            return await original_read(handle, path, **kwargs)
-
-        monkeypatch.setattr(platform, "exec", execute)
-        monkeypatch.setattr(platform, "read_file", read)
-
-    # anchor-side emulation
-
-    def _helper(self, argv: tuple[str, ...]) -> ExecResult:
-        rel = self.tree._rel
-        key = rel(argv[2], write=True)
-        for entries in (self.tree.dirs, self.tree.files):
-            entries.difference_update(k for k in entries if k.startswith(key + "/"))
-        for book in (self.tree.modes, self.tree.owners, self.platform.tree_contents):
-            for key_part in [k for k in book if k.startswith(key + "/")]:
-                del book[key_part]
-        return ExecResult(0, b"", b"")
-
-    def _copy_contents(self, argv: tuple[str, ...]) -> ExecResult:
-        src, dst = self.tree._rel(argv[-2].removesuffix("/.")), self.tree._rel(argv[-1], write=True)
-        for entries in (self.tree.dirs, self.tree.files):
-            entries.update(dst + p[len(src) :] for p in list(entries) if p.startswith(src + "/"))
-        for book in (self.tree.modes, self.tree.owners):
-            book.update({dst + k[len(src) :]: v for k, v in list(book.items()) if k.startswith(src + "/")})
-        contents = self.platform.tree_contents
-        contents.update({dst + k[len(src) :]: v for k, v in list(contents.items()) if k.startswith(src + "/")})
-        return ExecResult(0, b"", b"")
-
-    # unit-side emulation
-
-    def _unit_exec(self, spec: InstanceSpec, iid: str, proc: ProcessSpec) -> ExecResult:
-        argv = proc.argv
-        if argv == ("true",):
-            return ExecResult(0, b"", b"")
-        if len(argv) == 3 and argv[:2] == ("test", "-f"):
-            return ExecResult(0 if (iid, argv[2]) in self.unit_files else 1, b"", b"")
-        if argv[0] == "/.flotilla/bin/busybox":
-            if argv[1:3] == ("tar", "-cf"):
-                source = argv[5]
-                volume = next((v for v in spec.volumes if v.mount_path == source), None)
-                assert volume is not None, f"download source {source} is not a mounted volume"
-                self.unit_files[(iid, argv[3])] = self._tar_of(volume.key)
-                return ExecResult(0, b"", b"")
-            if argv[1] in ("rm", "mkdir", "sh"):
-                # sh -c covers the runtime's own start-up bookkeeping (log file, ownership).
-                return ExecResult(0, b"", b"")
-            raise AssertionError(f"unexpected busybox command: {argv!r}")
-        if argv == VERIFY_COMMAND:
-            self.verification_specs.append(proc)
-            answer = self.platform.tree_contents.get(f"{self.workspace_key}/handoff/agent/answer.txt")
-            if answer is None:
-                # A shared verifier grades in main, where the artifact already lives.
-                answer = self.platform.tree_contents.get(f"{self.workspace_key}/artifacts/agent/answer.txt")
-            assert answer is not None, "verifier did not receive the agent artifact through the handoff"
-            self.unit_files[(iid, "/logs/verifier/reward.txt")] = b"reward:" + answer
-            if self.with_optional:
-                # Both reward forms are optional; a verifier may write either, or both.
-                self.unit_files[(iid, "/logs/verifier/reward.json")] = b'{"reward": 1}'
-
-            return ExecResult(0, b"checked\n", b"")
-        raise AssertionError(f"unexpected unit execution: {argv!r}")
-
-    def _tar_of(self, prefix: str) -> bytes:
-        buffer = io.BytesIO()
-        with tarfile.open(fileobj=buffer, mode="w") as archive:
-            for key in sorted(self.platform.tree_contents):
-                if not key.startswith(prefix + "/"):
-                    continue
-                info = tarfile.TarInfo(key[len(prefix) + 1 :])
-                info.mode = 0o644
-                payload = self.platform.tree_contents[key]
-                info.size = len(payload)
-                archive.addfile(info, io.BytesIO(payload))
-        return buffer.getvalue()
 
 
 def prepare(
@@ -200,16 +45,19 @@ def prepare(
     *,
     verifier: bool = True,
     shared_verifier: bool = False,
-) -> tuple[FlotillaConfig, FakePlatform, SharedTree, NativeHarness, TaskSource]:
-    """Publish a dataset, stage a separate platform copy, and install the harness."""
+) -> tuple[FlotillaConfig, FakePlatform, SharedTree, AttemptHarness, TaskSource]:
+    """Write one task, publish it on the fake shared tree, and install the attempt harness."""
     cfg, platform, tree = deployment
-    root = build_dataset(tmp_path / name, verifier=verifier, shared_verifier=shared_verifier)
-    platform_copy = tmp_path / f"platform-copy-{name}"
-    shutil.copytree(root, platform_copy, symlinks=True)
-    harness = NativeHarness(deployment, monkeypatch)
-    # A published dataset lives on a declared read-only input root (`inputs.datasets`).
-    harness.stage_dataset(tree.input_key(DATASET_ROOT, name), platform_copy)
-    source = Dataset(root, name, root=DATASET_ROOT).source("ds/task-a")
+    harness = AttemptHarness(platform, tree, monkeypatch)
+    source = prepared_source(
+        tmp_path,
+        platform,
+        tree,
+        name=name,
+        image=IMAGE,
+        verifier=verifier,
+        shared_verifier=shared_verifier,
+    )
     return cfg, platform, tree, harness, source
 
 
@@ -297,11 +145,7 @@ async def test_attempt_isolation_guards(
     tmp_path: Path, deployment: Deployment, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     cfg, _platform, tree, harness, source = prepare(tmp_path, deployment, monkeypatch)
-    plain_root = build_dataset(tmp_path / "plain-src", verifier=False)
-    plain_copy = tmp_path / "plain-copy"
-    shutil.copytree(plain_root, plain_copy, symlinks=True)
-    harness.stage_dataset(tree.input_key(DATASET_ROOT, "plain"), plain_copy)
-    plain = Dataset(plain_root, "plain", root=DATASET_ROOT).source("ds/task-a")
+    plain = prepared_source(tmp_path, harness.platform, tree, name="plain", verifier=False)
 
     async with Flotilla(deployment=cfg) as fleet:
         attempt = await NativeAttempt.create(fleet, source)
@@ -493,10 +337,10 @@ async def test_releases_on_named_read_only_input_roots(
     inputs = {"datasets": Storage(host_path="@user:owner"), "extra": Storage(host_path="@user:other")}
     cfg = cfg.model_copy(update={"inputs": inputs})
     tree.dirs.update({tree.input_key("datasets"), tree.input_key("extra")})
-    published = build_dataset(tmp_path / "build", verifier=True)
+    published = write_task(tmp_path / "build", image=IMAGE, verifier=True)
     platform_copy = tmp_path / "platform-copy"
     shutil.copytree(published, platform_copy, symlinks=True)
-    harness = NativeHarness((cfg, platform, tree), monkeypatch)
+    harness = AttemptHarness(platform, tree, monkeypatch)
     # The same dataset content on both roots: each attempt mounts its own root.
     harness.stage_dataset(tree.input_key("datasets", "tb/r1"), platform_copy)
     harness.stage_dataset(tree.input_key("extra", "tb/r1"), platform_copy)

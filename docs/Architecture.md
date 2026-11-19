@@ -15,17 +15,40 @@
 | Dataset | A directory of task directories, declared by name and bound to a local and a platform root |
 | Task source | Where one task's files are, on the client and on the platform; both, because neither side can infer the other |
 | Attempt workspace | Launch-owned private role state, verification staging and artifact handoff directories |
+| Agent phase | The part of an attempt the agent acts in: from the first `open` until `end_agent_phase` |
+| Grading | The phase after it: `stage_verification` makes the tests visible, `open_verification_role` runs the command that scores the agent's artifacts |
 | Isolation evidence | What `flotilla probe` measured, in memory for the length of the run: seven properties a deployment can lack silently, plus what was observed for each |
 | Waiver | An isolation property the operator accepts running without, named in `security.accept_insecure`; the probe exits nonzero on any gap not named there |
 | execd | The OpenSandbox daemon inside each sandbox that runs commands and transfers files |
 | GC | Explicit collection of resources left by crashed launches (`flotilla gc`) |
+
+## Layers
+
+Bottom up; each layer may import the layers below it, and the import contracts in
+`pyproject.toml` (CI runs `lint-imports`) refuse the rest:
+
+| Layer | What it owns | Enforced by |
+|---|---|---|
+| `models` | The vocabulary every layer passes around: plans, sources, verification shapes, errors | `models is the bottom of the graph` |
+| `platform` | The sandbox protocol (`platform.base`) and the backends behind it | `platform does not depend on core` |
+| `core` | Trial lifecycle: labels, renewal, reconciliation, cleanup, capacity | `core depends only on platform.base` |
+| `compose` | Task resolution: Compose project in, `TrialPlan` out; offline and stateless | `compose resolves tasks and nothing else`, `offline path (compose/scan) does not call the platform` |
+| `runtime` | Admission, environment handles, monitoring, the maintenance loop | `runtime does not plan or grade tasks`, `runtime does not import adapters`, `runtime does not inspect or scan` |
+| `native` | Graded attempts: planning per role plus the two-phase lifecycle over the runtime | `native drives the runtime, not the platform` |
+| `config` | The deployment spec; resolves datasets eagerly, plans tasks lazily through `plan_for` | the `compose` and `runtime` contracts above, read from below |
+| `deployment` | The consumer entry point; wraps `config` in `plan`, `plan_environment`, clients, validation | `integrations, probe, cli, and testing are outermost` |
+| integrations, probe, cli, testing | Consumers of the whole stack; nothing internal imports them | same contract |
+
+Two edges are deliberately lazy rather than forbidden: `config` imports `compose` and
+`deployment` imports `compose.task` only inside the functions that need them, so importing a
+spec (for `flotilla gc`, a probe, or metadata use) does not pull the Compose parser in.
 
 ## Components
 
 ```mermaid
 flowchart LR
     Dataset[Published dataset] --> Source[TaskSource: client path + platform key]
-    Source --> Plan[plan_task: TrialPlan]
+    Source --> Plan[FlotillaConfig.plan_for: TrialPlan]
     Registry[(Registry image configs)] --> Plan
     Plan --> Attempt[NativeAttempt]
     Attempt --> Workspace[Private platform workspace]
@@ -38,7 +61,7 @@ flowchart LR
     Harbor[Harbor adapter] --> API
 ```
 
-`compose` reads a task directory and resolves it into a `TrialPlan`: it loads the Compose project itself, normalizes it into Flotilla's supported subset with a finding per rejected field, and reads each image's config from the registry by digest. This is a local computation over immutable inputs, so it writes nothing and can be run over a whole dataset before any sandbox exists. `NativeAttempt` resolves a task into one plan per role plus how it is graded, and opens them. See [Native tasks](Native_Tasks.md) for the immutable-publication trust boundary.
+`compose` reads a task directory and resolves it into a `TrialPlan`: it loads the Compose project itself, normalizes it into Flotilla's supported subset with a finding per rejected field, and reads each image's config from the registry by digest. `FlotillaConfig.plan_for` is the single planning entry point — it binds a task to the deployment's shape and resources — and `Deployment.plan` wraps it for consumers. This is a local computation over immutable inputs, so it writes nothing and can be run over a whole dataset before any sandbox exists. `NativeAttempt` resolves a task into one plan per role plus how it is graded, and opens them. See [Native tasks](Native_Tasks.md) for the immutable-publication trust boundary.
 
 `runtime` owns admission, environment handles, monitoring, and cleanup. Each client has one maintenance loop in a separate thread. Diagnostic callbacks use a bounded dispatcher thread; local file reads use owned thread work that must settle before their directory is removed.
 
@@ -54,4 +77,4 @@ The Anchor contains installed Flotilla and filesystem helpers, not a Compose exe
 
 The anchor pauses new creates and directory operations once renewal is overdue by its grace period and resumes when a renewal succeeds; the launch and its trials are lost only when the anchor's TTL could have expired. GC uses two observations and list-visibility bounds to avoid collecting a live owner. Explicit GC handles abandoned resources after crashes; it is not a scheduler inside the runtime.
 
-Reading entry points: `runtime/client.py`, `runtime/workspace.py`, `native/runtime.py`, `native/dataset.py`, `compose/plan_task.py`, `core/trial.py`, `core/reaper.py`, and `platform/base.py`. The public `flotilla.testing` package provides clocks, fake registries, and a deliberately limited fake platform for downstream contract tests; it ships in the wheel, and runtime packages never import it. See [the API](Runtime_API.md) for user contracts, [OpenSandbox](backends/opensandbox.md) for protocol details, and [integration guide](Integration_Guide.md) for the testing surface.
+Reading entry points: `runtime/client.py`, `runtime/workspace.py`, `native/runtime.py`, `native/dataset.py`, `compose/plan_task.py`, `core/trial.py`, `core/reaper.py`, and `platform/base.py`. The public `flotilla.testing` package provides clocks, fake registries, a deliberately limited fake platform, and an attempt harness that drives a real `NativeAttempt` through both grading phases, for downstream contract tests; it ships in the wheel, and runtime packages never import it. See [the SDK surface](SDK.md) for what may be imported and the stability commitments, [the API](Runtime_API.md) for user contracts, [OpenSandbox](backends/opensandbox.md) for protocol details, and [integration guide](Integration_Guide.md) for the testing surface.

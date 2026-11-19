@@ -172,7 +172,7 @@ A process that dies without closing its client leaves its sandboxes and director
 
 ## Testing your integration
 
-Install the `testing` extra and use the public helpers in `flotilla.testing`. They run planning, the client, and the runtime against an in-memory platform and a fake registry, without a deployment, Docker, or credentials:
+Install the `testing` extra and use the public helpers in `flotilla.testing`. They run planning, the client, the runtime, and the attempt lifecycle against an in-memory platform and a fake registry, without a deployment, Docker, or credentials:
 
 ```python
 import pytest
@@ -203,3 +203,5 @@ async def test_episode_releases_its_environment(
 unit contracts, not a production task input or a platform-acceptance result.
 
 `FakePlatform` lets tests inject faults (`inject_fault`, `inject_create_then_fail`), add latency, replace the command handler (`set_exec_handler`), and lose background processes, so you can test your handling of the outcomes above. It is a test double, not a production backend or an isolation boundary, and it deliberately fails on operations it does not model.
+
+`flotilla.testing.attempt` drives a real `NativeAttempt` on the fake platform: `prepared_source` writes a task with hidden tests and publishes it on the fake shared storage, and `AttemptHarness` emulates the anchor's staging commands and the grading command. An integration's episode loop — including `verify`, or the three phase primitives called by hand — runs end to end with no platform, registry, or network. What a [checked](SDK.md) surface import is and which parts may move between versions is the SDK surface doc's business; this guide's snippets use it.
