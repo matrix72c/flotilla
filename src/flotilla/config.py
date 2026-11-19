@@ -327,6 +327,14 @@ class ResourceDefaults(_Model):
             for name, unit in manifest.units.items()
         }
 
+    def for_services(self, task: str, declared: Mapping[str, Mapping[str, str]]) -> dict[str, Resources]:
+        """The same allocation from what each service declares, with no manifest in between.
+
+        Takes the declarations rather than a `Project` so that configuration stays free of the
+        Compose model: the runtime imports this module and must not pull the parser in with it.
+        """
+        return {name: Resources(**self.effective(task, name, dict(values))) for name, values in declared.items()}
+
 
 class Prepare(_Model):
     """Attempt-local compilation and optional image-cache prewarming."""
