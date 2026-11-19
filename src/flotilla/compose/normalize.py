@@ -182,10 +182,13 @@ def normalize(compose: Mapping[str, Any]) -> Project:
     used = {n for s in services.values() for n in s.networks}
     if DEFAULT_NETWORK in used and DEFAULT_NETWORK not in network_defs:
         network_defs[DEFAULT_NETWORK] = NetworkDef()
+    # A declared network or volume nothing mounts is dropped, as Compose drops it: it would
+    # otherwise reserve attempt-owned storage no service can reach.
+    mounted = {m.source for s in services.values() for m in s.volumes if m.kind == "volume"}
     return Project(
         services=services,
         networks={k: v for k, v in network_defs.items() if k in used},
-        volumes=frozenset(volumes),
+        volumes=frozenset(volumes & mounted),
         findings=tuple(c.findings),
     )
 
