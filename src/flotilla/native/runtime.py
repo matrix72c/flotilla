@@ -16,6 +16,7 @@ from flotilla.compose.verification import artifacts_of, verification_of
 from flotilla.models.plan import TaskSource, TrialPlan
 from flotilla.models.platform import SharedVolume
 from flotilla.models.verification import Artifact, Verification, check_against_plans
+from flotilla.runtime.client import with_options
 from flotilla.runtime.types import OpenOptions
 from flotilla.runtime.workspace import Workspace
 
@@ -119,15 +120,18 @@ class NativeAttempt:
         Pure and synchronous, so a caller can resolve a whole dataset and find the tasks that do
         not plan before spending a single sandbox on any of them.
         """
-        parameters = {**fleet.config.runtime_params, **(options.parameters if options else {})}
+        # Planning reads the deployment's shape, not the client's runtime: `fleet.config` is the
+        # resolved-against copy, `fleet.image_configs` the cache this fleet already warms.
+        cfg = fleet.config
+        parameters = {**cfg.runtime_params, **(options.parameters if options else {})}
         environments = task_environments(source.local, compose_environment=parameters)
         if len(environments) > 2:
             raise ValueError("a task has at most two environments: the agent's and a separate verifier's")
         roles = ["main"] if len(environments) == 1 else ["main", "verifier"]
-        plans = {
-            role: fleet.plan_environment(environment, source, options)
-            for role, environment in zip(roles, environments, strict=True)
-        }
+        plans = {}
+        for role, environment in zip(roles, environments, strict=True):
+            plan = cfg.plan_for(environment, source, fleet.image_configs)
+            plans[role] = with_options(plan, options or OpenOptions())
         config = _task_config(source.local)
         has_tests = (source.local / TESTS_DIR).is_dir()
         verification = verification_of(config, roles=plans, has_tests=has_tests)

@@ -41,6 +41,11 @@ from flotilla.resources import cpu, memory
 from flotilla.share.release import BUILTIN_RELEASE, BUILTIN_RELEASE_SHA256
 
 if TYPE_CHECKING:
+    # Modules, not packages: importing this file must not pull the Compose parser in at runtime.
+    from flotilla.compose.plan_task import ImageConfigSource
+    from flotilla.compose.task import HarborTask
+    from flotilla.models.plan import TaskSource, TrialPlan
+
     # The module, not the package: finding a dataset must not pull the Harbor adapters in.
     from flotilla.native.dataset import Dataset
 
@@ -649,6 +654,34 @@ class FlotillaConfig(_Model):
                 "root": binding.input or WORK_ROOT,
             }
         return resolve(bindings, storage=self.storage.settings(), inputs=self.input_settings())
+
+    def plan_for(self, task: HarborTask, source: TaskSource, configs: ImageConfigSource) -> TrialPlan:
+        """Resolve one task into the plan `open` would run, under this deployment's shape.
+
+        The one place a task directory becomes a trial plan: `Deployment.plan_environment`,
+        `NativeAttempt.resolve` and `flotilla inspect` all land here, so a task that plans for one
+        plans for all of them. What one run decides -- resource overrides, external and workspace
+        mounts -- is not folded in; `flotilla.runtime.client.with_options` applies it, both to a
+        plan resolved here and inside `open`.
+
+        Reads image configs through `configs` and nothing else remote. Pure otherwise, and
+        synchronous, so a caller can plan a whole dataset before spending a sandbox on any of it.
+        """
+        from flotilla.compose.plan_task import AgentOverlay as TaskOverlay
+        from flotilla.compose.plan_task import plan_task
+
+        declared = {name: svc.resources for name, svc in task.project.services.items()}
+        overlay = self.agent_overlay
+        return plan_task(
+            task,
+            source,
+            configs=configs,
+            resources=self.resources.for_services(task.name, declared),
+            overlay=TaskOverlay(
+                env=overlay.env,
+                services=None if overlay.services is None else frozenset(overlay.services),
+            ),
+        )
 
     def platform_capabilities(self) -> Capabilities:
         """What this deployment may be asked for.

@@ -12,12 +12,10 @@ import uuid
 from collections.abc import AsyncIterator, Callable, Coroutine, Mapping
 from contextlib import asynccontextmanager, suppress
 from types import TracebackType
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-from flotilla.compose.plan_task import AgentOverlay, ImageConfigSource, plan_task
-from flotilla.compose.task import HarborTask, load_task
 from flotilla.config import FlotillaConfig
-from flotilla.models.plan import TaskSource, TrialPlan
+from flotilla.models.plan import TrialPlan
 from flotilla.platform.base import Resources
 from flotilla.registry import ImageConfigs
 from flotilla.resources import cpu, memory
@@ -36,16 +34,13 @@ from flotilla.runtime.types import (
 )
 from flotilla.runtime.worker import Worker
 
-if TYPE_CHECKING:
-    pass
-
 
 def with_options(plan: TrialPlan, options: OpenOptions) -> TrialPlan:
     """Apply what a single run decides to a plan that was resolved without it.
 
-    `plan` resolves a task into a trial; these are the per-run choices `plan` folds in when it
-    resolves one itself. A caller handing in an already-resolved plan makes the same choices
-    through its `OpenOptions`, so they are applied here rather than silently dropped.
+    Planning resolves a task into a trial; these are the per-run choices a resolver folds in when
+    it plans for one open. A caller handing an already-resolved plan to `open` makes the same
+    choices through its `OpenOptions`, so they are applied here rather than silently dropped.
     """
     plan = with_resources(plan, options.resources)
     if options.external_mounts:
@@ -66,33 +61,6 @@ def with_options(plan: TrialPlan, options: OpenOptions) -> TrialPlan:
             },
         )
     return plan
-
-
-def plan_for(
-    cfg: FlotillaConfig,
-    task: HarborTask,
-    source: TaskSource,
-    configs: ImageConfigSource,
-    options: OpenOptions | None = None,
-) -> TrialPlan:
-    """Resolve `task` into the plan `open` would run, against this deployment's overlay and resources.
-
-    The one place a task directory becomes a trial plan: `Flotilla.plan_environment` and `flotilla
-    inspect` both land here, so a task that plans for one plans for the other.
-    """
-    declared = {name: svc.resources for name, svc in task.project.services.items()}
-    overlay = cfg.agent_overlay
-    plan = plan_task(
-        task,
-        source,
-        configs=configs,
-        resources=cfg.resources.for_services(task.name, declared),
-        overlay=AgentOverlay(
-            env=overlay.env,
-            services=None if overlay.services is None else frozenset(overlay.services),
-        ),
-    )
-    return with_options(plan, options or OpenOptions())
 
 
 def with_resources(plan: TrialPlan, overrides: Mapping[str, Mapping[str, str]]) -> TrialPlan:
@@ -210,26 +178,14 @@ class Flotilla:
         resource = self._deployment.anchor_settings(workspace=True).resources
         return ResourceReservation({"anchor": {"cpu": resource.cpu, "memory": resource.memory}})
 
-    def plan(self, source: TaskSource, options: OpenOptions | None = None) -> TrialPlan:
-        """Resolve a task directory into the trial `open` would create, without creating it.
+    async def open(self, plan: TrialPlan, options: OpenOptions | None = None) -> Environment:
+        """Open an environment for a plan resolved from a task directory. Builds and uploads nothing.
 
-        Separate from `open` so a caller can check a whole dataset before spending GPU time on
-        it, and so the cost of planning is visible rather than hidden inside an await.
+        The plan the caller resolved still needs this run's own choices folded in -- resource
+        overrides, external and workspace mounts from `options` -- which happens here.
         """
-        options = options or OpenOptions()
-        parameters = {**self._deployment.runtime_params, **options.parameters}
-        return self.plan_environment(load_task(source.local, compose_environment=parameters), source, options)
-
-    def plan_environment(self, task: HarborTask, source: TaskSource, options: OpenOptions | None = None) -> TrialPlan:
-        """The same, for a task directory already read: a graded task reads it once per role."""
-        return plan_for(self._deployment, task, source, self.image_configs, options)
-
-    async def open(self, source: TaskSource | TrialPlan, options: OpenOptions | None = None) -> Environment:
-        """Open an environment for a task directory, or for a plan already resolved from one."""
         options = copy.deepcopy(options or OpenOptions())
-        # A plan the caller already resolved still needs this run's own choices folded in;
-        # resolving a task source here does that as part of planning it.
-        plan = with_options(source, options) if isinstance(source, TrialPlan) else self.plan(source, options)
+        plan = with_options(plan, options)
         admission = options.admission_timeout or self._deployment.limits.admission_timeout
         startup = options.startup_timeout or self._deployment.runtime.startup_timeout_s
         lifetime = options.lifetime or self._deployment.runtime.run_timeout_s
@@ -257,10 +213,8 @@ class Flotilla:
             raise
 
     @asynccontextmanager
-    async def environment(
-        self, source: TaskSource | TrialPlan, options: OpenOptions | None = None
-    ) -> AsyncIterator[Environment]:
-        env = await self.open(source, options)
+    async def environment(self, plan: TrialPlan, options: OpenOptions | None = None) -> AsyncIterator[Environment]:
+        env = await self.open(plan, options)
         try:
             yield env
         except BaseException as primary:

@@ -28,6 +28,7 @@ deployment.bind_credentials("private.env")  # binds only credential_env, nothing
 fleet = deployment.client(on_event=on_event)
 datasets = deployment.datasets()            # declared [datasets.<name>] by name
 sources = [datasets["demo"].source(key) for key in datasets["demo"].tasks()]
+plan = deployment.plan(sources[0])          # resolve one task locally; creates nothing
 budget = deployment.setup_budget()          # worst case from create to started services, seconds
 peak = deployment.dataset_peak(sources)     # local reservation maxima; creates nothing
 layers = deployment.runtime_layers()        # [agent_runtime] as storage keys; names are your vocabulary
