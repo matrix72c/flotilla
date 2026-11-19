@@ -211,7 +211,6 @@ The attempt's own management sandbox: the launch anchor that compiles attempt-ow
 | Key | Default | Meaning |
 |---|---|---|
 | `concurrency` | `4` | Tasks a launch anchor works on concurrently |
-| `workspace_command` | `["python3", "-I", "-m", "flotilla.integrations.workspace"]` | Helper in the trusted management image; the matching Flotilla install is required and never installed automatically |
 | `workspace_timeout` | `1800` | Total remote budget for that helper |
 | `management_profile` | `"default"` | `"management"` selects the trusted backend-specific management overrides for workspace anchors only; OpenSandbox requires nonempty `management_extensions` |
 | `management_resources` | unset (`0.5` CPU / `512Mi`) | Optional `{cpu, memory}` allocation for workspace anchors only |

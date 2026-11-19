@@ -29,7 +29,6 @@ Each phase of an open has its own budget. Client start (once per client) is boun
 
 ## Platform metadata read recovery
 
-`await fleet.describe_tasks(task_keys)` reads instruction/config metadata from native tasks without creating attempts. `await fleet.describe_task_resources(task_keys, runtime_params=...)` inspects declared resources. The helper runs in the launch anchor built from `reaper.anchor_image`, invoked with `prepare.workspace_command`, so that image must contain the matching Flotilla install. Inputs remain immutable throughout a run; metadata reuse does not deduplicate dataset rows or rename task IDs.
 
 The helper recovers actual `OSError(ESTALE)` in native description and explicit source-path/resource-discovery reads. Each logical read gets at most five attempts, with 0.5, 1, 2 and 4 second delays. No new retry is admitted after 30 seconds for that read, and one metadata request (at most 128 unique keys) shares 15 seconds of added sleep. A failed description rereads and reparses metadata directly, without constructing a filesystem Harbor `Task`; previously successful tasks are not reread. Metadata-only reads do not validate unrelated payload trees. Resource inspection validates the private copy it works on, and enumeration errors there propagate instead of accepting an incomplete tree. No partial metadata batch is published.
 

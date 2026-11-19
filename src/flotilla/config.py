@@ -348,15 +348,7 @@ class Prepare(_Model):
     # Nonsecret connection settings only; credentials belong in explicit RO mounts.
     management_env: dict[str, str] = Field(default_factory=dict)
     concurrency: PositiveInt = 4
-    workspace_command: tuple[str, ...] = ("python3", "-I", "-m", "flotilla.integrations.workspace")
     workspace_timeout: PositiveFloat = 1800.0
-
-    @field_validator("workspace_command")
-    @classmethod
-    def _command(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        if not value or any(not part for part in value):
-            raise ValueError("workspace_command must be a nonempty argv")
-        return value
 
 
 class ProbeTarget(_Model):
