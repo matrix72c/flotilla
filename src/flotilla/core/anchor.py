@@ -343,28 +343,14 @@ class Anchor:
         be misread as "missing". Only "command ran but reported No such file" counts as missing; any other non-zero
         exit raises as a fault instead of being taken as an answer.
         """
-        self.ensure_alive(stage)
-        assert self._handle is not None
-        proc = ProcessSpec(
-            argv=("ls", "-d", "--", self._path(key, root)),
-            uid=0,
-            gid=0,
-            cwd="/",
-            env=_ENV,
-            timeout_s=self._settings.exec_timeout_s,
-        )
-        try:
-            async with self._slots:
-                result = await self._platform.exec(self._handle, proc)
-        except FlotillaError as exc:
-            raise at_stage(exc, stage) from exc
+        result = await self._run(("ls", "-d", "--", self._path(key, root)), stage, read_only=True, check=False)
         if result.exit_code == 0:
             return True
         stderr = result.stderr.decode(errors="replace")
-        if "No such file" in stderr or ("not found" in stderr and self._path(key) in stderr):
+        if "No such file" in stderr or ("not found" in stderr and self._path(key, root) in stderr):
             return False
         raise FlotillaError(
-            f"anchor ls -d {self._path(key)} exited {result.exit_code}: {stderr.strip()[-300:]}",
+            f"anchor ls -d {self._path(key, root)} exited {result.exit_code}: {stderr.strip()[-300:]}",
             stage=stage,
             category=ErrorCategory.TRANSIENT,
             retryable=True,
@@ -383,12 +369,60 @@ class Anchor:
         await self._run(("chmod", f"{mode:04o}", "--", self._path(key)), stage)
 
     async def stat(self, key: str, *, stage: Stage) -> FileStat:
-        """Read numeric metadata without losing special permission bits."""
-        result = await self._run(
-            ("/.flotilla/bin/busybox", "stat", "-c", "%a %u %g %s", "--", self._path(key)), stage, read_only=True
-        )
+        """Read numeric metadata without losing special permission bits.
+
+        Retries the transport when the outcome is unknown or transiently failed: `stat` is side-effect-free, so
+        an unknown response can safely be repeated for this read (Runtime_API.md documents the cap: five
+        attempts, 0.5/1/2/4 second delays, 30-second retry-admission window). Command exit failures and
+        malformed output are not retried. Cancellation or anchor deactivation interrupts the recovery wait.
+        """
+        deadline = self._clock.monotonic() + 30.0
+        delays = (0.5, 1.0, 2.0, 4.0)
+        result: ExecResult | None = None
+        for attempt in range(5):
+            try:
+                result = await self._run(
+                    ("/.flotilla/bin/busybox", "stat", "-c", "%a %u %g %s", "--", self._path(key)),
+                    stage,
+                    read_only=True,
+                    check=False,
+                )
+            except FlotillaError as exc:
+                # `_run` restages the error (a copy when the stage differs) with the original as `__cause__`; an
+                # unknown command outcome is recognizable in either form.
+                unknown = isinstance(exc, ExecOutcomeUnknown) or isinstance(exc.__cause__, ExecOutcomeUnknown)
+                recoverable = unknown or (
+                    exc.retryable and exc.category in (ErrorCategory.TRANSIENT, ErrorCategory.RATE_LIMITED)
+                )
+                if not recoverable:
+                    raise
+                # This bounds retry admission, not the duration of an in-flight remote call.
+                if attempt < len(delays) and self._clock.monotonic() + delays[attempt] < deadline:
+                    try:
+                        await within(self._clock, None, self._clock.sleep(delays[attempt]), abort=(self.deactivated,))
+                    except Aborted:
+                        raise self.lost(stage) from None
+                    if self._clock.monotonic() < deadline:
+                        continue
+                exc.add_note(
+                    f"stat transport recovery exhausted after {attempt + 1} attempts (5 attempts / 30s admission limit)"
+                )
+                raise
+            else:
+                if attempt:
+                    log.warning("Anchor stat transport recovered after %d attempts", attempt + 1)
+                break
+        assert result is not None
         if result.timed_out:
             raise FlotillaError("anchor stat timed out", stage=stage, category=ErrorCategory.TRANSIENT, retryable=True)
+        if result.exit_code != 0:
+            stderr = result.stderr.decode(errors="replace").strip()[-300:]
+            raise FlotillaError(
+                f"anchor stat {self._path(key)} exited {result.exit_code}: {stderr}",
+                stage=stage,
+                category=ErrorCategory.TRANSIENT,
+                retryable=True,
+            )
         try:
             mode, uid, gid, size = result.stdout.decode("ascii").split()
             values = FileStat(int(mode, 8), int(uid), int(gid), int(size))
@@ -428,7 +462,11 @@ class Anchor:
         timeout_s: float | None = None,
         env: dict[str, str] | None = None,
         read_only: bool = False,
+        check: bool = True,
     ) -> ExecResult:
+        """Run one anchor command once. `read_only` refuses (instead of waiting) while the launch is paused;
+        `check=False` returns a non-zero exit to the caller, which interprets the exit code itself (`stat`,
+        `exists`). Transport errors are staged and raised; only `stat` retries them."""
         if read_only:
             self.ensure_alive(stage)
         else:
@@ -442,40 +480,13 @@ class Anchor:
             env=_ENV if env is None else env,
             timeout_s=self._settings.exec_timeout_s if timeout_s is None else timeout_s,
         )
-        # Only stat opts in: an unknown response can safely be repeated for this
-        # read, but never for an arbitrary management command or a filesystem write.
-        # This bounds retry admission, not the duration of an in-flight remote call.
-        deadline = self._clock.monotonic() + 30.0
-        delays = (0.5, 1.0, 2.0, 4.0)
-        for attempt in range(5):
-            self.ensure_alive(stage)
-            try:
-                result = await within(self._clock, None, self._exec(proc), abort=(self.deactivated,))
-            except Aborted:
-                raise self.lost(stage) from None
-            except FlotillaError as exc:
-                recoverable = isinstance(exc, ExecOutcomeUnknown) or (
-                    exc.retryable and exc.category in (ErrorCategory.TRANSIENT, ErrorCategory.RATE_LIMITED)
-                )
-                if not read_only or not recoverable:
-                    raise at_stage(exc, stage) from exc
-                if attempt < len(delays) and self._clock.monotonic() + delays[attempt] < deadline:
-                    try:
-                        await within(self._clock, None, self._clock.sleep(delays[attempt]), abort=(self.deactivated,))
-                    except Aborted:
-                        raise self.lost(stage) from None
-                    if self._clock.monotonic() < deadline:
-                        continue
-                error = at_stage(exc, stage)
-                error.add_note(
-                    f"stat transport recovery exhausted after {attempt + 1} attempts (5 attempts / 30s admission limit)"
-                )
-                raise error from exc
-            else:
-                if attempt:
-                    log.warning("Anchor stat transport recovered after %d attempts", attempt + 1)
-                break
-        if result.exit_code != 0:
+        try:
+            result = await within(self._clock, None, self._exec(proc), abort=(self.deactivated,))
+        except Aborted:
+            raise self.lost(stage) from None
+        except FlotillaError as exc:
+            raise at_stage(exc, stage) from exc
+        if check and result.exit_code != 0:
             stderr = result.stderr.decode(errors="replace").strip()[-500:]
             raise FlotillaError(
                 f"anchor command {' '.join(argv)} exited {result.exit_code}: {stderr}",
