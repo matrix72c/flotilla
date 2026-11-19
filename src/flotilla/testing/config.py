@@ -17,6 +17,8 @@ def config_data(**sections: Any) -> dict[str, Any]:
             "network": {"sandbox_cidrs": ["10.0.0.0/16"], "platform_cidrs": ["169.254.169.254/32"]},
         },
         "storage": {"host_path": "/mnt/shared"},
+        # A published dataset is a read-only input root: that is where a task's files may live.
+        "inputs": {"datasets": {"host_path": "/mnt/datasets"}},
         "share": {"release": "2026-10-07.1", "release_sha256": SHA},
         "network": {"external": ["gateway.example.com", "10.20.0.0/24"]},
         "reaper": {"anchor_image": "reg/flotilla@sha256:" + "a" * 64},

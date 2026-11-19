@@ -20,7 +20,6 @@ uv run ruff format --check
 uv run mypy
 uv run lint-imports
 uv run pytest
-uv run --extra harbor --frozen pytest tests/unit/test_harbor_adapter.py tests/unit/test_harbor_trial.py
 ```
 
 Unit tests need local asyncio sockets but no deployment, credentials, or Docker. Tests against a real deployment live in `tests/contract/` and are run explicitly by maintainers; see [OpenSandbox compatibility verification](docs/backends/opensandbox.md#compatibility-verification).
@@ -30,7 +29,7 @@ Unit tests need local asyncio sockets but no deployment, credentials, or Docker.
 [Architecture](docs/Architecture.md) describes the components and terminology. A few boundaries are enforced by Ruff and import-linter:
 
 - `core` depends only on `platform.base` and reads time through an injected `Clock`, never the wall clock.
-- `compose`, `build`, and `scan` never call a real backend.
+- `compose` and `scan` never call a real backend.
 - Adapters (`integrations`), `probe`, `cli`, and the `testing` doubles are outer layers; nothing internal imports them.
 - Runtime and CLI code constructs platforms through `FlotillaConfig.build_platform`, not a backend factory directly, so the runtime and every CLI command use the same settings. New platforms are usually better as a separate package; see [Writing a backend](docs/Writing_a_Backend.md).
 

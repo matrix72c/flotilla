@@ -20,43 +20,23 @@ def clear_directory(root: Path) -> None:
 
 
 def self_test() -> None:
-    from flotilla.manifest import Context, Manifest, Resources, Unit
+    """Prove the installed package can do the one thing the anchor calls it for.
 
-    from .models import Task
-    from .release import ReleaseReader, ReleaseWriter
-
+    It used to also round-trip a release through its own reader and writer. There is no release
+    to round-trip now: the only installed-side behaviour is clearing a mounted output directory,
+    so that is what this checks.
+    """
     with tempfile.TemporaryDirectory(prefix="flotilla-native-") as directory:
-        base = Path(directory)
-        manifest = Manifest(
-            task="self-test",
-            agent_service="main",
-            units={
-                "main": Unit(
-                    image="example.invalid/runtime@sha256:" + "a" * 64,
-                    context=Context(env={}, uid=0, gid=0, cwd="/"),
-                    resources=Resources(cpu="1", memory="128Mi"),
-                    command=None,
-                )
-            },
-        )
-        with ReleaseWriter(base / "release", "self-test") as writer:
-            writer.add_task(Task(key="self-test", roles={"main": manifest}), "self-test")
-            (row,) = writer.publish([{"task": "self-test"}])
-        reader = ReleaseReader(base / "release")
-        if reader.read_dataset() != [row] or reader.instruction("self-test") != "self-test":
-            raise AssertionError("native release round trip failed")
-        try:
-            Task.model_validate({"schema_version": 999, "key": "bad", "roles": {"main": manifest}})
-        except ValueError:
-            pass
-        else:
-            raise AssertionError("native protocol version check failed")
-        output = base / "output"
+        output = Path(directory) / "output"
         (output / "nested").mkdir(parents=True)
+        (output / "nested" / "reward.txt").write_text("1")
         (output / "reward.txt").write_text("1")
+        (output / "link").symlink_to(output / "reward.txt")
         clear_directory(output)
         if any(output.iterdir()):
             raise AssertionError("verifier output directory was not cleared")
+        if not output.is_dir():
+            raise AssertionError("verifier output directory was replaced rather than cleared")
 
 
 def main() -> None:

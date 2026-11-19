@@ -5,27 +5,26 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
+from flotilla.core.plan import TrialPlan
 from flotilla.core.reaper import CleanupRecord
 from flotilla.platform.base import SharedVolume
-from flotilla.prepared import PreparedEnvironment
-
-# The runtime's name for one prepared environment.
-Task = PreparedEnvironment
 
 
 @dataclass(frozen=True)
 class RunRequest:
-    task: Task
+    """One environment to open: the trial to create, plus what is still the caller's to choose.
+
+    The plan already carries resources and mounts, because resolving those is part of planning
+    the task. What stays here is what a single run decides: how to be identified, what the agent
+    process sees, whether it may reach the network, and how long it may live.
+    """
+
+    plan: TrialPlan
     request_id: str
     exec_env: dict[str, dict[str, str]] = field(default_factory=dict, repr=False)
     disable_internet: bool = False
-    resources: dict[str, dict[str, str]] = field(default_factory=dict)
     lifetime: float | None = None
-    # Caller-owned, read-only directories relative to the deployment's shared root, by service.
-    external_mounts: dict[str, tuple[SharedVolume, ...]] = field(default_factory=dict)
-    # Attempt-owned mounts may be writable, but must remain under this client's workspace.
     workspace_id: str | None = None
-    workspace_mounts: dict[str, tuple[SharedVolume, ...]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.request_id:
@@ -39,7 +38,7 @@ class RuntimeEvent:
     kind: str
     environment_id: str
     request_id: str
-    task_digest: str
+    task: str  # the task slug, for correlating records of one environment
     elapsed_s: float = 0
     service: str | None = None
     category: str | None = None
@@ -61,7 +60,7 @@ class ServiceInfo:
 class EnvironmentInfo:
     environment_id: str
     request_id: str
-    task_digest: str
+    task: str
     agent_service: str
     services: tuple[ServiceInfo, ...]
     timings: tuple[tuple[str, float], ...]
@@ -98,11 +97,15 @@ class OpenOptions:
     lifetime: float | None = None
     exec_env: dict[str, dict[str, str]] = field(default_factory=dict, repr=False)
     resources: dict[str, dict[str, str]] = field(default_factory=dict)
+    #: Compose interpolation values for this one task, over the deployment's own table.
+    parameters: dict[str, str] = field(default_factory=dict)
     disable_internet: bool = False
     # Caller-owned, read-only directories relative to the deployment's shared root, by service.
     external_mounts: dict[str, tuple[SharedVolume, ...]] = field(default_factory=dict)
     # Attempt-owned mounts may be writable, but must remain under this client's workspace.
     workspace_id: str | None = None
+    #: Storage key of that workspace, which every `workspace_mounts` key must be inside.
+    workspace_root: str | None = None
     workspace_mounts: dict[str, tuple[SharedVolume, ...]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:

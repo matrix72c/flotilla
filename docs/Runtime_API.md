@@ -7,18 +7,19 @@ Import public types from `flotilla`. Configuration is loaded locally at construc
 | Operation | Behavior |
 |---|---|
 | `Flotilla(deployment=..., on_event=None)` | Owns a configuration snapshot and one runtime; do not share across processes |
-| `fleet.reservation(prepared)` | Local admission budget of one environment: services x 2 |
+| `fleet.plan(source)` | Resolves a task directory into the trial `open` would create, without creating it |
+| `fleet.reservation(plan)` | Local admission budget of one environment: services x 2 |
 | `await fleet.start()` | Shared, idempotent initialization |
-| `await fleet.open(prepared, options=None)` | Opens a prepared environment; builds and uploads nothing |
-| `async with fleet.environment(prepared, options=None)` | Opens and releases on exit |
+| `await fleet.open(source, options=None)` | Opens a task directory, or a plan already resolved from one; builds and uploads nothing |
+| `async with fleet.environment(source, options=None)` | Opens and releases on exit |
 | `await env.info()` / `await env.check()` | Resource metadata / current health and ownership check |
 | `await env.release(timeout=None)` | Idempotent, confirmed environment cleanup |
 | `await fleet.drain(timeout=None)` | Waits for pending cleanup; does not release active environments |
 | `await fleet.close(timeout=None)` | Releases owned environments and closes the runtime; returns a cleanup report |
 
-For production native tasks use `NativeAttempt.create(fleet, bound_task)` from `flotilla.native`, where `bound_task = config.release_bindings().resolve(row)`. Local release validation and actual platform file validation precede opening roles. Call `await attempt.open("main", options)`, stop the agent, then `await attempt.verify()`. Verification stages hidden tests and declared artifact handoffs; a separate verifier is used only when the task defines one. Always `await attempt.close()` in `finally`; it closes roles before deleting their private workspace.
+For production tasks use `NativeAttempt.create(fleet, source)` from `flotilla.native`, where `source = config.resolve_datasets()[name].source(key)`. The task is resolved into one plan per role, plus how it is graded, before any role is opened. Call `await attempt.open("main", options)`, stop the agent, then `await attempt.verify()`. Verification stages hidden tests and declared artifact handoffs; a separate verifier is used only when the task defines one. Always `await attempt.close()` in `finally`; it closes roles before deleting their private workspace.
 
-`PreparedEnvironment` is the low-level in-memory boundary for `fleet.open`, not the persistent dataset interchange. The native release/dataset is that interchange. `flotilla prepare` creates the release on the host. [Native tasks](Native_Tasks.md) documents models and bindings; [Harbor quick start](Harbor_Quick_Start.md) documents the optional consumer adapter.
+`TrialPlan` is the in-memory boundary for `fleet.open`: everything one trial runs, resolved from the task directory in this process. `open` also takes a `TaskSource` and resolves it for you; resolve it yourself when you want to check a dataset first, or run one plan several times. [Native tasks](Native_Tasks.md) documents datasets and path binding; [Harbor quick start](Harbor_Quick_Start.md) documents the optional consumer adapter.
 
 The native Anchor requires installed Flotilla and filesystem helpers, not Harbor, Compose, Docker or push credentials. Actual platform acceptance remains separate from package/unit checks.
 
@@ -28,7 +29,7 @@ Each phase of an open has its own budget. Client start (once per client) is boun
 
 ## Platform metadata read recovery
 
-`await fleet.describe_tasks(task_keys)` reads instruction/config metadata from native tasks without creating attempts. `await fleet.describe_task_resources(task_keys, runtime_params=...)` inspects declared resources without building images. The helper runs in the launch anchor built from `reaper.anchor_image`, invoked with `prepare.workspace_command`, so that image must contain the matching Flotilla install. Inputs remain immutable throughout a run; metadata reuse does not deduplicate dataset rows or rename task IDs.
+`await fleet.describe_tasks(task_keys)` reads instruction/config metadata from native tasks without creating attempts. `await fleet.describe_task_resources(task_keys, runtime_params=...)` inspects declared resources. The helper runs in the launch anchor built from `reaper.anchor_image`, invoked with `prepare.workspace_command`, so that image must contain the matching Flotilla install. Inputs remain immutable throughout a run; metadata reuse does not deduplicate dataset rows or rename task IDs.
 
 The helper recovers actual `OSError(ESTALE)` in native description and explicit source-path/resource-discovery reads. Each logical read gets at most five attempts, with 0.5, 1, 2 and 4 second delays. No new retry is admitted after 30 seconds for that read, and one metadata request (at most 128 unique keys) shares 15 seconds of added sleep. A failed description rereads and reparses metadata directly, without constructing a filesystem Harbor `Task`; previously successful tasks are not reread. Metadata-only reads do not validate unrelated payload trees. Resource inspection validates the private copy it works on, and enumeration errors there propagate instead of accepting an incomplete tree. No partial metadata batch is published.
 

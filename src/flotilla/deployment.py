@@ -1,35 +1,29 @@
 """One consumer entry point for a deployment.
 
 Consumers load a deployment once and ask it for everything platform-side: the platform
-credential, clients, release bindings, setup budgets, capacity peaks, release validation,
-read-only runtime layer mounts and a portable frozen copy. They never read the
-configuration's internal tables (backend sections, timeout names, storage settings).
+credential, clients, declared datasets, setup budgets, capacity peaks, dataset validation and
+read-only runtime layer mounts. They never read the configuration's internal tables (backend
+sections, timeout names, storage settings).
 """
 
 from __future__ import annotations
 
-import json
 import os
-import shutil
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass, field
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from flotilla.backends import BUILTIN
 from flotilla.config import FlotillaConfig
+from flotilla.core.plan import TaskSource, TrialPlan
 from flotilla.environment import read_env_file
-from flotilla.native.models import DatasetRow
-from flotilla.native.release import ReleaseBindings, platform_key
+from flotilla.native.dataset import Dataset, platform_key
 from flotilla.platform.base import SharedVolume
-from flotilla.prepared import PreparedEnvironment
 from flotilla.resources import memory
 from flotilla.runtime.client import Flotilla
 from flotilla.runtime.types import CleanupError, OpenOptions, RuntimeEvent
 
-FROZEN_CONFIG = "deployment.json"
-FROZEN_CAPABILITIES = "capabilities.json"
 # Phases that bring one environment from creation to started services (seconds, summed worst case).
 _SETUP_PHASES = ("create", "address", "wire", "hosts", "prepare", "start_max")
 
@@ -70,18 +64,17 @@ class DatasetPeak:
 
 
 @dataclass
-class RowValidation:
-    """Validation outcome of one dataset row; failures are reported, never raised."""
+class TaskValidation:
+    """Validation outcome of one task; failures are reported, never raised."""
 
-    record: Any
+    task: str
     passed: bool = False
-    task: str | None = None
     environments: list[dict[str, Any]] = field(default_factory=list)
     roles: list[dict[str, Any]] = field(default_factory=list)
     error: str | None = None
 
 
-OptionsFactory = Callable[[str, PreparedEnvironment], OpenOptions]
+OptionsFactory = Callable[[str, TrialPlan], OpenOptions]
 
 
 class Deployment:
@@ -125,8 +118,9 @@ class Deployment:
             raise ValueError(f"environment variable {name} conflicts with the credential file")
         os.environ[name] = value
 
-    def release_bindings(self) -> ReleaseBindings:
-        return self._config.release_bindings()
+    def datasets(self) -> dict[str, Dataset]:
+        """The deployment's declared datasets by name, each on `work` or a named input root."""
+        return self._config.resolve_datasets()
 
     def client(self, *, on_event: Callable[[RuntimeEvent], None] | None = None) -> Flotilla:
         return Flotilla(deployment=self._config, on_event=on_event)
@@ -145,18 +139,18 @@ class Deployment:
         resource = self.client().client_reservation().resources["anchor"]
         return {"cpu": float(resource["cpu"]), "memory_gib": memory_gib(resource["memory"])}
 
-    def dataset_peak(self, rows: Iterable[DatasetRow]) -> DatasetPeak:
-        """Largest single-role demand across rows; a pure local calculation without credentials."""
-        bindings = self.release_bindings()
+    def dataset_peak(self, sources: Iterable[TaskSource]) -> DatasetPeak:
+        """Largest single-role demand across tasks; a local calculation needing only the registry."""
+        from flotilla.native.runtime import NativeAttempt
+
         fleet = self.client()
         peak: dict[str, float] = {}
         records = 0
-        for row in rows:
+        for source in sources:
             records += 1
-            bound = bindings.resolve(row)
             # A separate verification role releases main before acquiring its own resources.
-            for manifest in bound.task.roles.values():
-                reservation = fleet.reservation(PreparedEnvironment(manifest))
+            for plan in NativeAttempt.resolve(fleet, source).plans.values():
+                reservation = fleet.reservation(plan)
                 resources = reservation.resources.values()
                 cpu = sum(float(r["cpu"]) for r in resources)
                 gib = sum(memory_gib(r["memory"]) for r in resources)
@@ -199,7 +193,7 @@ class Deployment:
 
     def runtime_options(
         self,
-        prepared: PreparedEnvironment,
+        plan: TrialPlan,
         layers: RuntimeLayers,
         mount_paths: Mapping[str, str],
         **options: Any,
@@ -213,44 +207,40 @@ class Deployment:
             SharedVolume(key=layers.keys[name], mount_path=mount_paths[name], read_only=True, root=layers.root)
             for name in mount_paths
         )
-        return OpenOptions(external_mounts={prepared.manifest().agent_service: volumes}, **options)
+        return OpenOptions(external_mounts={plan.agent: volumes}, **options)
 
     async def validate(
-        self, rows: Iterable[Any], *, sandboxes: bool = False, options: OptionsFactory | None = None
-    ) -> list[RowValidation]:
-        """Validate every row against its release; optionally start each non-verifier role once.
+        self, sources: Iterable[TaskSource], *, sandboxes: bool = False, options: OptionsFactory | None = None
+    ) -> list[TaskValidation]:
+        """Validate every task; optionally start each non-verifier role once.
 
-        Rows are raw mappings (for example parsed JSON lines). Each failure is recorded on its
-        row; duplicates stay visible. `options` supplies per-role open options in sandbox mode.
+        Each failure is recorded on its task rather than raised, so one malformed task does not
+        hide the rest of the dataset. `options` supplies per-role open options in sandbox mode.
         """
         # Keep `import flotilla` light: the attempt lifecycle loads only when validating.
         from flotilla.native.runtime import NativeAttempt
 
-        bindings = self.release_bindings()
         fleet = self.client()
-        results: list[RowValidation] = []
+        results: list[TaskValidation] = []
         try:
-            for raw in rows:
-                result = RowValidation(record=raw)
+            for source in sources:
+                result = TaskValidation(task=source.key or str(source.local))
                 results.append(result)
                 attempt = None
                 try:
-                    row = DatasetRow.model_validate(raw)
-                    result.task = f"{row.release}:{row.task}"
-                    bound = bindings.resolve(row)
-                    attempt = await NativeAttempt.create(fleet, bound)
-                    verification = bound.task.verification
+                    resolved = NativeAttempt.resolve(fleet, source)
+                    attempt = await NativeAttempt.create(fleet, resolved)
+                    verification = resolved.verification
                     verifier = verification.role if verification is not None else None
-                    for role, manifest in bound.task.roles.items():
-                        definition = PreparedEnvironment(manifest)
-                        result.environments.append(asdict(fleet.reservation(definition)))
+                    for role, plan in resolved.plans.items():
+                        result.environments.append(asdict(fleet.reservation(plan)))
                         # A separate verifier role only opens through verify() after a run;
                         # a shared verifier is main itself, which must still start here.
                         if not sandboxes or (role == verifier and role != "main"):
                             continue
-                        handle = await attempt.open(role, options(role, definition) if options else OpenOptions())
+                        handle = await attempt.open(role, options(role, plan) if options else OpenOptions())
                         try:
-                            context = manifest.units[manifest.agent_service].context
+                            context = plan.units[plan.agent].context
                             result.roles.append({"role": role, "uid": context.uid, "gid": context.gid})
                             await handle.check()
                         finally:
@@ -266,21 +256,3 @@ class Deployment:
             if not report.clean:
                 raise CleanupError(report)
         return results
-
-    def freeze(self, directory: str | Path) -> Path:
-        """Write a portable copy: config plus its capability report, with absolute external roots.
-
-        Release payloads and runtime layers stay external and immutable, so their local roots
-        freeze as absolute paths; the capability report moves alongside the config.
-        Returns the path to load the frozen copy from.
-        """
-        directory = Path(directory)
-        directory.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(self._config.capabilities_path().resolve(strict=True), directory / FROZEN_CAPABILITIES)
-        data = self._config.to_mapping()
-        backend = self._config.backend
-        table = data["opensandbox"] if backend == BUILTIN else data["backends"][backend]
-        table["capabilities"] = FROZEN_CAPABILITIES
-        target = directory / FROZEN_CONFIG
-        target.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
-        return target

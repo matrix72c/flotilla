@@ -88,7 +88,8 @@ async def _handles(platform: FakePlatform, script: Script, plan: TrialPlan) -> d
 
 
 def _plan(units: dict[str, Unit], depends_on: dict[str, dict[str, Dependency]] | None = None) -> TrialPlan:
-    plan = TrialPlan(task="t", task_files=None, units=units, depends_on=depends_on or {})
+    agent = "main" if "main" in units else next(iter(units))
+    plan = TrialPlan(task="t", task_files=None, units=units, depends_on=depends_on or {}, agent_service=agent)
     plan.validate()
     return plan
 

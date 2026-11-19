@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 
 import pytest
 
 from flotilla import CleanupError, Flotilla
-from flotilla.config import FlotillaConfig, Resource, ResourceDefaults
+from flotilla.config import FlotillaConfig
 from flotilla.core import labels
 from flotilla.platform.base import ErrorCategory, ExecResult, FlotillaError, ProcessSpec
 from flotilla.runtime.manager import Manager
-from flotilla.runtime.types import Task
+from flotilla.runtime.types import OpenOptions
 from flotilla.testing.environments import FixtureRequest as RunRequest
 from flotilla.testing.environments import open_fixture
 from flotilla.testing.platform import FakePlatform, SharedTree
@@ -160,10 +161,10 @@ async def test_terminate_one_service_leaves_sidecar_available(
     deployment: tuple[FlotillaConfig, FakePlatform, SharedTree],
 ) -> None:
     cfg, platform, _ = deployment
-    manifest = task().manifest()
-    manifest.units["sidecar"] = manifest.units["main"].model_copy(deep=True)
+    plan = task()
+    plan = replace(plan, units={**plan.units, "sidecar": plan.units["main"]})
     async with Flotilla(deployment=cfg) as fleet:
-        env = await open_fixture(fleet, RunRequest(Task(manifest), "terminate"))
+        env = await open_fixture(fleet, RunRequest(plan, "terminate"))
         main_iid = (await env.info()).services[0].instance_id
         await asyncio.gather(env.agent.terminate(), env.agent.terminate())
         assert main_iid not in platform.iids()
@@ -175,21 +176,19 @@ async def test_terminate_one_service_leaves_sidecar_available(
 
 
 @pytest.mark.asyncio
-async def test_runtime_resource_override_reuses_the_same_manifest(
+async def test_runtime_resource_override_reuses_the_same_plan(
     deployment: tuple[FlotillaConfig, FakePlatform, SharedTree],
 ) -> None:
     cfg, platform, _ = deployment
     artifact = task()
-    original_digest = artifact.digest
-    for cpu, memory in (("2", "4Gi"), ("4", "8Gi")):
-        configured = cfg.model_copy(
-            update={"resources": ResourceDefaults(services={"main": Resource(cpu=cpu, memory=memory)})}
-        )
-        async with Flotilla(deployment=configured) as fleet:
-            env = await open_fixture(fleet, RunRequest(artifact, f"resources-{cpu}"))
+    async with Flotilla(deployment=cfg) as fleet:
+        for cpu, memory in (("2", "4Gi"), ("4", "8Gi")):
+            options = OpenOptions(request_id=f"resources-{cpu}", resources={"main": {"cpu": cpu, "memory": memory}})
+            env = await fleet.open(artifact, options)
             service = (await env.info()).services[0]
             allocated = platform.spec_of(service.instance_id).resources
             assert (allocated.cpu, allocated.memory) == (cpu, memory)
             assert (service.cpu, service.memory) == (cpu, memory)
-            assert artifact.digest == original_digest
-            assert artifact.manifest().units["main"].resources.cpu == "1"
+            # One run's override makes a plan of its own; the caller's plan is left alone.
+            assert artifact.units["main"].resources.cpu == "1"
+            await env.release()

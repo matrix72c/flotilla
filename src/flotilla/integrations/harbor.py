@@ -3,8 +3,7 @@
 Task executions enter through `NativeAttempt`, which owns the workspace and both
 roles. This class adapts its live handles to native Harbor I/O. Native Harbor
 Trial's local-task upload flow is not a supported remote-task entrypoint.
-Transient prepared_environment is an internal I/O adapter hook, not a dataset
-format.
+Transient `plan` is an internal I/O adapter hook, not a dataset format.
 """
 
 from __future__ import annotations
@@ -27,7 +26,7 @@ from harbor.models.trial.paths import EnvironmentPaths, TrialPaths
 
 from flotilla._io import owned_io
 from flotilla.config import FlotillaConfig
-from flotilla.prepared import PreparedEnvironment
+from flotilla.core.plan import TrialPlan
 from flotilla.runtime.client import Flotilla
 from flotilla.runtime.environment import Environment, Service
 from flotilla.runtime.types import CleanupError, OpenOptions
@@ -59,16 +58,16 @@ class FlotillaEnvironment(BaseEnvironment):  # type: ignore[misc]
         enable_environment_dir_upload: bool = True,
         deployment: str,
         prepared: str | None = None,
-        prepared_environment: PreparedEnvironment | None = None,
+        plan: TrialPlan | None = None,
         fleet: Flotilla | None = None,
         run_timeout: float | None = None,
         runtime_params: dict[str, str] | None = None,
     ) -> None:
         if prepared is not None:
-            raise ValueError("prepared JSONL is unsupported; use NativeAttempt with a native release binding")
+            raise ValueError("prepared JSONL is unsupported; use NativeAttempt with a task source")
         if runtime_params:
-            raise ValueError("runtime parameters are resolved at preparation; set them on the dataset row")
-        self._transient_prepared = prepared_environment
+            raise ValueError("runtime parameters belong to the deployment; set them in [runtime_params]")
+        self._transient_plan = plan
         self._cfg = fleet.config if fleet is not None else FlotillaConfig.load(deployment)
         self._cfg.check_against(self._cfg.load_report())
         self._owns_environment = True
@@ -127,11 +126,11 @@ class FlotillaEnvironment(BaseEnvironment):  # type: ignore[misc]
         self._directory = Path(self.environment_dir)
         self._task_root = self._directory.parent
 
-    def _prepared_environment(self) -> PreparedEnvironment:
+    def _plan(self) -> TrialPlan:
         """Internal transient role only; production task inputs enter NativeAttempt."""
-        if self._transient_prepared is None:
-            raise ValueError("use NativeAttempt with a native release binding, then FlotillaEnvironment.view(handle)")
-        return self._transient_prepared
+        if self._transient_plan is None:
+            raise ValueError("use NativeAttempt with a task source, then FlotillaEnvironment.view(handle)")
+        return self._transient_plan
 
     @classmethod
     def view(
@@ -167,11 +166,11 @@ class FlotillaEnvironment(BaseEnvironment):  # type: ignore[misc]
         if self._environment is not None:
             return
         try:
-            prepared = await owned_io(self._prepared_environment)
+            plan = await owned_io(self._plan)
             await self._fleet.start()
             mode = self._network_policy.network_mode
             self._environment = await self._fleet.open(
-                prepared,
+                plan,
                 OpenOptions(
                     request_id=self.session_id,
                     lifetime=self._run_timeout,

@@ -4,11 +4,14 @@ This guide is for authors of evaluation runners, RL rollout workers, and agent f
 
 ## Who owns what
 
-Flotilla owns the native task protocol, preparation and environment resources: fixed images, sandboxes, network policies, shared directories, renewal and cleanup. Your framework selects complete dataset rows, drives the agent, interprets verification outputs, decides episode retries and admits results into training. Harbor source parsing is optional preparation, not an execution dependency.
+Flotilla owns resolving a task into a trial and the environment resources that trial needs: sandboxes,
+network policies, shared directories, renewal and cleanup. Your framework decides which tasks to run,
+drives the agent, interprets verification outputs, decides episode retries and admits results into
+training.
 
 Two consequences follow:
 
-- One `NativeAttempt` owns its private workspace and roles. Your framework stops the agent before `attempt.verify()`, which stages hidden tests and declared artifact handoffs, then closes the attempt. Host `flotilla prepare` produces the native dataset before consumption; the user publishes its static files.
+- One `NativeAttempt` owns its private workspace and roles. Your framework stops the agent before `attempt.verify()`, which stages hidden tests and declared artifact handoffs, then closes the attempt.
 - A score never makes a cleanup failure acceptable. Check `CleanupReport.clean` separately and treat an unclean report as an infrastructure problem.
 
 ## Loading a deployment
@@ -20,16 +23,16 @@ from flotilla import Deployment
 
 deployment = Deployment.load("deployment.toml", credentials="private.env")  # binds only credential_env
 fleet = deployment.client(on_event=on_event)
-bindings = deployment.release_bindings()
+datasets = deployment.datasets()            # declared [datasets.<name>] by name
+sources = [datasets["demo"].source(key) for key in datasets["demo"].tasks()]
 budget = deployment.setup_budget()          # worst case from create to started services, seconds
-peak = deployment.dataset_peak(rows)        # local reservation maxima; no credentials, creates nothing
+peak = deployment.dataset_peak(sources)     # local reservation maxima; creates nothing
 layers = deployment.runtime_layers()        # [agent_runtime] as storage keys; names are your vocabulary
-options = deployment.runtime_options(main, layers, {"node": "/opt/runtime/node"}, request_id="episode-1")
-frozen = deployment.freeze(run_dir / "inputs")  # portable deployment.json + capabilities.json
-report = await deployment.validate(rows, sandboxes=True, options=lambda role, prepared: ...)
+options = deployment.runtime_options(plan, layers, {"node": "/opt/runtime/node"}, request_id="episode-1")
+report = await deployment.validate(sources, sandboxes=True, options=lambda role, plan: ...)
 ```
 
-`runtime_options` mounts each layer read-only into the manifest's agent service and rejects a layer set whose storage root has moved. `validate` records each row's failure instead of raising, never opens a separate verifier role and closes its client cleanly.
+`runtime_options` mounts each layer read-only into the plan's agent service and rejects a layer set whose storage root has moved. `validate` records each task's failure instead of raising, never opens a separate verifier role and closes its client cleanly.
 
 ## One client per process
 
@@ -55,34 +58,38 @@ finally:
 
 `on_event` receives best-effort diagnostic events: lifecycle kinds such as `queued`, `admitted`, `open_failed`, `operation_started`, `operation_finished`, `cancel_requested`, `service_terminated`, and `cleanup_finished`, plus one timing event per startup stage with `elapsed_s` set. They never contain argv, output, environment values, or credentials. Don't use them as lifecycle acknowledgements; the return values and exceptions are authoritative.
 
-## Selecting native tasks
+## Selecting tasks
 
-Read complete dataset rows using explicit deployment bindings. Do not reduce identities to basenames, discard duplicate rows or attach a new release root implicitly when concatenating datasets. Local metadata inspection reads prepared instructions and definitions, not hidden payloads or source Compose.
+Name a declared dataset and the task keys inside it. Do not reduce identities to basenames or attach a
+different dataset root implicitly when combining selections.
 
 ```python
 from flotilla.config import FlotillaConfig
 from flotilla.native import NativeAttempt
-from flotilla.prepared import PreparedEnvironment
 
 config = FlotillaConfig.load("deployment.toml")
-bindings = config.release_bindings()
-rows = bindings.read_dataset("dataset.jsonl")
-bound = bindings.resolve(rows[0])
-main = PreparedEnvironment(bound.task.roles["main"])
-# Inspect reservations before allocating attempts.
-attempt = await NativeAttempt.create(fleet, bound)
+dataset = config.resolve_datasets()["demo"]
+source = dataset.source("vulhub/cve-2017-7529")
+# Resolving is local and synchronous: check a whole dataset before spending a sandbox on any of it.
+plan = NativeAttempt.resolve(fleet, source).plans["main"]
+attempt = await NativeAttempt.create(fleet, source)
 ```
 
-See [Native tasks](Native_Tasks.md) for the host preparation and static publication workflow. Both local and platform copies are verified. Execution needs the installed native helper, fixed runtime images and static release only; it must not import Harbor/Compose or read source images. Missing assets and unsupported protocols are explicit failures, not opportunities for fallback. The original source task directory is not an execution input.
+Resolving reads the task's own files and each image's config from the registry, and nothing else. An
+image config is cached by digest, so a repeated image costs no network. Keep published datasets
+immutable: an attempt mounts the task directory read-only, in place, so changing it mid-run changes
+what running attempts see.
 
-Keep published releases immutable. Volume initialization and artifact handoffs are attempt-private. Snapshot release/task/image digests and the complete selected rows. Reusing validation within one launch does not authorize a global cross-run cache.
+See [Native tasks](Native_Tasks.md) for installation and path binding. Volume initialization and
+artifact handoffs are attempt-private. Snapshot the dataset name, the task keys and the image digests
+the task declares.
 
 ## Budgeting concurrent work
 
 Before opening many environments, compute what they will reserve. This is local and creates nothing:
 
 ```python
-per_episode = fleet.reservation(main).instances  # services x 2: one active generation plus one for retries
+per_episode = fleet.reservation(plan).instances  # services x 2: one active generation plus one for retries
 overhead = fleet.client_reservation().instances  # the anchor
 ```
 
@@ -161,14 +168,14 @@ A process that dies without closing its client leaves its sandboxes and director
 
 ## Testing your integration
 
-Install the `testing` extra and use the public helpers in `flotilla.testing`. They run the low-level preparation, client, and runtime against an in-memory platform and fake image tooling, without a deployment, Docker, or credentials:
+Install the `testing` extra and use the public helpers in `flotilla.testing`. They run planning, the client, and the runtime against an in-memory platform and a fake registry, without a deployment, Docker, or credentials:
 
 ```python
 import pytest
 
 from flotilla import Flotilla
 from flotilla.config import FlotillaConfig
-from flotilla.testing.build import prepared_environment
+from flotilla.testing.planning import APP, planned_environment
 from flotilla.testing.platform import FakePlatform, SharedTree
 from flotilla.testing.runtime import deployment as deployment  # pytest fixture
 
@@ -180,14 +187,15 @@ async def test_episode_releases_its_environment(
     cfg, platform, _ = deployment
     task = tmp_path / "task"
     (task / "environment").mkdir(parents=True)
-    (task / "task.toml").write_text('[environment]\ndocker_image = "r.io/ns/main:1"\n')
+    (task / "task.toml").write_text(f'[environment]\ndocker_image = "{APP}"\n')
     async with Flotilla(deployment=cfg) as fleet:
-        async with fleet.environment(prepared_environment(task, cfg)) as env:
+        async with fleet.environment(planned_environment(task, cfg)) as env:
             assert (await env.agent.exec(["true"], timeout=10)).exit_code == 0
     assert fleet.cleanup_report is not None and fleet.cleanup_report.clean
     assert platform.instances() == []
 ```
 
-The synthetic `prepared_environment` fixture above is for unit contracts, not a production task input or platform-acceptance result.
+`planned_environment` resolves a task directory with a fake registry, so it needs no network. It is for
+unit contracts, not a production task input or a platform-acceptance result.
 
 `FakePlatform` lets tests inject faults (`inject_fault`, `inject_create_then_fail`), add latency, replace the command handler (`set_exec_handler`), and lose background processes, so you can test your handling of the outcomes above. It is a test double, not a production backend or an isolation boundary, and it deliberately fails on operations it does not model.

@@ -1,43 +1,47 @@
 # Quick start
 
-This tutorial prepares existing Harbor tasks on a CPU host, publishes a native release with your storage tools, and executes it using the installed Flotilla package. It assumes a working `deployment.toml`, platform credentials, a matching native Anchor and shared tools. See [Native tasks](Native_Tasks.md) for installation, protocol and migration details, and [Compose support](Compose_Support.md) for importer support.
+This tutorial publishes a directory of Harbor tasks to shared storage, declares where it is, and runs
+one task using the installed Flotilla package. It assumes a working `deployment.toml`, platform
+credentials, a matching Anchor and shared tools. See [Native tasks](Native_Tasks.md) for installation
+and protocol details, and [Compose support](Compose_Support.md) for which Compose keys are supported.
 
-## 1. Probe and select
+## 1. Probe the deployment
 
-Install this repository's fixed commit with the `harbor` extra in a Python 3.12 Linux x86_64 environment. Host preparation also needs the pinned official Compose tool and image tools. The execution Anchor does **not** need those optional dependencies. Do not install the unrelated public PyPI `flotilla` project.
-
-Place complete source tasks below `./source-tasks` on your preparation host. Each task includes its `task.toml`, instruction, environment files and tests. Keep credentials separate.
+Install this repository's fixed commit with the `harbor` extra in a Python 3.12 Linux x86_64
+environment. Nothing needs Docker or a Compose binary. Do not install the unrelated public PyPI
+`flotilla` project.
 
 ```sh
 flotilla probe --deployment deployment.toml --env sandbox.env
-flotilla select --host-root ./source-tasks --deployment deployment.toml \
-  --out selected.jsonl --report selection-report.json
 ```
 
-Probe records measured capabilities and requires confirmed cleanup. Selection normalizes supported task definitions but does not open task sandboxes. Inspect its report before preparing. The report lists each service's image. A task that declares `build:` instead of an image is rejected: images must be published before preparation.
+Probe records measured capabilities and requires confirmed cleanup. Run it once per deployment, before
+running any task on it.
 
-## 2. Prepare once
+## 2. Publish the dataset
 
-```sh
-flotilla prepare selected.jsonl --deployment deployment.toml \
-  --out ./release --name example --report prepare-report.json
-```
+A dataset is a directory of task directories. Copy it to shared storage with your existing tools,
+preserving contents and file metadata. Nothing is generated in between: the directory the platform
+mounts is the one you published.
 
-This command reads registries and never writes to them: provide pull credentials via your tool configuration or `--env prepare.env`. Every image must be pullable from a registry in `build.pullable_registries` and must declare a root `USER`; anything else is rejected rather than rewritten. Images are fixed in the release by remote digest. Static bind files and hidden tests are captured there too.
+Each image must be published and referenced by digest (`repo@sha256:...`), and must declare a root
+`USER`: the exec daemon is the sandbox entrypoint. A task that declares `build:` instead of an image is
+rejected, because Flotilla does not build images.
 
-A selected row that fails is left out of the release and reported with its reason; nothing is published only when no row prepared. Output must be a new directory. Pass `--cache <dir>` to keep image configs and account databases between runs, so a later run does not read the same images again. Keep reports and the cache outside the release. No platform task instances or static uploads are created by this command.
-
-## 3. Publish and bind
-
-Use existing storage tools to copy the **complete release**, preserving its contents and required file metadata, to a new immutable platform location. Do not copy the original Harbor task as the execution input. Grant the platform access to the fixed runtime images.
+## 3. Declare where it is
 
 ```toml
-[task_releases.demo]
-local_root = "./release"
-platform_root = "/shared/releases/demo-v1"
+[datasets.demo]
+local_root = "./tasks"
+platform_root = "/shared/datasets/demo-v1"
 ```
 
-On host storage the platform root is either a key relative to the shared root or an absolute path under it; a `pvc:` value is refused. PVC deployments require the explicit `pvc:<claim>/<subpath>/...` form and refuse a relative key. See [Native tasks](Native_Tasks.md#bind-local-and-platform-roots). Local relative paths resolve against the deployment file. Consumers never repair missing files by rebuilding or reimporting source tasks.
+Both views are declared because neither side can infer the other: a client path says nothing about how
+the platform mounts the storage. On host storage the platform root is either a key relative to the
+shared root or an absolute path under it; a `pvc:` value is refused. PVC deployments require the
+explicit `pvc:<claim>/<subpath>/...` form and refuse a relative key. See
+[Native tasks](Native_Tasks.md#bind-local-and-platform-roots). Local relative paths resolve against the
+deployment file.
 
 ## 4. Execute
 
@@ -52,12 +56,10 @@ from flotilla.native import NativeAttempt
 
 async def main():
     config = FlotillaConfig.load("deployment.toml")
-    bindings = config.release_bindings()
-    rows = bindings.read_dataset("release/dataset.jsonl")
+    dataset = config.resolve_datasets()["demo"]
     async with Flotilla(deployment=config) as fleet:
-        for row in rows:
-            bound = bindings.resolve(row)
-            async with await NativeAttempt.create(fleet, bound) as attempt:
+        for key in dataset.tasks():
+            async with await NativeAttempt.create(fleet, dataset.source(key)) as attempt:
                 env = await attempt.open("main", OpenOptions(startup_timeout=900, lifetime=600))
                 result = await env.agent.exec(["id"], timeout=30)
                 print(result.stdout.decode())
@@ -69,9 +71,15 @@ async def main():
 asyncio.run(main())
 ```
 
-A dataset row identifies its release and relative task reference. Preserve the complete row, including annotations and parameters, in snapshots. Duplicate rows remain duplicate attempts. Filtering/reordering rows does not alter release identity.
+`dataset.tasks()` lists every task directory below the root, in a stable order; `dataset.source(key)`
+names one of them on both sides. Your own selection decides which keys to run and how often, so
+duplicates stay duplicate attempts.
 
-The attempt starts services according to prepared dependency and healthcheck rules, using resolved application UID/GID/env/cwd. Writable state is attempt-private. Hidden tests are staged only for verification; separate verifier roles and declared handoffs use the same lifecycle. Closing waits for confirmed cleanup. Infrastructure and cleanup failures are not task scores.
+The attempt starts services according to the task's dependency and healthcheck rules, using the
+resolved application UID/GID/env/cwd. The task's own files are mounted read-only from where they are
+published, and only a writable volume is materialized per attempt. Hidden tests are staged only for
+verification; separate verifier roles and declared handoffs use the same lifecycle. Closing waits for
+confirmed cleanup. Infrastructure and cleanup failures are not task scores.
 
 ## Commands and files
 
@@ -84,13 +92,13 @@ await env.agent.exec(["id"], uid=1000, gid=1000, timeout=10)
 await env.agent.download_file("/tmp/out.txt", Path("out.txt"))
 ```
 
-Only use writable paths declared by the task: readonly-rootfs tasks do not implicitly gain a writable `/tmp`. Runtime options may override modeled resources, timeouts and execution settings; they cannot re-run Compose interpolation or change prepared images/topology. Prepare a new variant for compilation changes.
+Only use writable paths declared by the task: readonly-rootfs tasks do not implicitly gain a writable `/tmp`. Runtime options may override resources, timeouts and execution settings; they cannot change the task's images or topology. Change the task directory for anything else.
 
 `exec` returns bytes stdout/stderr and an exit code. A command is not silently replayed after an uncertain response. See [Runtime API](Runtime_API.md) for timeout, cancellation, background process and `ExecOutcomeUnknown` behavior.
 
 ## Next steps
 
-- [Native tasks](Native_Tasks.md): protocol, installed Anchor builder, path binding and migration.
+- [Native tasks](Native_Tasks.md): protocol, installed Anchor builder and path binding.
 - [Harbor quick start](Harbor_Quick_Start.md): the optional Harbor evaluation consumer.
 - [Configuration](Configuration.md): deployment policies, storage and admission.
-- [Compose support](Compose_Support.md): supported source semantics.
+- [Compose support](Compose_Support.md): which Compose keys are supported.

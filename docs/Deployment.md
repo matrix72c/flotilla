@@ -2,11 +2,11 @@
 
 A deployment provides a sandbox endpoint, an image registry, shared storage, native Anchor/shared tools and measured capability evidence. Users receive `deployment.toml`, its generated capability report and credentials through a separate channel. Field details are in [Configuration](Configuration.md).
 
-## Separate preparation from execution
+## What the deployment has to provide
 
-Host preparation needs the optional Harbor importer, pinned official Compose and Docker/registry tools. These tools run in an operator-controlled CPU environment, not in business sandboxes. They read source images — digests, execution identity and image volume contents — and produce immutable native releases. Preparation never builds or publishes an image, so it needs no registry write access.
+Flotilla resolves a task where it runs it: it reads the published task directory and each image's config from the registry, over HTTP and by digest. So a client needs registry **read** access and nothing else — no builder, no Compose executable, no Docker.
 
-The platform Anchor needs the matching installed Flotilla runtime and filesystem tools. It does **not** need Harbor, Compose, Docker/BuildKit, registry-push credentials or source task directories. Never expose a host Docker socket or unauthenticated build endpoint to task/verifier sandboxes. Normal pulls of the final fixed images remain a platform responsibility.
+The platform Anchor needs the matching installed Flotilla runtime and filesystem tools. It does **not** need Docker/BuildKit or registry-push credentials. Never expose a host Docker socket or unauthenticated build endpoint to task/verifier sandboxes. Normal pulls of the fixed images remain a platform responsibility.
 
 ## 1. Build the installed Anchor
 
@@ -51,32 +51,21 @@ Inspect `passed`, `failed`, `skipped` and `error` independently. Selecting a fil
 
 Relevant configuration changes invalidate evidence. Do not merge old reports, waive security gaps merely to pass migration, or treat unit mocks/historical runs as current platform acceptance. Probe, Anchor cleanup, platform client cleanup and owned-directory deletion all matter.
 
-## 4. Prepare and publish task releases
+## 4. Publish and bind datasets
 
-Example host preparation settings:
+Every service image must already be published where the platform can pull from, and named by digest. Flotilla reads registries and never writes to them, so the registry credentials a client uses need pull access only. Keep them out of datasets.
 
-```toml
-[prepare]
-concurrency = 4
-# docker_command = ["sudo", "-n", "docker"]
-
-[build]
-pullable_registries = ["registry.example.org"]
-```
-
-Every service image must already be published somewhere the platform can pull from; a task naming anything else is rejected during selection. Preparation reads registries and never writes to them, so the Docker configuration it uses needs pull credentials only. Keep those credentials outside releases.
-
-Use [Native tasks](Native_Tasks.md) for `select` and `prepare`. Users publish the resulting complete release with existing storage tools. Bind its local and platform locations explicitly:
+Users publish task directories with existing storage tools; see [Native tasks](Native_Tasks.md). Bind each dataset's local and platform locations explicitly:
 
 ```toml
-[task_releases.example]
-local_root = "./releases/example"
-platform_root = "/shared/releases/example"
+[datasets.example]
+local_root = "./datasets/example"
+platform_root = "/shared/datasets/example"
 ```
 
-For host storage, the platform root is confined under the release's root (`[inputs.<input>]` if the binding names one, otherwise `[storage]`). PVC deployments require an explicit `pvc:<claim>/<configured-root-subpath>/<release-key>` binding; bare relative roots are rejected. Preserve required metadata and symlinks during publication; both local and platform consumed files are verified. Releases must remain immutable while selected by any running job. Task upload is not a Flotilla backend feature.
+For host storage, the platform root is confined under the dataset's root (`[inputs.<input>]` if the binding names one, otherwise `[storage]`). PVC deployments require an explicit `pvc:<claim>/<configured-root-subpath>/<key>` binding; bare relative roots are rejected. Preserve required metadata and symlinks during publication. A dataset must stay immutable while any running job reads it. Dataset upload is not a Flotilla backend feature.
 
-To consume releases published in another owner's storage, keep `[storage]` on storage this deployment owns and declare the owner's read-only shares as named input roots; the built-in shared-tools release is published into the work root on first start. Different payloads may come from different roots. For example, with platform storage identifiers:
+To consume datasets published in another owner's storage, keep `[storage]` on storage this deployment owns and declare the owner's read-only shares as named input roots; the built-in shared-tools release is published into the work root on first start. Different payloads may come from different roots. For example, with platform storage identifiers:
 
 ```toml
 [storage]                      # this team's writable root
@@ -91,15 +80,15 @@ root_subpath = "datasets"
 host_path = "@user:owner"
 root_subpath = "runtimes"
 
-[task_releases.example]
+[datasets.example]
 input = "datasets"
-local_root = "/data/releases/example"
-platform_root = "example/r1"
+local_root = "/data/datasets/example"
+platform_root = "example/v1"
 ```
 
-The owner uploads releases into those directories with their own storage tools. Read-only enforcement for other consumers is the platform's sharing permission; Flotilla only ever mounts input roots read-only.
+The owner uploads task directories into those directories with their own storage tools. Read-only enforcement for other consumers is the platform's sharing permission; Flotilla only ever mounts input roots read-only.
 
-Configure instance budgets, concurrency, creation/exec rates and timeouts from measured quotas. Admission includes replacement capacity and Anchor overhead. Private writable task state is allocated per attempt; immutable assets may be shared. Compose/build inputs cannot be changed through runtime overrides.
+Configure instance budgets, concurrency, creation/exec rates and timeouts from measured quotas. Admission includes replacement capacity and Anchor overhead. Private writable task state is allocated per attempt; the task's own read-only files are mounted where they are published and shared by every attempt. A task's images and topology cannot be changed through runtime overrides.
 
 ## Acceptance and maintenance
 

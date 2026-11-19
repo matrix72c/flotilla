@@ -1,11 +1,11 @@
-"""Public API for preparing and running Compose environments on sandbox platforms."""
+"""Public API for running Compose task directories on sandbox platforms."""
 
 from __future__ import annotations
 
 from flotilla._version import __version__
-from flotilla.deployment import DatasetPeak, Deployment, RowValidation, RuntimeLayers
+from flotilla.core.plan import TaskSource, TrialPlan
+from flotilla.deployment import DatasetPeak, Deployment, RuntimeLayers, TaskValidation
 from flotilla.platform.base import ErrorCategory, ExecOutcomeUnknown, ExecResult, FlotillaError, ProcessStatus
-from flotilla.prepared import PreparedEnvironment
 from flotilla.runtime.client import Flotilla
 from flotilla.runtime.environment import Environment, Process, Service
 from flotilla.runtime.types import (
@@ -33,14 +33,15 @@ __all__ = [
     "Flotilla",
     "FlotillaError",
     "OpenOptions",
-    "PreparedEnvironment",
     "Process",
     "ProcessStatus",
     "ResourceReservation",
-    "RowValidation",
     "RuntimeEvent",
     "RuntimeLayers",
     "Service",
     "ServiceInfo",
+    "TaskSource",
+    "TaskValidation",
+    "TrialPlan",
     "__version__",
 ]

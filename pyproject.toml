@@ -20,11 +20,14 @@ dependencies = [
   "pydantic>=2.10,<3",
   "packaging>=24,<27",
   "pyyaml>=6.0,<7",
+  # A task's own format. Flotilla reads the Compose project itself, but how a task declares a
+  # separate verifier environment -- the mode inheritance and the image precedence behind it --
+  # is Harbor's definition, not a subset Flotilla can usefully maintain its own copy of. Running
+  # a task needs it, so it is required rather than an extra.
+  "harbor @ git+https://github.com/matrix72c/harbor.git@d78eb9c262e7074944106d16bff0ba6426bb2d34",
 ]
 
 [project.optional-dependencies]
-# Native evaluation and training share explicit source/runtime extension support.
-harbor = ["harbor @ git+https://github.com/matrix72c/harbor.git@d78eb9c262e7074944106d16bff0ba6426bb2d34"]
 testing = ["pytest>=8.3", "pytest-asyncio>=0.25"]
 
 [project.scripts]
@@ -145,11 +148,9 @@ forbidden_modules = [
   "flotilla.platform.opensandbox",
   "flotilla.backends",
   "flotilla.compose",
-  "flotilla.build",
   "flotilla.scan",
   "flotilla.share",
   "flotilla.busybox",
-  "flotilla.manifest",
   "flotilla.capabilities",
   "flotilla.config",
   "flotilla.probe",
@@ -157,7 +158,6 @@ forbidden_modules = [
   "flotilla.cli",
   "flotilla.runtime",
   "flotilla.prepare",
-  "flotilla.prepared",
   "flotilla.testing",
   "flotilla.deployment",
 ]
@@ -171,20 +171,17 @@ forbidden_modules = ["flotilla.core"]
 # These may read capability report types from platform.base but never touch a backend; without a
 # backend they cannot construct a Platform instance.
 [[tool.importlinter.contracts]]
-name = "offline path (compose/build/scan) does not call the platform"
+name = "offline path (compose/scan) does not call the platform"
 type = "forbidden"
 source_modules = [
   "flotilla.compose",
-  "flotilla.build",
   "flotilla.scan",
 ]
 forbidden_modules = [
   "flotilla.platform.opensandbox",
 ]
 
-# prepare is the host pipeline entry: like cli, it drives the Harbor importer in integrations
-# (select/prepare are host-only operations that never run inside a sandbox). Internal packages
-# below stay free of integrations; runtime additionally may not import prepare at all.
+# Internal packages below stay free of integrations; runtime additionally may not import prepare.
 [[tool.importlinter.contracts]]
 name = "integrations, probe, cli, and testing are outermost and not imported by internal packages"
 type = "forbidden"
@@ -192,13 +189,10 @@ source_modules = [
   "flotilla.core",
   "flotilla.platform",
   "flotilla.compose",
-  "flotilla.build",
   "flotilla.scan",
   "flotilla.share",
-  "flotilla.manifest",
   "flotilla.capabilities",
   "flotilla.config",
-  "flotilla.prepared",
 ]
 forbidden_modules = [
   "flotilla.integrations",
@@ -214,13 +208,12 @@ type = "forbidden"
 source_modules = ["flotilla.runtime"]
 forbidden_modules = ["flotilla.integrations", "flotilla.cli", "flotilla.probe", "flotilla.testing", "flotilla.deployment"]
 
-# Open consumes prepared rows: the runtime never builds, scans or prepares. (config reaches build settings
-# indirectly, so only direct imports are forbidden.)
+# The runtime creates sandboxes; checking a dataset against a deployment is a separate job.
 [[tool.importlinter.contracts]]
-name = "runtime does not build or prepare"
+name = "runtime does not inspect or scan"
 type = "forbidden"
 source_modules = ["flotilla.runtime"]
-forbidden_modules = ["flotilla.build", "flotilla.prepare", "flotilla.scan"]
+forbidden_modules = ["flotilla.prepare", "flotilla.scan"]
 allow_indirect_imports = true
 
 [[tool.mypy.overrides]]

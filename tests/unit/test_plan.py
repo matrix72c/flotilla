@@ -41,6 +41,7 @@ def _web_app_db() -> TrialPlan:
     return TrialPlan(
         task="web-app-db",
         task_files=None,
+        agent_service="main",
         units={n: _unit() for n in ("main", "web", "app")}
         | {"db": _unit(healthcheck=Healthcheck(test=("pg_isready",)))},
         networks={"default": Network(internal=False, members=frozenset(names) - {"database"}, names=names)},
@@ -54,6 +55,7 @@ def _cve() -> TrialPlan:
     return TrialPlan(
         task="cve",
         task_files=None,
+        agent_service="main",
         units={n: _unit() for n in ("main", "target", "proxy")},
         networks={
             "internal": Network(
@@ -332,6 +334,7 @@ def test_hosts_replicas_get_one_line_each() -> None:
     plan = TrialPlan(
         task="replicas",
         task_files=None,
+        agent_service="main",
         units={n: _unit() for n in ("main", "worker-1", "worker-2")},
         networks={
             "default": Network(
@@ -422,6 +425,7 @@ def _cve_2024_3234() -> TrialPlan:
     return TrialPlan(
         task="fixture-suite/cve-2024-3234-zero-day",
         task_files="tasks/bk",
+        agent_service="main",
         units={
             "main": _unit(command=("sh", "-c", "sleep infinity")),
             "secrets_init": _unit(command=("/secret/entrypoint.sh",), mounts=(secret,)),

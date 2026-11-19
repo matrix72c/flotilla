@@ -19,8 +19,10 @@ from flotilla.core.plan import TrialPlan
 from flotilla.core.reaper import CleanupRecord, Reaper
 from flotilla.core.runtime import Monitor
 from flotilla.core.trial import Ready, Trial
+from flotilla.core.volumes import RESERVED_KEYS
 from flotilla.core.waiting import RateLimiter
 from flotilla.platform.base import (
+    WORK_ROOT,
     Clock,
     ErrorCategory,
     ExecAttempt,
@@ -31,7 +33,6 @@ from flotilla.platform.base import (
 )
 from flotilla.platform.clock import SystemClock
 from flotilla.platform.execution import confirm_stopped
-from flotilla.runtime.planning import AgentOverlay, to_plan
 from flotilla.runtime.types import (
     ENVIRONMENT_RESERVATION_COPIES,
     AdmissionTimeout,
@@ -118,7 +119,7 @@ class Manager:
         try:
             self.on_event(
                 RuntimeEvent(
-                    kind, eid, req.request_id, req.task.digest, elapsed_s, service, category, attempt_id, command_id
+                    kind, eid, req.request_id, req.plan.task, elapsed_s, service, category, attempt_id, command_id
                 )
             )
         except Exception:
@@ -146,53 +147,28 @@ class Manager:
         return sum(not run.released for run in self.runs.values())
 
     def plan(self, request: RunRequest) -> TrialPlan:
-        manifest = request.task.manifest()
-        native = self.workspaces.native_environments.get(request.task.digest)
-        validated_native = native is not None and native[0] == manifest.task_files
-        workspace_root = None
-        if request.workspace_id is not None:
-            workspace_root = self.workspaces.owned(request.workspace_id).info.key
-            if (
-                manifest.task_files
-                and not validated_native
-                and not manifest.task_files.startswith(workspace_root + "/")
-            ):
-                raise invalid("attempt inputs must belong to its workspace or a validated native release")
-        elif manifest.task_files and not validated_native:
-            raise invalid("task files require a validated native release or an owned workspace")
-        if request.workspace_mounts and workspace_root is None:
-            raise invalid("workspace mounts require an owned workspace")
-        if set(request.exec_env) - set(manifest.units):
-            raise invalid("exec_env contains unknown services")
-        cfg = self.cfg
-        cfg.check_against(self.capability_report)
-        resources = cfg.resources.for_manifest(manifest)
-        if set(request.resources) - set(manifest.units):
-            raise invalid("resource override names unknown service")
-        from flotilla.platform.base import Resources
-        from flotilla.resources import cpu, memory
+        """Check the caller's plan against this deployment, and return it ready to run.
 
-        for name, override in request.resources.items():
-            if set(override) - {"cpu", "memory"}:
-                raise invalid("only CPU and memory resource overrides are supported")
-            original = resources[name]
-            resources[name] = Resources(
-                cpu=cpu(override.get("cpu", original.cpu)),
-                memory=memory(override.get("memory", original.memory)),
-            )
-        overlay = cfg.agent_overlay
-        plan = to_plan(
-            manifest,
-            resources=resources,
-            external_mounts=request.external_mounts,
-            workspace_mounts=request.workspace_mounts,
-            workspace_root=workspace_root,
-            task_files_root=native[1] if validated_native and native is not None else "work",
-            overlay=AgentOverlay(
-                env=overlay.env,
-                services=None if overlay.services is None else frozenset(overlay.services),
-            ),
-        )
+        The plan arrives built: resolving a task into one is the caller's side of `open`. What is
+        left here is what only the deployment knows -- whether its platform can actually honor
+        what the plan asks for, and whether the task files it points at are ones this client is
+        allowed to mount.
+        """
+        plan = request.plan
+        owned = None if request.workspace_id is None else self.workspaces.owned(request.workspace_id).info.key
+        if plan.task_files is not None and plan.task_files_root != WORK_ROOT:
+            if plan.task_files_root not in self.cfg.inputs:
+                raise invalid(f"task files name undeclared storage root {plan.task_files_root!r}")
+        elif plan.task_files is not None and plan.task_files.split("/")[0] in RESERVED_KEYS:
+            # Task files are mounted read-only, so a dataset anywhere on declared storage is fine.
+            # What a plan must not name is flotilla's own state: another client's launch tree, or
+            # the shared tools, which are not task data and are not this attempt's to read.
+            raise invalid(f"task files cannot live under {plan.task_files.split('/')[0]}/, which flotilla owns")
+        if plan.workspace_root is not None and plan.workspace_root != owned:
+            raise invalid("the plan's workspace root is not the workspace this attempt owns")
+        if set(request.exec_env) - set(plan.units):
+            raise invalid("exec_env contains unknown services")
+        self.cfg.check_against(self.capability_report)
         members = network.link_members(plan)
         caps = self.platform.caps
         for name, unit in plan.units.items():
@@ -339,12 +315,11 @@ class Manager:
     def info(self, eid: str) -> EnvironmentInfo:
         run = self.runs[eid]
         assert run.ready is not None
-        manifest = run.request.task.manifest()
         return EnvironmentInfo(
             eid,
             run.request.request_id,
-            run.request.task.digest,
-            manifest.agent_service,
+            run.plan.task,
+            run.plan.agent,
             tuple(
                 ServiceInfo(
                     name,

@@ -25,38 +25,43 @@ from flotilla.config import FlotillaConfig
 from flotilla.core import labels
 from flotilla.core.anchor import Anchor
 from flotilla.core.deletion import Deleter
-from flotilla.manifest import Manifest
+from flotilla.core.plan import Healthcheck, Mount, TrialPlan, TrialVolume
 from flotilla.platform.base import ErrorCategory, FlotillaError
 from flotilla.platform.clock import SystemClock
 from flotilla.platform.opensandbox import build
-from flotilla.runtime.types import Task
 from flotilla.testing.environments import FixtureRequest as RunRequest
 from flotilla.testing.environments import open_fixture
 from tests.e2e.web_app_db import web_app_db
 
 
-def fixture(image: str, *, single: bool = False, waiting: bool = False) -> Task:
-    data = asdict(web_app_db(image))
-    data["trial_volumes"] = data.pop("volumes")
-    data.update(agent_service="web")
-    if single:
-        data.update(
-            units={"web": data["units"]["web"]}, networks={}, depends_on={}, trial_volumes=[], external_units=[]
-        )
+def fixture(image: str, *, single: bool = False, waiting: bool = False) -> TrialPlan:
+    plan = replace(web_app_db(image), agent_service="web")
+    web = plan.units["web"]
     if waiting:
-        data["units"]["web"]["healthcheck"] = {
-            "test": ["/bin/sh", "-c", "exit 1"],
-            "interval_s": 2,
-            "timeout_s": 5,
-            "retries": 300,
-            "start_period_s": 600,
-            "start_interval_s": 2,
-        }
+        # A health check that never passes: startup must time out rather than report ready.
+        web = replace(
+            web,
+            healthcheck=Healthcheck(
+                test=("/bin/sh", "-c", "exit 1"),
+                interval_s=2,
+                timeout_s=5,
+                retries=300,
+                start_period_s=600,
+                start_interval_s=2,
+            ),
+        )
     if single:
-        data["trial_volumes"] = [{"key": "data"}]
-        data["units"]["web"]["mounts"] = [{"scope": "trial", "key": "data", "target": "/data", "read_only": False}]
-    manifest = Manifest.model_validate(json.loads(json.dumps(data, default=sorted)))
-    return Task(manifest)
+        # One service, its own trial volume, and nothing to connect to.
+        web = replace(web, mounts=(Mount(scope="trial", key="data", target="/data", read_only=False),))
+        return replace(
+            plan,
+            units={"web": web},
+            networks={},
+            depends_on={},
+            volumes=(TrialVolume(key="data"),),
+            external_units=frozenset(),
+        )
+    return replace(plan, units={**plan.units, "web": web})
 
 
 async def run(args: argparse.Namespace) -> dict[str, Any]:
@@ -145,7 +150,8 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         out["launch_id"] = launch
         await remember()
         task = fixture(args.image, single=not args.multi_service)
-        (args.out / "flotilla.manifest.json").write_text(task.manifest().dump_json())
+        # A record of what this run actually asked for, so a failed run can be read afterwards.
+        (args.out / "flotilla.plan.json").write_text(json.dumps(asdict(task), indent=2, default=str))
         began = time.monotonic()
         env = await open_fixture(fleet, RunRequest(task, "live-services", timeout=600))
         info = await env.info()

@@ -21,12 +21,11 @@ from flotilla.config import FlotillaConfig, Network
 from flotilla.core import labels
 from flotilla.core.anchor import Anchor
 from flotilla.core.deletion import Deleter
-from flotilla.manifest import Context, Manifest, Resources, Unit
-from flotilla.manifest import Network as ManifestNetwork
-from flotilla.platform.base import ErrorCategory, FlotillaError
+from flotilla.core.plan import ExecContext, TrialPlan, Unit
+from flotilla.core.plan import Network as PlanNetwork
+from flotilla.platform.base import ErrorCategory, FlotillaError, Resources
 from flotilla.platform.clock import SystemClock
 from flotilla.platform.opensandbox import build
-from flotilla.runtime.types import Task
 from flotilla.testing.environments import FixtureRequest as RunRequest
 from flotilla.testing.environments import open_fixture
 
@@ -38,27 +37,26 @@ async def run(deployment: Path, image: str, output: Path, *, services: int = 3, 
         raise ValueError("soak_seconds must be between 0 and 300")
     names = ("main", "worker-a", "worker-b") if services == 3 else ("main",)
     cfg = FlotillaConfig.load(deployment).model_copy(update={"network": Network()})
-    task = Task(
-        Manifest(
-            task="foreground-contract",
-            agent_service="main",
-            units={
-                name: Unit(
-                    command=None,
-                    image=image,
-                    resources=Resources(cpu="0.5", memory="512Mi"),
-                    context=Context(env={"PATH": "/bin:/usr/bin"}, uid=0, gid=0, cwd="/"),
-                )
-                for name in names
-            },
-            networks={
-                "default": ManifestNetwork(
-                    internal=True,
-                    members=list(names),
-                    names={n: [n] for n in names},
-                )
-            },
-        )
+    task = TrialPlan(
+        task="foreground-contract",
+        task_files=None,
+        agent_service="main",
+        units={
+            name: Unit(
+                command=None,
+                image=image,
+                resources=Resources(cpu="0.5", memory="512Mi"),
+                context=ExecContext(env={"PATH": "/bin:/usr/bin"}, uid=0, gid=0, cwd="/"),
+            )
+            for name in names
+        },
+        networks={
+            "default": PlanNetwork(
+                internal=True,
+                members=frozenset(names),
+                names={n: frozenset({n}) for n in names},
+            )
+        },
     )
     result: dict[str, Any] = {
         "protocol": cfg.opensandbox_settings().execd.protocol,

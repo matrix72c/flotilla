@@ -11,11 +11,11 @@ import pytest
 from flotilla import Flotilla
 from flotilla.config import FlotillaConfig
 from flotilla.core import labels
-from flotilla.manifest import Context, Manifest, Resources, Unit
-from flotilla.platform.base import ExecResult, ProcessSpec
+from flotilla.core.plan import ExecContext, TrialPlan, Unit
+from flotilla.platform.base import ExecResult, ProcessSpec, Resources
 from flotilla.platform.clock import SystemClock
 from flotilla.runtime.manager import Manager
-from flotilla.runtime.types import CleanupReport, Task
+from flotilla.runtime.types import CleanupReport
 from flotilla.testing.config import config_data
 from flotilla.testing.platform import FakePlatform, SharedTree
 from flotilla.testing.reports import report
@@ -59,6 +59,8 @@ def deployment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Flotill
     platform.initial_files["/etc/hosts"] = b"127.0.0.1 localhost\n"
     tree = SharedTree(platform)
     tree.dirs.update({"", "share", "share/releases", "share/releases/test", "share/releases/test/bin"})
+    # Each declared read-only input root must exist before the client starts; a dataset lives on one.
+    tree.dirs.update(SharedTree.input_key(name) for name in cfg.inputs)
     for path, content in [("share/releases/test/RELEASE.json", blob), ("share/releases/test/bin/busybox", busybox)]:
         tree.files.add(path)
         platform.tree_contents[path] = content
@@ -79,20 +81,20 @@ def deployment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Flotill
     return cfg, platform, tree
 
 
-def task() -> Task:
-    manifest = Manifest(
+def task() -> TrialPlan:
+    return TrialPlan(
         task="test",
+        task_files=None,
         agent_service="main",
         units={
             "main": Unit(
                 image="image@sha256:" + "b" * 64,
                 resources=Resources(cpu="1", memory="512Mi"),
-                context=Context(env={"PATH": "/bin"}, uid=0, gid=0, cwd="/"),
+                context=ExecContext(env={"PATH": "/bin"}, uid=0, gid=0, cwd="/"),
                 command=None,
             )
         },
     )
-    return Task(manifest)
 
 
 async def set_cleanup_retry_window(client: Flotilla, seconds: float) -> None:

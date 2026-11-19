@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import shutil
 import tarfile
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -14,19 +15,8 @@ from flotilla import Flotilla
 from flotilla.capabilities import CapabilityReport
 from flotilla.config import FlotillaConfig, Storage
 from flotilla.core import labels
-from flotilla.core.plan import TrialPlan
-from flotilla.manifest import Context, Manifest, Mount, Resources, Unit
-from flotilla.native import (
-    Artifact,
-    BoundTask,
-    NativeAttempt,
-    ReleaseBinding,
-    ReleaseBindings,
-    ReleaseWriter,
-    Task,
-    Verification,
-    read_dataset,
-)
+from flotilla.core.plan import TaskSource, TrialPlan
+from flotilla.native import Dataset, NativeAttempt
 from flotilla.platform.base import (
     ExecResult,
     FlotillaError,
@@ -35,68 +25,41 @@ from flotilla.platform.base import (
     ProcessSpec,
     SharedVolume,
 )
-from flotilla.prepared import PreparedEnvironment
 from flotilla.runtime.manager import Manager
 from flotilla.runtime.types import OpenOptions, RunRequest
+from flotilla.testing.planning import DATASET_ROOT, FakeConfigs
 from flotilla.testing.platform import FakePlatform, SharedTree
 from flotilla.testing.runtime import deployment as deployment
 
 IMAGE = "example.invalid/unit@sha256:" + "c" * 64
-VERIFY_COMMAND = ("verify", "run")
+#: What `verification_of` computes for a task that ships a `tests/` directory.
+VERIFY_COMMAND = ("bash", "/tests/test.sh")
 HOST = Storage(volumes="host", host_path="/srv/shared").settings()
 Deployment = tuple[FlotillaConfig, FakePlatform, SharedTree]
 
-
-def unit(mounts: tuple[Mount, ...] = ()) -> Unit:
-    return Unit(
-        image=IMAGE,
-        resources=Resources(cpu="1", memory="128Mi"),
-        context=Context(env={}, uid=0, gid=0, cwd="/"),
-        command=None,
-        mounts=list(mounts),
-    )
+#: The task input, as the trial mounts it: a read-only bind is read where it is published.
+INPUT_KEY = "environment/input"
 
 
-def role(name: str, mounts: tuple[Mount, ...] = ()) -> Manifest:
-    return Manifest(task=name, agent_service="main", units={"main": unit(mounts=mounts)})
-
-
-INPUT_KEY = "tasks/ds/task-a/files"
-
-
-def build_release(base: Path, *, name: str = "tb1", verifier: bool = True) -> tuple[Path, Task]:
-    files = base / "input"
+def build_dataset(base: Path, *, verifier: bool = True) -> Path:
+    """One published task: a read-only bind input, an instruction, and optionally hidden tests."""
+    task = base / "dataset" / "ds" / "task-a"
+    files = task / "environment" / "input"
     (files / "nested").mkdir(parents=True)
     (files / "data.txt").write_text("static input")
-    roles: dict[str, Manifest] = {
-        "main": role("ds/task-a", (Mount(scope="task", key=INPUT_KEY, target="/input", read_only=True),))
-    }
-    copies = {"files": files}
-    verification = None
-    artifacts: tuple[Artifact, ...] = ()
+    (task / "instruction.md").write_text("Solve the task.\n")
+    config = f'[environment]\ndocker_image = "{IMAGE}"\ncpus = 1\nmemory_mb = 128\n'
     if verifier:
-        tests = base / "tests"
-        tests.mkdir()
-        (tests / "check.sh").write_text("#!/bin/sh\nexit 0\n")
-        copies["tests"] = tests
-        roles["verifier"] = role("ds/task-a#verifier")
-        verification = Verification(
-            role="verifier",
-            command=VERIFY_COMMAND,
-            tests="tasks/ds/task-a/tests",
-            env={"TASK_TOKEN": "native"},
-            uid=1000,
-            gid=1000,
-            output_paths={"reward.txt": "/logs/verifier/reward.txt"},
-            optional_output_paths={"details.txt": "/logs/verifier/details.txt"},
-            require_output=True,
-        )
-        artifacts = (Artifact(name="agent", role="main", target="/logs/agent", verifier_target="/handoff/agent"),)
-    task = Task(key="ds/task-a", roles=roles, verification=verification, artifacts=artifacts)
-    with ReleaseWriter(base / "release", name) as writer:
-        writer.add_task(task, "Solve the task.\n", copies)
-        writer.publish([{"task": "ds/task-a"}])
-    return base / "release", task
+        (task / "tests").mkdir()
+        (task / "tests/test.sh").write_text("#!/bin/sh\nexit 0\n")
+        config += '[verifier]\nenvironment_mode = "separate"\nenv = {TASK_TOKEN = "native"}\n'
+        # Its own Compose project, so the agent's task input is not in the verifier's sandbox.
+        (task / "tests/docker-compose.yaml").write_text(f"services:\n  main:\n    image: {IMAGE}\n")
+    (task / "task.toml").write_text(config)
+    (task / "environment/docker-compose.yaml").write_text(
+        "services:\n  main:\n    volumes:\n      - ./input:/input:ro\n"
+    )
+    return base / "dataset"
 
 
 def volume_of(spec: InstanceSpec, mount_path: str) -> SharedVolume | None:
@@ -114,8 +77,8 @@ class NativeHarness:
     real tars for download_dir from the shared tree.
     """
 
-    def stage_release(self, key: str, root: Path) -> None:
-        """Place a release copy on the fake shared storage as tree entries for anchor operations."""
+    def stage_dataset(self, key: str, root: Path) -> None:
+        """Place a dataset copy on the fake shared storage as tree entries for anchor operations."""
         for path in sorted(root.rglob("*")):
             entry = f"{key}/{path.relative_to(root).as_posix()}"
             info = path.lstat()
@@ -198,7 +161,8 @@ class NativeHarness:
                 assert volume is not None, f"download source {source} is not a mounted volume"
                 self.unit_files[(iid, argv[3])] = self._tar_of(volume.key)
                 return ExecResult(0, b"", b"")
-            if argv[1] in ("rm", "mkdir"):
+            if argv[1] in ("rm", "mkdir", "sh"):
+                # sh -c covers the runtime's own start-up bookkeeping (log file, ownership).
                 return ExecResult(0, b"", b"")
             raise AssertionError(f"unexpected busybox command: {argv!r}")
         if argv == VERIFY_COMMAND:
@@ -207,7 +171,9 @@ class NativeHarness:
             assert answer is not None, "verifier did not receive the agent artifact through the handoff"
             self.unit_files[(iid, "/logs/verifier/reward.txt")] = b"reward:" + answer
             if self.with_optional:
-                self.unit_files[(iid, "/logs/verifier/details.txt")] = b"details"
+                # Both reward forms are optional; a verifier may write either, or both.
+                self.unit_files[(iid, "/logs/verifier/reward.json")] = b'{"reward": 1}'
+
             return ExecResult(0, b"checked\n", b"")
         raise AssertionError(f"unexpected unit execution: {argv!r}")
 
@@ -232,18 +198,29 @@ def prepare(
     name: str = "tb1",
     *,
     verifier: bool = True,
-) -> tuple[FlotillaConfig, FakePlatform, SharedTree, NativeHarness, BoundTask, Task]:
-    """Build a release, stage a separate platform copy, and install the harness."""
+) -> tuple[FlotillaConfig, FakePlatform, SharedTree, NativeHarness, TaskSource]:
+    """Publish a dataset, stage a separate platform copy, and install the harness."""
     cfg, platform, tree = deployment
-    root, task = build_release(tmp_path / "build", name=name, verifier=verifier)
-    platform_copy = tmp_path / "platform-copy"
+    root = build_dataset(tmp_path / name, verifier=verifier)
+    platform_copy = tmp_path / f"platform-copy-{name}"
     shutil.copytree(root, platform_copy, symlinks=True)
     harness = NativeHarness(deployment, monkeypatch)
-    harness.stage_release(f"releases/{name}", platform_copy)
-    bindings = ReleaseBindings(
-        {name: ReleaseBinding(local_root=root, platform_root=f"/srv/shared/releases/{name}")}, storage=HOST
-    )
-    return cfg, platform, tree, harness, bindings.resolve(read_dataset(root / "dataset.jsonl")[0]), task
+    # A published dataset lives on a declared read-only input root (`inputs.datasets`).
+    harness.stage_dataset(tree.input_key(DATASET_ROOT, name), platform_copy)
+    source = Dataset(root, name, root=DATASET_ROOT).source("ds/task-a")
+    return cfg, platform, tree, harness, source
+
+
+@pytest.fixture(autouse=True)
+def offline_registry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Resolving a task reads each image's config; these tests are about the lifecycle."""
+    original = Flotilla.__init__
+
+    def patched(self: Flotilla, *args: Any, **kwargs: Any) -> None:
+        original(self, *args, **kwargs)
+        self.image_configs = FakeConfigs()  # type: ignore[assignment]
+
+    monkeypatch.setattr(Flotilla, "__init__", patched)
 
 
 @pytest.mark.asyncio
@@ -251,20 +228,21 @@ def prepare(
 async def test_consume_only_lifecycle_handoff_and_cleanup(
     tmp_path: Path, deployment: Deployment, monkeypatch: pytest.MonkeyPatch, with_optional: bool
 ) -> None:
-    cfg, platform, tree, harness, bound, _task = prepare(tmp_path, deployment, monkeypatch)
+    cfg, platform, tree, harness, source = prepare(tmp_path, deployment, monkeypatch)
     harness.with_optional = with_optional
 
     async with Flotilla(deployment=cfg) as fleet:
-        attempt = await NativeAttempt.create(fleet, bound)
+        attempt = await NativeAttempt.create(fleet, source)
         harness.workspace_key = attempt.workspace.key
 
         await attempt.open("main")
         units = [i for i in platform.iids() if platform.spec_of(i).labels.get(labels.ROLE) == labels.ROLE_UNIT]
         assert len(units) == 1
         main_spec = platform.spec_of(units[0])
-        source = volume_of(main_spec, "/input")
-        assert source is not None and source.read_only
-        assert source.key == f"releases/tb1/{INPUT_KEY}"  # input binds the published release, not a rebuild
+        mounted = volume_of(main_spec, "/input")
+        assert mounted is not None and mounted.read_only
+        # A read-only bind is mounted where it is published; nothing is copied for the trial.
+        assert mounted.key == f"tb1/ds/task-a/{INPUT_KEY}" and mounted.root == DATASET_ROOT
         artifacts = volume_of(main_spec, "/logs/agent")
         assert artifacts is not None and not artifacts.read_only
         assert artifacts.key == f"{attempt.workspace.key}/artifacts/agent"
@@ -277,11 +255,10 @@ async def test_consume_only_lifecycle_handoff_and_cleanup(
         result = await attempt.verify()
         assert result.exit_code == 0
         assert result.outputs["reward.txt"] == b"reward:agent-owned-answer"  # bytes flowed through the handoff
-        assert ("details.txt" in result.outputs) is with_optional
+        assert ("reward.json" in result.outputs) is with_optional
         (spec,) = harness.verification_specs
         assert spec.argv == VERIFY_COMMAND
-        assert (spec.uid, spec.gid) == (1000, 1000)
-        assert spec.env.get("TASK_TOKEN") == "native"
+        assert spec.env.get("TASK_TOKEN") == "native"  # [verifier].env reaches the grading command
 
         units = [i for i in platform.iids() if platform.spec_of(i).labels.get(labels.ROLE) == labels.ROLE_UNIT]
         assert len(units) == 1  # main was released before the verifier started
@@ -297,8 +274,8 @@ async def test_consume_only_lifecycle_handoff_and_cleanup(
         assert output.key == f"{attempt.workspace.key}/verification"
         assert volume_of(verifier_spec, "/input") is None  # task input never reaches the verifier
 
-        # Hidden tests were staged only now, from the release on shared storage.
-        assert platform.tree_contents.get(f"{attempt.workspace.key}/tests/check.sh") is not None
+        # Hidden tests were staged only now, from the dataset on shared storage.
+        assert platform.tree_contents.get(f"{attempt.workspace.key}/tests/test.sh") is not None
 
         downloaded = tmp_path / "downloaded"
         await attempt.download_artifact("agent", downloaded)
@@ -308,7 +285,7 @@ async def test_consume_only_lifecycle_handoff_and_cleanup(
         assert not any(key.startswith(attempt.workspace.key) for key in tree.dirs | tree.files)
         assert not [i for i in platform.iids() if platform.spec_of(i).labels.get(labels.ROLE) == labels.ROLE_UNIT]
 
-        second = await NativeAttempt.create(fleet, bound)
+        second = await NativeAttempt.create(fleet, source)
         await second.close()
     assert platform.instances() == []  # fleet teardown deleted anchor and units
 
@@ -317,17 +294,15 @@ async def test_consume_only_lifecycle_handoff_and_cleanup(
 async def test_attempt_isolation_guards(
     tmp_path: Path, deployment: Deployment, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    cfg, _platform, _tree, harness, bound, _ = prepare(tmp_path, deployment, monkeypatch)
-    plain_root, _ = build_release(tmp_path / "plain", name="plain", verifier=False)
+    cfg, _platform, tree, harness, source = prepare(tmp_path, deployment, monkeypatch)
+    plain_root = build_dataset(tmp_path / "plain-src", verifier=False)
     plain_copy = tmp_path / "plain-copy"
     shutil.copytree(plain_root, plain_copy, symlinks=True)
-    harness.stage_release("releases/plain", plain_copy)
-    plain = ReleaseBindings(
-        {"plain": ReleaseBinding(local_root=plain_root, platform_root="/srv/shared/releases/plain")}, storage=HOST
-    ).resolve(read_dataset(plain_root / "dataset.jsonl")[0])
+    harness.stage_dataset(tree.input_key(DATASET_ROOT, "plain"), plain_copy)
+    plain = Dataset(plain_root, "plain", root=DATASET_ROOT).source("ds/task-a")
 
     async with Flotilla(deployment=cfg) as fleet:
-        attempt = await NativeAttempt.create(fleet, bound)
+        attempt = await NativeAttempt.create(fleet, source)
         harness.workspace_key = attempt.workspace.key
         with pytest.raises(ValueError, match=r"through verify\(\)"):
             await attempt.open("verifier")
@@ -358,10 +333,10 @@ async def test_attempt_isolation_guards(
 async def test_verification_runs_once_and_main_stays_closed_after_handoff(
     tmp_path: Path, deployment: Deployment, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    cfg, platform, tree, harness, bound, _ = prepare(tmp_path, deployment, monkeypatch)
+    cfg, platform, tree, harness, source = prepare(tmp_path, deployment, monkeypatch)
 
     async with Flotilla(deployment=cfg) as fleet:
-        attempt = await NativeAttempt.create(fleet, bound)
+        attempt = await NativeAttempt.create(fleet, source)
         harness.workspace_key = attempt.workspace.key
         await attempt.open("main")
         answer = f"{attempt.workspace.key}/artifacts/agent/answer.txt"
@@ -383,42 +358,52 @@ async def test_verification_runs_once_and_main_stays_closed_after_handoff(
 async def test_create_failure_releases_attempt_directory(
     tmp_path: Path, deployment: Deployment, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    cfg, _platform, tree, harness, bound, _ = prepare(tmp_path, deployment, monkeypatch)
+    cfg, _platform, tree, harness, source = prepare(tmp_path, deployment, monkeypatch)
     harness.fail_chown_of = "artifacts/agent"
 
     async with Flotilla(deployment=cfg) as fleet:
         with pytest.raises(FlotillaError):
-            await NativeAttempt.create(fleet, bound)
+            await NativeAttempt.create(fleet, source)
         assert not any("/attempts/" in key for key in tree.dirs | tree.files)
 
 
 @pytest.mark.asyncio
-async def test_native_task_files_rejected_until_an_attempt_registers_them(
+async def test_task_files_must_be_task_data_on_declared_storage(
     tmp_path: Path, deployment: Deployment, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    cfg, _platform, _tree, _harness, bound, _ = prepare(tmp_path, deployment, monkeypatch)
-    request = RunRequest(
-        task=PreparedEnvironment(bound.task.roles["main"].model_copy(update={"task_files": bound.platform_key})),
-        request_id="r1",
-    )
+    """A dataset may live on any declared storage root, but never where flotilla keeps its own state.
 
-    async def plan_of(manager: Manager) -> TrialPlan:
-        return manager.plan(request)
+    Task files are mounted read-only, so a dataset published anywhere the deployment declared is
+    fine. What a plan must not name is a launch tree or the shared tools: those are not task data,
+    and a launch tree is another client's.
+    """
+    cfg, _platform, _tree, _harness, source = prepare(tmp_path, deployment, monkeypatch)
+    published = NativeAttempt.resolve(Flotilla(deployment=cfg), source).plans["main"]
+    on_work_root = replace(published, task_files_root="work")
+    in_a_launch_tree = replace(published, task_files_root="work", task_files="launches/L9/t1")
+    undeclared = replace(published, task_files_root="nowhere")
+
+    def plan_of(plan: TrialPlan) -> Any:
+        async def run(manager: Manager) -> TrialPlan:
+            return manager.plan(RunRequest(plan, "r1"))
+
+        return run
 
     async with Flotilla(deployment=cfg) as fleet:
-        with pytest.raises(FlotillaError, match="validated native release"):
-            await fleet._call(plan_of)
-        attempt = await NativeAttempt.create(fleet, bound)
-        plan = await fleet._call(plan_of)
-        assert plan.task_files == bound.platform_key
-        await attempt.close()
+        with pytest.raises(FlotillaError, match="which flotilla owns"):
+            await fleet._call(plan_of(in_a_launch_tree))
+        with pytest.raises(FlotillaError, match="undeclared storage root"):
+            await fleet._call(plan_of(undeclared))
+        # Elsewhere on declared storage the same plan is admitted, on either root.
+        assert (await fleet._call(plan_of(published))).task_files == published.task_files
+        assert (await fleet._call(plan_of(on_work_root))).task_files == published.task_files
 
 
 @pytest.mark.asyncio
 async def test_releases_on_named_read_only_input_roots(
     tmp_path: Path, deployment: Deployment, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Releases come from two named read-only input roots; attempt state stays on the work root."""
+    """Datasets come from two named read-only input roots; attempt state stays on the work root."""
     cfg, platform, tree = deployment
     inputs = {"datasets": Storage(host_path="@user:owner"), "extra": Storage(host_path="@user:other")}
     cfg = cfg.model_copy(update={"inputs": inputs})
@@ -428,24 +413,15 @@ async def test_releases_on_named_read_only_input_roots(
     )
     report_path.write_text(caps.dump_json())
     tree.dirs.update({tree.input_key("datasets"), tree.input_key("extra")})
-    root, _task = build_release(tmp_path / "build", name="r1", verifier=True)
+    published = build_dataset(tmp_path / "build", verifier=True)
     platform_copy = tmp_path / "platform-copy"
-    shutil.copytree(root, platform_copy, symlinks=True)
+    shutil.copytree(published, platform_copy, symlinks=True)
     harness = NativeHarness((cfg, platform, tree), monkeypatch)
-    # The same release content on both roots: each attempt mounts its own root.
-    harness.stage_release(tree.input_key("datasets", "tb/r1"), platform_copy)
-    harness.stage_release(tree.input_key("extra", "tb/r1"), platform_copy)
-    # The same release name bound on each root, through separate binding sets.
-    record = read_dataset(root / "dataset.jsonl")[0]
-    bound = {
-        name: ReleaseBindings(
-            {"r1": ReleaseBinding(local_root=root, platform_root="tb/r1", root=name)},
-            storage=cfg.storage_settings(),
-            inputs=cfg.input_settings(),
-        ).resolve(record)
-        for name in ("datasets", "extra")
-    }
-    assert {name: b.root for name, b in bound.items()} == {"datasets": "datasets", "extra": "extra"}
+    # The same dataset content on both roots: each attempt mounts its own root.
+    harness.stage_dataset(tree.input_key("datasets", "tb/r1"), platform_copy)
+    harness.stage_dataset(tree.input_key("extra", "tb/r1"), platform_copy)
+    sources = {name: Dataset(published, "tb/r1", root=name).source("ds/task-a") for name in ("datasets", "extra")}
+    assert {name: s.root for name, s in sources.items()} == {"datasets": "datasets", "extra": "extra"}
     inputs_before = {k: v for k, v in platform.tree_contents.items() if k.startswith("@")}
 
     async with Flotilla(deployment=cfg) as fleet:
@@ -456,14 +432,14 @@ async def test_releases_on_named_read_only_input_roots(
             ("extra", "", "/flotilla-inputs/extra", True),
         ]
         for name in ("datasets", "extra"):
-            attempt = await NativeAttempt.create(fleet, bound[name])
+            attempt = await NativeAttempt.create(fleet, sources[name])
             harness.workspace_key = attempt.workspace.key
             await attempt.open("main")
             (unit,) = [i for i in platform.iids() if platform.spec_of(i).labels.get(labels.ROLE) == labels.ROLE_UNIT]
             main_spec = platform.spec_of(unit)
-            source = volume_of(main_spec, "/input")
-            assert source is not None and source.read_only and source.root == name
-            assert source.key == f"tb/r1/{INPUT_KEY}"
+            mounted = volume_of(main_spec, "/input")
+            assert mounted is not None and mounted.read_only and mounted.root == name
+            assert mounted.key == f"tb/r1/ds/task-a/{INPUT_KEY}"
             artifacts = volume_of(main_spec, "/logs/agent")
             assert artifacts is not None and artifacts.root == "work"
             share = volume_of(main_spec, "/.flotilla")
@@ -475,7 +451,7 @@ async def test_releases_on_named_read_only_input_roots(
             result = await attempt.verify()
             assert result.exit_code == 0
             # Hidden tests were copied from the input root into the attempt's work-root directory.
-            assert platform.tree_contents.get(f"{attempt.workspace.key}/tests/check.sh") is not None
+            assert platform.tree_contents.get(f"{attempt.workspace.key}/tests/test.sh") is not None
             await attempt.close()
     # Nothing on an input root was written; SharedTree also fails any write attempt there.
     assert {k: v for k, v in platform.tree_contents.items() if k.startswith("@")} == inputs_before

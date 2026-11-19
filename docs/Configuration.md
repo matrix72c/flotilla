@@ -68,17 +68,17 @@ Same keys as `[storage]`. Each section declares a named read-only root for publi
 
 Publishing tools (`share publish`) always write the work root of the deployment they are given; release and runtime upload is outside Flotilla. Changing these sections invalidates capability evidence.
 
-### `[task_releases.<name>]`
+### `[datasets.<name>]`
 
-Explicit bindings for native task consumption. Probe/select/prepare can load a deployment before these future paths exist; consumption opens and verifies them.
+Where one published dataset is, on both sides. Loading a deployment opens nothing, so a config may name a dataset that does not exist yet; resolving it checks the root.
 
 | Key | Meaning |
 |---|---|
-| `local_root` | Local native release directory; relative to deployment.toml |
-| `input` | Optional `[inputs.<name>]` holding the release; omitted means the work root `[storage]` |
-| `platform_root` | Release location on its root: a relative storage key, an absolute host root confined beneath an absolute `host_path`/`root_subpath`, or explicit `pvc:<claim>/<root_subpath>/<release-key>` for PVC. Platform-identifier host paths require relative keys |
+| `local_root` | Local dataset directory, a directory of task directories; relative to deployment.toml |
+| `input` | Optional `[inputs.<name>]` holding the dataset; omitted means the work root `[storage]` |
+| `platform_root` | Dataset location on its root: a relative storage key, an absolute host root confined beneath an absolute `host_path`/`root_subpath`, or explicit `pvc:<claim>/<root_subpath>/<key>` for PVC. Platform-identifier host paths require relative keys |
 
-The binding name is a configuration label, not a guessed task identity. Dataset rows carry release ID, task reference and digest; every selected release must be bound. Do not upload partial releases or mutate an active release. See [Native tasks](Native_Tasks.md).
+The binding name is a configuration label, not a guessed task identity. `launches/` and `share/` are refused: those are Flotilla's own state, not task data. A dataset is read-only to Flotilla, which never writes to one; do not mutate one running jobs are reading. See [Native tasks](Native_Tasks.md).
 
 ### `[agent_runtime]` (optional)
 
@@ -191,24 +191,20 @@ memory = "8Gi"
 
 Precedence, lowest first: `[resources.default]`, resources declared in the Compose file, `[resources.services.*]`, `[resources.tasks.*]`, and finally `OpenOptions.resources` at runtime.
 
-### `[prepare]` and `[build]`
+### `[prepare]`
 
-Host `flotilla prepare` uses these settings to create immutable native releases. The host requires the optional Harbor importer, fixed Compose and build tools. Native attempts do not use host preparation tools. The `workspace_*` and `management_*` fields configure the launch anchor that reads task metadata, which every client creates; the remaining keys are host-only.
+The attempt's own management sandbox: the launch anchor that compiles attempt-owned storage and reads task metadata, which every client creates.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `prepare.concurrency` | `4` | Tasks prepared concurrently, by host `flotilla prepare` and by launch anchors |
-| `prepare.docker_command` | `["docker"]` | Docker argv prefix, e.g. `["sudo", "-n", "docker"]` |
-| `prepare.workspace_command` | `["python3", "-I", "-m", "flotilla.integrations.workspace"]` | Helper in the trusted management image; installed Flotilla/Harbor/build tools required, never automatically installed |
-| `prepare.workspace_timeout` | `1800` | Total remote preparation budget |
-| `prepare.management_profile` | `"default"` | `"management"` selects the trusted backend-specific management overrides for workspace anchors only; OpenSandbox requires nonempty `management_extensions` |
-| `prepare.management_resources` | unset (`0.5` CPU / `512Mi`) | Optional `{cpu, memory}` allocation for workspace anchors only; set explicit builder-sized limits for local builds |
-| `prepare.management_network` | external none | Explicit management-only remote Docker/build and registry destinations; no automatic unrestricted egress |
-| `prepare.management_mounts` | `[]` | Explicit read-only shared-volume mounts for credential/config files, never baked into images or passed to task sandboxes |
-| `prepare.management_env` | `{}` | Nonsecret helper environment such as `DOCKER_HOST` and `DOCKER_CONFIG` paths; credential contents belong in mounted files |
-| `prepare.export_timeout` | `600` | Seconds allowed for each Docker call that reads an image's `/etc/passwd` and `/etc/group` |
-| `build.pullable_registries` | `[]` | Registries or prefixes the platform can pull from directly; a service whose image comes from anywhere else is rejected |
-| `build.image_replacements` | `{}` | Map of image references to substitutes, e.g. to use an internal mirror. Applied before the `pullable_registries` check |
+| `concurrency` | `4` | Tasks a launch anchor works on concurrently |
+| `workspace_command` | `["python3", "-I", "-m", "flotilla.integrations.workspace"]` | Helper in the trusted management image; the matching Flotilla install is required and never installed automatically |
+| `workspace_timeout` | `1800` | Total remote budget for that helper |
+| `management_profile` | `"default"` | `"management"` selects the trusted backend-specific management overrides for workspace anchors only; OpenSandbox requires nonempty `management_extensions` |
+| `management_resources` | unset (`0.5` CPU / `512Mi`) | Optional `{cpu, memory}` allocation for workspace anchors only |
+| `management_network` | external none | Explicit management-only destinations; no automatic unrestricted egress |
+| `management_mounts` | `[]` | Explicit read-only shared-volume mounts for credential/config files, never baked into images or passed to task sandboxes |
+| `management_env` | `{}` | Nonsecret connection settings; credential contents belong in mounted files |
 
 The launch anchor that reads task metadata can be sized and placed separately from the ordinary task runtime:
 

@@ -74,7 +74,8 @@ async def _ready(
 
 
 def _plan(**units: Unit) -> TrialPlan:
-    return TrialPlan(task="t", task_files=None, units=units or {"main": _unit(), "db": _unit()})
+    units = units or {"main": _unit(), "db": _unit()}
+    return TrialPlan(task="t", task_files=None, units=units, agent_service=next(iter(units)))
 
 
 # ───────────────────────────── Liveness confirmation ─────────────────────────────

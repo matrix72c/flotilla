@@ -255,19 +255,15 @@ async def test_explicit_development_acceptance_allows_operations_and_records_gap
     cfg.capabilities_path().write_text(json.dumps(capability_data))
     platform.caps = cfg.load_report().to_capabilities()
     cfg = cfg.model_copy(update={"security": cfg.security.model_copy(update={"accept_insecure": frozenset(gaps)})})
-    from flotilla.manifest import Network
-    from flotilla.runtime.types import Task
+    from dataclasses import replace
+
+    from flotilla.core.plan import Network
 
     # A general development waiver does not promise Compose network_mode: none isolation.
-    connected = Task(
-        task()
-        .manifest()
-        .model_copy(
-            update={
-                "networks": {"default": Network(internal=False, members=["main"], names={})},
-                "external_units": ["main"],
-            }
-        )
+    connected = replace(
+        task(),
+        networks={"default": Network(internal=False, members=frozenset({"main"}), names={})},
+        external_units=frozenset({"main"}),
     )
     async with Flotilla(deployment=cfg) as fleet, environment(fleet, RunRequest(connected, "development")) as env:
         info = await env.info()
@@ -376,7 +372,7 @@ async def test_events_correlate_queue_execution_and_cleanup_without_command_secr
         assert (await fleet.drain(2)).clean
     kinds = {e.kind for e in events}
     assert {"queued", "admitted", "create", "operation_started", "operation_finished", "cleanup_finished"} <= kinds
-    assert all(e.request_id == "event-test" and e.task_digest == events[0].task_digest for e in events)
+    assert all(e.request_id == "event-test" and e.task == events[0].task for e in events)
     assert "secret-command" not in repr(events) and "private-value" not in repr(events)
 
 

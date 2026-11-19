@@ -21,12 +21,10 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from pathlib import Path
 from typing import Any, Protocol
 
-from flotilla.build.meta import parse_config
+from flotilla.compose.image_meta import parse_config
 from flotilla.compose.layout import Layout, classify
-from flotilla.compose.manifest_gen import synthesize_command
 from flotilla.compose.model import MAIN, ImageMeta, Project, Service
 from flotilla.compose.task import HarborTask
 from flotilla.core.plan import (
@@ -35,11 +33,12 @@ from flotilla.core.plan import (
     Healthcheck,
     Mount,
     Network,
+    TaskSource,
     TrialPlan,
     TrialVolume,
     Unit,
 )
-from flotilla.platform.base import Resources, StorageRoot
+from flotilla.platform.base import Resources
 from flotilla.platform.filesystem import unsized_tmpfs_bytes
 
 #: Image `USER` / Compose `user` values that mean root. Docker resolves `USER` by name inside the
@@ -58,24 +57,6 @@ class ImageConfigSource(Protocol):
     """Reads the `config` section of an image config, by digest."""
 
     def image_config(self, pinned: str) -> Mapping[str, Any]: ...
-
-
-@dataclass(frozen=True)
-class TaskSource:
-    """Where a task's files are, on the client and on the platform's shared storage.
-
-    `local` is read to parse the project. `key` is the same directory as the platform sees it,
-    which is what a sandbox mounts. Keeping both means flotilla never has to assume the two
-    filesystems are mounted at the same path, and never has to copy the task to make them agree.
-    """
-
-    local: Path
-    key: str | None = None
-    root: StorageRoot = "work"
-
-    def __post_init__(self) -> None:
-        if self.key is not None and (not self.key or self.key.startswith("/") or ".." in self.key.split("/")):
-            raise PlanError(f"task files key must be a canonical relative path: {self.key!r}")
 
 
 @dataclass(frozen=True)
@@ -115,6 +96,7 @@ def plan_task(
 
     meta = {name: _meta(name, svc, configs) for name, svc in project.services.items()}
     layout = classify(project.services)
+    prefix = _env_prefix(task)
     # `svc.environment` includes `env_file` and overrides the image's own ENV.
     env = {name: {**meta[name].env, **svc.environment} for name, svc in project.services.items()}
     targets = overlay.services if overlay.services is not None else frozenset({MAIN})
@@ -128,8 +110,11 @@ def plan_task(
         task=task.name,
         task_files=source.key,
         task_files_root=source.root,
+        # A Harbor task's agent always works in `main`, which `normalize` guarantees exists.
+        agent_service=MAIN,
         units={
-            name: _unit(svc, meta[name], env[name], resources[name], layout) for name, svc in project.services.items()
+            name: _unit(svc, meta[name], env[name], resources[name], layout, prefix)
+            for name, svc in project.services.items()
         },
         networks=_networks(project),
         depends_on={
@@ -137,7 +122,7 @@ def plan_task(
             for name, svc in project.services.items()
             if svc.depends_on
         },
-        volumes=_volumes(layout, _env_prefix(task)),
+        volumes=_volumes(layout, prefix),
         external_units=frozenset(
             name
             for name, svc in project.services.items()
@@ -152,6 +137,21 @@ def plan_task(
     except ValueError as exc:
         raise PlanError(f"{task.name} does not resolve to a consistent trial: {exc}") from exc
     return plan
+
+
+def synthesize_command(svc: Service, meta: ImageMeta) -> tuple[str, ...] | None:
+    """The unit's main process argv, by Docker's rules.
+
+    Compose `entrypoint` replaces the image ENTRYPOINT and also drops the image CMD; `command`
+    replaces CMD alone. When both end up empty the unit has no main process, and the sandbox is
+    driven by client `execute` only.
+    """
+    if svc.entrypoint is not None:
+        entrypoint, cmd = svc.entrypoint, svc.command or ()
+    else:
+        entrypoint = meta.entrypoint or ()
+        cmd = svc.command if svc.command is not None else (meta.cmd or ())
+    return (*entrypoint, *cmd) or None
 
 
 def _meta(service: str, svc: Service, configs: ImageConfigSource) -> ImageMeta:
@@ -190,7 +190,14 @@ def _overlay(env: Mapping[str, str], overlay: Mapping[str, str]) -> dict[str, st
     return out
 
 
-def _unit(svc: Service, meta: ImageMeta, env: Mapping[str, str], resources: Resources, layout: Layout) -> Unit:
+def _unit(
+    svc: Service,
+    meta: ImageMeta,
+    env: Mapping[str, str],
+    resources: Resources,
+    layout: Layout,
+    env_prefix: str,
+) -> Unit:
     assert svc.image is not None  # `_meta` refused a service without one
     check = None if svc.healthcheck_disabled else (svc.healthcheck or meta.healthcheck)
     tmpfs = tuple(
@@ -214,7 +221,14 @@ def _unit(svc: Service, meta: ImageMeta, env: Mapping[str, str], resources: Reso
         ),
         restart=svc.restart,
         mounts=tuple(
-            Mount(scope=m.scope, key=m.key, target=m.target, read_only=m.read_only)
+            Mount(
+                scope=m.scope,
+                # A task mount names a path inside the published task directory, and a bind source
+                # is relative to the environment directory, so the two have to be joined.
+                key=f"{env_prefix}{m.key}" if m.scope == "task" else m.key,
+                target=m.target,
+                read_only=m.read_only,
+            )
             for m in layout.mounts.get(svc.name, ())
         ),
         privileged=svc.privileged,

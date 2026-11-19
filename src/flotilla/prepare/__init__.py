@@ -1,8 +1,7 @@
-"""Public host selection/preparation API."""
+"""Checking a dataset's tasks before anything is created."""
 
 from __future__ import annotations
 
-from flotilla.integrations.native_import import SelectedTask
-from flotilla.prepare.release import PreparationError, PrepareResult, SelectionResult, prepare, select
+from flotilla.prepare.inspect import EnvironmentInspection, inspect, inspect_task
 
-__all__ = ["PreparationError", "PrepareResult", "SelectedTask", "SelectionResult", "prepare", "select"]
+__all__ = ["EnvironmentInspection", "inspect", "inspect_task"]

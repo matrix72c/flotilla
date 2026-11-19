@@ -22,7 +22,6 @@ from flotilla.core.anchor import EXPIRY_MARGIN_S, AnchorSettings
 from flotilla.core.reaper import ReaperSettings
 from flotilla.core.runtime import MonitorSettings
 from flotilla.core.trial import TrialSettings
-from flotilla.manifest import Manifest
 from flotilla.platform.base import (
     WORK_ROOT,
     Capabilities,
@@ -41,8 +40,8 @@ from flotilla.resources import cpu, memory
 from flotilla.share.release import BUILTIN_RELEASE, BUILTIN_RELEASE_SHA256
 
 if TYPE_CHECKING:
-    from flotilla.build.images import BuildSettings
-    from flotilla.native import ReleaseBindings
+    # The module, not the package: finding a dataset must not pull the Harbor adapters in.
+    from flotilla.native.dataset import Dataset
 
 #: Anchor renewal retry interval (`AnchorSettings.retry_interval_s`); the renew interval cannot be shorter.
 ANCHOR_RETRY_S = AnchorSettings(image="x").retry_interval_s
@@ -104,21 +103,6 @@ class OpenSandbox(BackendSettings):
     max_connections: PositiveInt = 100
 
 
-class Build(_Model):
-    """Dataset builder config `[build]`, used by `flotilla prepare`."""
-
-    pullable_registries: tuple[str, ...] = ()
-    image_replacements: dict[str, str] = {}
-
-    def settings(self) -> BuildSettings:
-        from flotilla.build.images import BuildSettings
-
-        return BuildSettings(
-            pullable_registries=self.pullable_registries,
-            image_replacements=self.image_replacements,
-        )
-
-
 class Storage(_Model):
     volumes: Literal["host", "pvc"] = "host"
     host_path: str = ""
@@ -134,6 +118,34 @@ class Storage(_Model):
         return StorageSettings(
             volumes=self.volumes, host_path=self.host_path, claim_name=self.claim_name, root_subpath=self.root_subpath
         )
+
+
+class Registry(_Model):
+    """Read-only registry access, for the image configs the platform does not read itself.
+
+    Credentials are not here: a deployment file goes into version control with a recipe, and a
+    registry password must not travel with it. Each host names an environment variable holding
+    `username:password`, read when a client is constructed.
+    """
+
+    #: Registry host -> name of the environment variable holding `username:password` for it.
+    credential_envs: dict[str, str] = Field(default_factory=dict)
+    #: Where to keep image configs between runs. A digest names one config forever, so entries
+    #: never expire; without a path they live in memory for the life of the client only.
+    config_cache: Path | None = None
+
+    def credentials(self) -> dict[str, tuple[str, str]]:
+        """Each host's credential, read from its environment variable; an unset one is skipped."""
+        out: dict[str, tuple[str, str]] = {}
+        for host, variable in self.credential_envs.items():
+            value = os.environ.get(variable)
+            if not value:
+                continue
+            user, separator, password = value.partition(":")
+            if not separator or not user:
+                raise ConfigError([f"{variable} must hold `username:password` for registry {host}"])
+            out[host] = (user, password)
+        return out
 
 
 class Share(_Model):
@@ -320,15 +332,8 @@ class ResourceDefaults(_Model):
             values.update(self.tasks[task].services[service].model_dump())
         return values
 
-    def for_manifest(self, manifest: Manifest) -> dict[str, Resources]:
-        """The same effective resource allocation used by preflight and creation."""
-        return {
-            name: Resources(**self.effective(manifest.task, name, unit.resources.model_dump(exclude_none=True)))
-            for name, unit in manifest.units.items()
-        }
-
     def for_services(self, task: str, declared: Mapping[str, Mapping[str, str]]) -> dict[str, Resources]:
-        """The same allocation from what each service declares, with no manifest in between.
+        """The effective resource allocation used by preflight and creation.
 
         Takes the declarations rather than a `Project` so that configuration stays free of the
         Compose model: the runtime imports this module and must not pull the parser in with it.
@@ -337,7 +342,7 @@ class ResourceDefaults(_Model):
 
 
 class Prepare(_Model):
-    """Attempt-local compilation and optional image-cache prewarming."""
+    """The attempt's own management sandbox: where attempt-owned storage is compiled."""
 
     management_profile: InstanceProfile = "default"
     management_resources: Resource | None = None  # None preserves the lightweight anchor default.
@@ -346,21 +351,15 @@ class Prepare(_Model):
     # Nonsecret connection settings only; credentials belong in explicit RO mounts.
     management_env: dict[str, str] = Field(default_factory=dict)
     concurrency: PositiveInt = 4
-    docker_command: tuple[str, ...] = ("docker",)
     workspace_command: tuple[str, ...] = ("python3", "-I", "-m", "flotilla.integrations.workspace")
     workspace_timeout: PositiveFloat = 1800.0
-    export_timeout: PositiveFloat = 600.0  # per `docker cp` of an image volume's initial content
 
-    @field_validator("docker_command", "workspace_command")
+    @field_validator("workspace_command")
     @classmethod
     def _command(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        return _argv(value)
-
-
-def _argv(value: tuple[str, ...]) -> tuple[str, ...]:
-    if not value or any(not part for part in value):
-        raise ValueError("docker_command must be a nonempty argv")
-    return value
+        if not value or any(not part for part in value):
+            raise ValueError("workspace_command must be a nonempty argv")
+        return value
 
 
 class ProbeTarget(_Model):
@@ -407,12 +406,16 @@ class Probe(_Model):
         return value
 
 
-class TaskRelease(_Model):
-    """Deployment locations, not immutable task identity; no I/O at load time."""
+class DatasetBinding(_Model):
+    """Where one published dataset is, on both sides; no I/O at load time.
+
+    The dataset is an input someone else publishes. Both views are declared because neither side
+    can infer the other: a client path says nothing about how the platform mounts the storage.
+    """
 
     local_root: Path
     platform_root: str = Field(min_length=1)
-    # Name of the [inputs.<name>] root holding the release; None means the work root ([storage]).
+    # Name of the [inputs.<name>] root holding the dataset; None means the work root ([storage]).
     input: str | None = None
 
 
@@ -442,16 +445,16 @@ class FlotillaConfig(_Model):
     opensandbox: OpenSandbox | None = None  # built-in backend table
     backends: dict[str, dict[str, Any]] = {}  # third-party backend tables, validated by the selected backend
     storage: Storage
-    # Named read-only roots for published task releases and external read-only payloads (e.g. an owner's
+    # Named read-only roots for published datasets and external read-only payloads (e.g. an owner's
     # storage shared read-only with this deployment). Launch, attempt and share state always stay on `storage`.
     inputs: dict[str, Storage] = Field(default_factory=dict)
-    task_releases: dict[str, TaskRelease] = Field(default_factory=dict)
+    datasets: dict[str, DatasetBinding] = Field(default_factory=dict)
     # Typed agent runtime layer bindings (see AgentRuntime); never interpreted beyond shape and roots.
     agent_runtime: AgentRuntime | None = None
-    build: Build = Build()
     prepare: Prepare = Prepare()
     probe: Probe = Probe()
     share: Share = Share()
+    registry: Registry = Registry()
     network: Network = Network()
     security: Security = Security()
     runtime_params: dict[str, str] = {}
@@ -488,9 +491,9 @@ class FlotillaConfig(_Model):
             check_root_name(name)
             if name == WORK_ROOT:
                 raise ValueError(f"[inputs.{WORK_ROOT}] is reserved for [storage]")
-        for label, release in self.task_releases.items():
-            if release.input is not None and release.input not in self.inputs:
-                raise ValueError(f"task_releases.{label}.input names no [inputs.{release.input}]")
+        for label, binding in self.datasets.items():
+            if binding.input is not None and binding.input not in self.inputs:
+                raise ValueError(f"datasets.{label}.input names no [inputs.{binding.input}]")
         if self.agent_runtime is not None:
             for name in self.agent_runtime.layers:
                 check_root_name(name)
@@ -524,7 +527,7 @@ class FlotillaConfig(_Model):
             # An unreadable config file is a usage error: report it as a config error, without a traceback.
             raise ConfigError([f"cannot read deployment configuration {path}: {exc.strerror or exc}"]) from exc
         if path.suffix == ".json":
-            # A frozen copy written by Deployment.freeze.
+            # A deployment a consumer generated rather than wrote by hand.
             try:
                 data = json.loads(text)
             except json.JSONDecodeError as exc:
@@ -565,11 +568,11 @@ class FlotillaConfig(_Model):
         data = self.model_dump(mode="json", exclude={"base_dir"})
         table = data["opensandbox"] if self.backend == BUILTIN else data["backends"][self.backend]
         table["capabilities"] = str(self.capabilities_path().resolve())
-        for name, binding in self.task_releases.items():
+        for name, binding in self.datasets.items():
             root = binding.local_root
             if not root.is_absolute() and self.base_dir is not None:
                 root = self.base_dir / root
-            data["task_releases"][name]["local_root"] = str(root.absolute())
+            data["datasets"][name]["local_root"] = str(root.absolute())
         if self.agent_runtime is not None:
             for layer_name, layer in self.agent_runtime.layers.items():
                 if layer.local_root is None:
@@ -580,19 +583,21 @@ class FlotillaConfig(_Model):
                 data["agent_runtime"]["layers"][layer_name]["local_root"] = str(local.absolute())
         return data
 
-    def release_bindings(self) -> ReleaseBindings:
-        """Open releases only for consume/train, not probe/select/prepare."""
-        from flotilla.native import ReleaseBinding, ReleaseBindings
+    def resolve_datasets(self) -> dict[str, Dataset]:
+        """The declared datasets, each resolved against the storage root it lives on."""
+        from flotilla.native.dataset import datasets as resolve
 
         bindings = {}
-        for name, binding in self.task_releases.items():
+        for name, binding in self.datasets.items():
             root = binding.local_root
             if not root.is_absolute() and self.base_dir is not None:
                 root = self.base_dir / root
-            bindings[name] = ReleaseBinding(
-                local_root=root, platform_root=binding.platform_root, root=binding.input or WORK_ROOT
-            )
-        return ReleaseBindings(bindings, storage=self.storage.settings(), inputs=self.input_settings())
+            bindings[name] = {
+                "local_root": root,
+                "platform_root": binding.platform_root,
+                "root": binding.input or WORK_ROOT,
+            }
+        return resolve(bindings, storage=self.storage.settings(), inputs=self.input_settings())
 
     def capabilities_path(self) -> Path:
         path = Path(self.backend_settings.capabilities)

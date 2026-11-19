@@ -71,24 +71,20 @@ YAML anchors and `<<` merge keys are resolved while loading. Compose's
 
 ## Storage and command behavior
 
-- All file-backed mounts use attempt-owned storage, even one writable reference
-  or an exclusively read-only volume. There is no reference-count-based image
-  baking and no public persistent task-data dataset in the Harbor path.
+- A read-only bind group is mounted where it is published, straight from the
+  task directory, and shared by every attempt of that task. Nothing is copied
+  to run it.
+- One writable reference makes the whole group attempt-owned, because the
+  references share backing storage: it is copied out of the task directory
+  first, so a run cannot write into published task data.
 - Equal bind sources and a mounted source plus its mounted descendants share
   one backing root. Each mount retains its own read-only/read-write flag.
   Parent target mounts precede nested target mounts.
-- Build export `files/binds/<index>` and the adjacent `file-identities.json`
-  are **internal transient staging**, retained for the lower-level runtime's
-  copy contract. The attempt owner must upload and clean them up, restore
-  numeric metadata, and preserve hardlinks during transfer. The manifest uses
-  trial-scope mounts and trial-volume `copy_from`, not shared read-only task
-  mounts.
-- Hardlinks inside one bind source tree are preserved during export. Hardlinks
-  spanning independent bind roots are rejected because separate runtime copies
-  cannot preserve their identity. Symlinks and nonregular entries inside bind
-  trees are rejected; missing bind sources are rejected rather than fabricated.
-  This is not a complete POSIX filesystem snapshot contract (for example,
-  extended attributes and ACL fidelity are not promised).
+- Symlinks and nonregular entries inside bind trees are rejected; missing bind
+  sources are rejected rather than fabricated. Hardlinks spanning independent
+  bind roots are rejected, because separate copies cannot preserve their
+  identity. This is not a complete POSIX filesystem snapshot contract (for
+  example, extended attributes and ACL fidelity are not promised).
 - Named volumes always start empty, unlike Docker, which copies the image
   content under the mount target into a fresh volume. `volume.nocopy: true` is
   recorded as equivalent: it asks for the behavior already in force. A task that

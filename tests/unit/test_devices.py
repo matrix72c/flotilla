@@ -1,4 +1,4 @@
-"""Compose `/dev/kvm` and `/dev/net/tun` survive parsing, preparation and admission on the privileged runtime."""
+"""Compose `/dev/kvm` and `/dev/net/tun` survive parsing, planning and admission on the privileged runtime."""
 
 from __future__ import annotations
 
@@ -7,16 +7,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from pydantic import ValidationError
 
 from flotilla import Flotilla
-from flotilla.build.driver import build_task
 from flotilla.capabilities import Item, ProbeSettings
 from flotilla.compose.normalize import normalize
 from flotilla.compose.task import load_task
 from flotilla.config import FlotillaConfig
 from flotilla.core.anchor import Anchor, AnchorSettings
-from flotilla.manifest import Manifest
 from flotilla.platform.base import (
     Capabilities,
     ErrorCategory,
@@ -30,11 +27,10 @@ from flotilla.platform.base import (
 from flotilla.probe import _Run
 from flotilla.probe_checks import device, fuse
 from flotilla.runtime.manager import Manager
-from flotilla.runtime.planning import to_plan
-from flotilla.runtime.types import RunRequest, Task
+from flotilla.runtime.types import RunRequest
 from flotilla.scan import scan
-from flotilla.testing.build import _ctx, _task
 from flotilla.testing.config import config_data
+from flotilla.testing.planning import APP, _caps, _task, plan
 from flotilla.testing.platform import FakePlatform, ManualClock, SharedTree
 from flotilla.testing.reports import ok, report
 from flotilla.testing.runtime import deployment as deployment
@@ -122,30 +118,16 @@ def test_scan_requires_device_evidence(caps: Capabilities) -> None:
     assert scan("osworld", readonly, replace(_device_caps(caps), readonly_rootfs=True)).status == "rejected"
 
 
-def test_devices_roundtrip_to_runtime_plan(tmp_path: Path) -> None:
+def test_devices_roundtrip_to_the_plan(tmp_path: Path) -> None:
     compose = (
-        "services:\n  main:\n    image: r.io/app\n    devices: [/dev/net/tun, /dev/kvm]\n"
-        "    mem_limit: 1g\n    cpus: 1\n"
+        f"services:\n  main:\n    image: {APP}\n    devices: [/dev/net/tun, /dev/kvm]\n    mem_limit: 1g\n    cpus: 1\n"
     )
-    ctx = _ctx()
-    outcome = build_task(load_task(_task(tmp_path, "rejected", compose=compose)), tmp_path / "no", ctx)
-    assert outcome.status == "rejected" and "devices" in (outcome.reason or "")
-    ctx = replace(ctx, caps=_device_caps(ctx.caps))
-    outcome = build_task(load_task(_task(tmp_path, "dev", compose=compose)), tmp_path / "out", ctx)
-    assert outcome.manifest_path, outcome.reason
-    manifest = Manifest.load_json(outcome.manifest_path.read_bytes())
-    assert manifest.units["main"].devices == ["kvm", "tun"] and not manifest.units["main"].privileged
-    unit = to_plan(manifest).units["main"]
+    task = load_task(_task(tmp_path, "dev", compose=compose))
+    # Planning does not consult the deployment; the capability scan is what refuses the task.
+    assert scan(task.name, task.project, _caps()).status == "rejected"
+    assert scan(task.name, task.project, _device_caps(_caps())).status == "accepted"
+    unit = plan(task).units["main"]
     assert unit.devices == {"kvm", "tun"} and unit.privileged_runtime and not unit.privileged
-
-
-def test_manifest_devices_are_sorted_and_known() -> None:
-    unit = task().manifest().units["main"]
-    data = unit.model_dump(mode="json")
-    with pytest.raises(ValidationError, match="sorted"):
-        type(unit).model_validate({**data, "devices": ["tun", "kvm"]})
-    with pytest.raises(ValidationError):
-        type(unit).model_validate({**data, "devices": ["sda"]})
 
 
 def test_instance_spec_devices_need_the_privileged_runtime() -> None:
@@ -171,9 +153,8 @@ async def test_device_units_open_on_the_privileged_runtime(
     deployment: tuple[FlotillaConfig, FakePlatform, SharedTree],
 ) -> None:
     cfg, platform, _ = deployment
-    manifest = task().manifest()
-    unit = manifest.units["main"].model_copy(update={"devices": ["kvm", "tun"]})
-    prepared = Task(manifest.model_copy(update={"units": {"main": unit}}))
+    base = task()
+    prepared = replace(base, units={"main": replace(base.units["main"], devices=frozenset({"kvm", "tun"}))})
     with pytest.raises(FlotillaError, match="devices") as failure:
         Manager(cfg, platform=platform).plan(RunRequest(prepared, "devices"))
     assert failure.value.category is ErrorCategory.INVALID and platform.calls["create"] == 0

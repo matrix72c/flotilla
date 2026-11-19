@@ -1,37 +1,23 @@
-"""Public portable release protocol and consume-only task lifecycle.
+"""Consume-only task lifecycle, over a dataset someone else publishes.
 
-Importing readers and models does not load the scheduler, Harbor, Compose or a
-builder. Runtime exports are lazy for CPU metadata and installed helper use.
+Importing the models and the dataset mapping does not load the scheduler, Harbor or Compose.
+Runtime exports stay lazy so CPU-side metadata use does not pull the platform in.
 """
 
 from typing import Any
 
-from .models import PROTOCOL_VERSION, Artifact, DatasetRow, Task, Verification
-from .release import (
-    BoundTask,
-    ReleaseBinding,
-    ReleaseBindings,
-    ReleaseReader,
-    ReleaseWriter,
-    platform_key,
-    read_dataset,
-)
+from .dataset import Dataset, DatasetError, datasets, platform_key
+from .models import Artifact, Verification
 
 __all__ = [
-    "PROTOCOL_VERSION",
     "Artifact",
-    "BoundTask",
-    "DatasetRow",
+    "Dataset",
+    "DatasetError",
     "NativeAttempt",
-    "ReleaseBinding",
-    "ReleaseBindings",
-    "ReleaseReader",
-    "ReleaseWriter",
-    "Task",
     "Verification",
     "VerificationResult",
+    "datasets",
     "platform_key",
-    "read_dataset",
 ]
 
 

@@ -6,6 +6,10 @@ import tomllib
 from collections.abc import Mapping
 from pathlib import Path
 
+from harbor.models.task.config import TaskConfig
+from harbor.models.task.paths import TaskPaths
+from harbor.models.task.verifier_mode import resolve_verifier_environment_definition
+
 from flotilla.compose.paths import confined
 from flotilla.compose.task import HarborTask, TaskError, load_environment
 
@@ -36,10 +40,6 @@ def _task_environments(
     compose_environment: Mapping[str, str] | None,
 ) -> list[HarborTask]:
     raw = tomllib.loads(confined(path, "task.toml").read_text())
-    from harbor.models.task.config import TaskConfig
-    from harbor.models.task.paths import TaskPaths
-    from harbor.models.task.verifier_mode import resolve_verifier_environment_definition
-
     config = TaskConfig.model_validate(raw)
     definitions = [
         load_environment(

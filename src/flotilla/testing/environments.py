@@ -7,12 +7,12 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 
 from flotilla import Environment, Flotilla, OpenOptions
-from flotilla.runtime.types import Task
+from flotilla.core.plan import TrialPlan
 
 
 @dataclass
 class FixtureRequest:
-    task: Task
+    task: TrialPlan
     request_id: str
     timeout: float | None = None
     exec_env: dict[str, dict[str, str]] = field(default_factory=dict)

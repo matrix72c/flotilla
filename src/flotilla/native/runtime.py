@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import tomllib
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from harbor.models.task.config import TaskConfig
+
+from flotilla.compose.task import TASK_FILE
+from flotilla.compose.verification import artifacts_of, verification_of
+from flotilla.core.plan import TaskSource, TrialPlan
+from flotilla.integrations.harbor_source import task_environments
+from flotilla.native.models import Artifact, Verification, check_against_plans
 from flotilla.platform.base import SharedVolume
-from flotilla.prepared import PreparedEnvironment
 from flotilla.runtime.types import OpenOptions
 from flotilla.runtime.workspace import Workspace
-
-from .release import BoundTask
 
 if TYPE_CHECKING:
     from flotilla.runtime.client import Flotilla
@@ -29,32 +34,48 @@ class VerificationResult:
     outputs: dict[str, bytes]
 
 
-def _environments(manager: Manager, bound: BoundTask) -> dict[str, PreparedEnvironment]:
-    """Point each role at the release's platform copy and authorize those task files for this launch."""
-    environments = {
-        role: PreparedEnvironment(manifest.model_copy(update={"task_files": bound.platform_key}))
-        for role, manifest in bound.task.roles.items()
-    }
-    for prepared in environments.values():
-        manager.workspaces.native_environments[prepared.digest] = bound.platform_key, bound.root
-    return environments
+#: Read verbatim from the task directory: the agent's brief and the grading script's home.
+INSTRUCTION = "instruction.md"
+TESTS_DIR = "tests"
 
 
-async def _create(manager: Manager, bound: BoundTask) -> tuple[WorkspaceInfo, dict[str, PreparedEnvironment]]:
-    environments = _environments(manager, bound)
-    info = await manager.workspaces.create_empty(bound.task.key)
+def _task_config(path: Path) -> TaskConfig:
+    """The task's own `task.toml`, as Harbor's model, for the `[verifier]` table."""
+    return TaskConfig.model_validate(tomllib.loads((path / TASK_FILE).read_text()))
+
+
+@dataclass(frozen=True)
+class NativeTask:
+    """A task resolved into everything a graded attempt needs: one plan per role, plus grading.
+
+    `main` is the environment the agent works in. `verifier` exists only when the task declares a
+    separate verifier environment; otherwise grading runs in `main`, in the sandbox the agent just
+    used, which is what a task without a second environment is asking for.
+    """
+
+    key: str
+    source: TaskSource
+    plans: dict[str, TrialPlan]
+    verification: Verification | None
+    artifacts: tuple[Artifact, ...]
+    instruction: str
+
+
+async def _create(manager: Manager, task: NativeTask) -> WorkspaceInfo:
+    """Create the attempt's private workspace and the directories its roles hand each other."""
+    info = await manager.workspaces.create_empty(task.key)
     try:
-        for artifact in bound.task.artifacts:
-            manifest = bound.task.roles[artifact.role]
-            context = manifest.units[artifact.service or manifest.agent_service].context
+        for artifact in task.artifacts:
+            plan = task.plans[artifact.role]
+            context = plan.units[artifact.service or plan.agent].context
             key = f"{info.key}/artifacts/{artifact.name}"
             await manager.anchor.mkdir(key, stage="prepare")
             await manager.anchor.chown(key, context.uid, context.gid, stage="prepare")
             await manager.anchor.chmod(key, 0o755, stage="prepare")
-        verification = bound.task.verification
+        verification = task.verification
         if verification:
-            manifest = bound.task.roles[verification.role]
-            context = manifest.units[verification.service or manifest.agent_service].context
+            plan = task.plans[verification.role]
+            context = plan.units[verification.service or plan.agent].context
             for name in ("tests", "verification"):
                 key = f"{info.key}/{name}"
                 await manager.anchor.mkdir(key, stage="prepare")
@@ -65,7 +86,7 @@ async def _create(manager: Manager, bound: BoundTask) -> tuple[WorkspaceInfo, di
                 verification.gid if verification.gid is not None else context.gid,
                 stage="prepare",
             )
-        return info, environments
+        return info
     except BaseException as primary:
         try:
             await manager.release_workspace(info.id)
@@ -75,17 +96,16 @@ async def _create(manager: Manager, bound: BoundTask) -> tuple[WorkspaceInfo, di
 
 
 class NativeAttempt:
-    """One private attempt. The caller must stop its agent before calling verify.
+    """One private attempt at a graded task. The caller must stop its agent before calling verify.
 
-    Static release data is never copied wholesale. Core.Trial initializes declared
-    private volumes from prepared seeds; this class owns only role handoff state.
+    The task directory is never copied: each role's plan mounts it read-only, straight from
+    shared storage. What this class owns is the attempt's own workspace -- the artifact
+    directories, the staged tests, the verifier's output -- and the handoff between roles.
     """
 
-    def __init__(
-        self, fleet: Flotilla, bound: BoundTask, workspace: Workspace, prepared: dict[str, PreparedEnvironment]
-    ) -> None:
-        self.fleet, self.bound, self.task = fleet, bound, bound.task
-        self.workspace, self.prepared = workspace, prepared
+    def __init__(self, fleet: Flotilla, task: NativeTask, workspace: Workspace) -> None:
+        self.fleet, self.task = fleet, task
+        self.workspace = workspace
         self.environments: dict[str, Environment] = {}
         self._lock = asyncio.Lock()
         self._closed = False
@@ -93,26 +113,58 @@ class NativeAttempt:
         self._handoff = False
 
     @classmethod
-    async def create(cls, fleet: Flotilla, bound_task: BoundTask) -> NativeAttempt:
-        # Reconstruct from the reader, not caller-mutated nested dicts.
-        bound = replace(bound_task, task=bound_task.reader.read_task(bound_task.row.task))
-        await fleet.start()
-        info, prepared = await fleet._call(
-            lambda manager: _create(manager, bound),
-            settle_cancel=True,
-            cancel_result=lambda manager, value: manager.release_workspace(value[0].id),
+    def resolve(cls, fleet: Flotilla, source: TaskSource, options: OpenOptions | None = None) -> NativeTask:
+        """Read a task directory into one plan per role, plus how it is graded.
+
+        Pure and synchronous, so a caller can resolve a whole dataset and find the tasks that do
+        not plan before spending a single sandbox on any of them.
+        """
+        parameters = {**fleet.config.runtime_params, **(options.parameters if options else {})}
+        environments = task_environments(source.local, compose_environment=parameters)
+        if len(environments) > 2:
+            raise ValueError("a task has at most two environments: the agent's and a separate verifier's")
+        roles = ["main"] if len(environments) == 1 else ["main", "verifier"]
+        plans = {
+            role: fleet.plan_environment(environment, source, options)
+            for role, environment in zip(roles, environments, strict=True)
+        }
+        config = _task_config(source.local)
+        has_tests = (source.local / TESTS_DIR).is_dir()
+        verification = verification_of(config, roles=plans, has_tests=has_tests)
+        artifacts = artifacts_of(config, has_tests=has_tests)
+        check_against_plans(verification, artifacts, plans=plans)
+        instruction = (source.local / INSTRUCTION).read_text(encoding="utf-8")
+        return NativeTask(
+            key=source.key or source.local.name,
+            source=source,
+            plans=plans,
+            verification=verification,
+            artifacts=artifacts,
+            instruction=instruction,
         )
-        return cls(fleet, bound, Workspace(fleet, info), prepared)
+
+    @classmethod
+    async def create(
+        cls, fleet: Flotilla, source: TaskSource | NativeTask, options: OpenOptions | None = None
+    ) -> NativeAttempt:
+        task = source if isinstance(source, NativeTask) else cls.resolve(fleet, source, options)
+        await fleet.start()
+        info = await fleet._call(
+            lambda manager: _create(manager, task),
+            settle_cancel=True,
+            cancel_result=lambda manager, value: manager.release_workspace(value.id),
+        )
+        return cls(fleet, task, Workspace(fleet, info))
 
     def _options(self, role: str, options: OpenOptions | None) -> OpenOptions:
         options = options or OpenOptions()
         if options.workspace_id is not None or options.workspace_mounts:
             raise ValueError("native attempt owns workspace mounts")
         mounts: dict[str, list[SharedVolume]] = {}
-        manifest = self.task.roles[role]
+        plan = self.task.plans[role]
         for artifact in self.task.artifacts:
             if artifact.role == role:
-                service = artifact.service or manifest.agent_service
+                service = artifact.service or plan.agent
                 mounts.setdefault(service, []).append(
                     SharedVolume(
                         key=f"{self.workspace.key}/artifacts/{artifact.name}",
@@ -122,7 +174,7 @@ class NativeAttempt:
                 )
             elif role == "verifier" and self._handoff:
                 verifier_service = self.task.verification.service if self.task.verification else None
-                mounts.setdefault(verifier_service or manifest.agent_service, []).append(
+                mounts.setdefault(verifier_service or plan.agent, []).append(
                     SharedVolume(
                         key=f"{self.workspace.key}/handoff/{artifact.name}",
                         mount_path=artifact.verifier_target or artifact.target,
@@ -131,7 +183,7 @@ class NativeAttempt:
                 )
         verification = self.task.verification
         if verification and verification.role == role:
-            service = verification.service or manifest.agent_service
+            service = verification.service or plan.agent
             mounts.setdefault(service, []).append(
                 SharedVolume(
                     key=f"{self.workspace.key}/verification", mount_path=verification.output_dir, read_only=False
@@ -146,6 +198,7 @@ class NativeAttempt:
         return replace(
             options,
             workspace_id=self.workspace.id,
+            workspace_root=self.workspace.key,
             workspace_mounts={service: tuple(items) for service, items in mounts.items()},
         )
 
@@ -156,7 +209,7 @@ class NativeAttempt:
     async def _open(self, role: str, options: OpenOptions | None) -> Environment:
         if self._closed:
             raise RuntimeError("native attempt is closed")
-        if role not in self.prepared:
+        if role not in self.task.plans:
             raise ValueError(f"unknown native role: {role}")
         if role == "verifier" and not self._verification_started:
             raise ValueError("open the isolated verifier through verify() after agent completion")
@@ -168,7 +221,7 @@ class NativeAttempt:
         ):
             raise RuntimeError("cannot reopen main after verifier handoff")
         if role not in self.environments:
-            self.environments[role] = await self.fleet.open(self.prepared[role], self._options(role, options))
+            self.environments[role] = await self.fleet.open(self.task.plans[role], self._options(role, options))
         return self.environments[role]
 
     async def _stage_verification(self) -> None:
@@ -194,10 +247,10 @@ class NativeAttempt:
                     raise RuntimeError("could not clear verification output directory")
                 if verification.tests:
                     await manager.anchor.copy_contents(
-                        f"{self.bound.platform_key}/{verification.tests}",
+                        f"{self.task.source.key}/{verification.tests}",
                         f"{info.key}/tests",
                         stage="prepare",
-                        src_root=self.bound.root,
+                        src_root=self.task.source.root,
                     )
                 if verification.role == "verifier":
                     for artifact in self.task.artifacts:
@@ -225,8 +278,8 @@ class NativeAttempt:
                 await self._release("main")
             await self._stage_verification()
             environment = await self._open(verification.role, options)
-            manifest = self.task.roles[verification.role]
-            service = environment.service(verification.service or manifest.agent_service)
+            plan = self.task.plans[verification.role]
+            service = environment.service(verification.service or plan.agent)
             result = await service.exec(
                 verification.command,
                 timeout=timeout or verification.timeout_s,
@@ -269,9 +322,9 @@ class NativeAttempt:
         if role not in self.environments and "verifier" in self.environments and self._handoff:
             role = "verifier"
             path = artifact.verifier_target or path
-        manifest = self.task.roles[role]
+        plan = self.task.plans[role]
         service = artifact.service if role == artifact.role else None
-        await self.environments[role].service(service or manifest.agent_service).download_dir(path, target)
+        await self.environments[role].service(service or plan.agent).download_dir(path, target)
 
     async def _release(self, role: str) -> None:
         environment = self.environments.get(role)

@@ -2,7 +2,7 @@
 
 This is a local infrastructure reference for OpenSandbox's Docker runtime, not evidence that your deployment passes isolation or filesystem contracts. Do not interpret example security waivers as measurements or a no-network guarantee.
 
-Native tasks are prepared on the CPU host and published as static releases. The Anchor runs the installed native helper; Harbor, Compose and image build tools stay on the preparation host. No remote compiler or Docker socket is needed in task sandboxes. Container `localhost` is not the host registry. Until the capability probe and cleanup pass on your actual deployment, stop before running tasks. See [Deployment](Deployment.md) for installed-package provisioning.
+Tasks are published as static directories and resolved where they run. The Anchor runs the installed Flotilla helper; no Compose executable, builder or Docker socket is needed anywhere, and a client needs registry read access only. Container `localhost` is not the host registry. Until the capability probe and cleanup pass on your actual deployment, stop before running tasks. See [Deployment](Deployment.md) for installed-package provisioning.
 
 ## Prerequisites
 
@@ -147,13 +147,9 @@ instance_budget = 25
 [resources.default]
 cpu = "1"
 memory = "1Gi"
-
-[build]
-target = "localhost:5000/flotilla/tasks"
-pullable_registries = ["localhost:5000", "docker.io"]
 ```
 
-`[build].pullable_registries` lists registries the sandboxes can pull from directly. Other sources are rejected unless image mirroring is explicitly enabled; setting a build target alone does not request mirroring.
+A task's images must be published where the sandboxes can pull from, and named by digest.
 
 Add probe inputs to the same `deployment.toml`:
 
@@ -208,9 +204,9 @@ services:
 EOF
 ```
 
-Add a verifier script under `task/tests/test.sh` for the task's verification contract, then select and prepare it on this host. Publish the complete generated release under a new path in `$LOCAL/shared`, preserving its required metadata. Configure `[task_releases.example]` with the local release and its platform root. Follow [Quick start](Quick_Start.md) for exact preparation/binding commands. Do not stage the original Harbor directory as an execution input.
+Add a verifier script under `task/tests/test.sh` for the task's verification contract. Publish the task directory under a dataset path in `$LOCAL/shared`, preserving file modes, and declare it as `[datasets.example]` with that local root and its platform root. Follow [Quick start](Quick_Start.md) for the exact binding form.
 
-Save the README's Python example as `example.py` in `$LOCAL`, with its native dataset path, then run:
+Save the README's Python example as `example.py` in `$LOCAL`, pointing at that dataset, then run:
 
 ```sh
 python example.py

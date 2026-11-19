@@ -7,8 +7,6 @@ import json
 from pathlib import Path
 
 import pytest
-
-pytest.importorskip("harbor")
 import toml  # type: ignore[import-untyped]
 from harbor.models.task.config import EnvironmentConfig, NetworkPolicy
 from harbor.models.trial.paths import TrialPaths
@@ -21,7 +19,7 @@ from flotilla.core import labels
 from flotilla.integrations.harbor import FlotillaEnvironment
 from flotilla.integrations.harbor_source import task_environments
 from flotilla.platform.base import ExecResult, FlotillaError, ProcessSpec
-from flotilla.testing.build import prepared_task
+from flotilla.testing.planning import planned_task
 from flotilla.testing.platform import FakePlatform, SharedTree
 from flotilla.testing.reports import report
 from flotilla.testing.runtime import deployment as runtime_deployment
@@ -103,13 +101,13 @@ def adapter(
     *,
     network_policy: NetworkPolicy | None = None,
     environment: str = "environment",
-    prepared: bool = True,
+    planned: bool = True,
     **kwargs: object,
 ) -> FlotillaEnvironment:
     config = tmp_path / "deployment.toml"
     config.write_text(toml.dumps(cfg.model_dump(exclude_none=True, exclude={"base_dir"})))
     path = source(tmp_path) if not (tmp_path / "dataset" / "task").exists() else tmp_path / "dataset" / "task"
-    compiled = prepared_task(path, cfg, environments=task_environments)
+    compiled = planned_task(path, cfg, environments=task_environments)
     return FlotillaEnvironment(
         environment_dir=path / environment,
         environment_name="task",
@@ -118,7 +116,7 @@ def adapter(
         task_env_config=EnvironmentConfig(docker_image="r.io/main:1"),
         network_policy=network_policy,
         deployment=str(config),
-        prepared_environment=compiled["main" if environment == "environment" else "verifier"] if prepared else None,
+        plan=compiled["main" if environment == "environment" else "verifier"] if planned else None,
         fleet=fleet,
         **kwargs,  # type: ignore[arg-type]
     )
@@ -132,10 +130,11 @@ async def test_harbor_opens_an_internal_transient_role(
     source(tmp_path, '[environment]\ndocker_image="r.io/main:1"\n[verifier]\nenvironment_mode="separate"\n')
     (tmp_path / "dataset/task/tests/docker-compose.yaml").write_text("services:\n  main:\n    image: r.io/verifier:1\n")
     async with Flotilla(deployment=cfg) as fleet:
-        for directory, image in (("environment", "r.io/main@"), ("tests", "r.io/verifier@")):
+        # The image reference reaches the sandbox as the task wrote it; nothing resolves it here.
+        for directory, image in (("environment", "r.io/main:1"), ("tests", "r.io/verifier:1")):
             env = adapter(tmp_path, cfg, fleet, environment=directory)
             await env.start()
-            assert (await env.handle.info()).services[0].image.startswith(image)
+            assert (await env.handle.info()).services[0].image == image
             await env.stop()
 
 
@@ -146,7 +145,7 @@ async def test_harbor_requires_attempt_and_rejects_legacy_prepared_and_force_bui
     cfg, platform, _ = deployment
     async with Flotilla(deployment=cfg) as fleet:
         with pytest.raises(ValueError, match="NativeAttempt"):
-            await adapter(tmp_path, cfg, fleet, prepared=False).start()
+            await adapter(tmp_path, cfg, fleet, planned=False).start()
         with pytest.raises(ValueError, match="force_build is unsupported"):
             await adapter(tmp_path, cfg, fleet).start(force_build=True)
         with pytest.raises(ValueError, match="prepared JSONL"):
@@ -160,8 +159,8 @@ async def test_harbor_requires_attempt_and_rejects_legacy_prepared_and_force_bui
                 fleet=fleet,
                 prepared="obsolete.jsonl",
             )
-        # Resolved at preparation: accepting these at open would silently do nothing.
-        with pytest.raises(ValueError, match="resolved at preparation"):
+        # A deployment setting: accepting it at open would silently do nothing.
+        with pytest.raises(ValueError, match="belong to the deployment"):
             adapter(tmp_path, cfg, fleet, runtime_params={"SEED": "2"})
     assert not await platform.list({labels.ROLE: labels.ROLE_UNIT})
 

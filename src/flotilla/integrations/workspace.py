@@ -27,7 +27,6 @@ from typing import Any
 from flotilla.compose.paths import confined
 from flotilla.compose.task import COMPOSE_FILE
 from flotilla.integrations.harbor_source import task_environments
-from flotilla.manifest import Resources
 from flotilla.runtime.workspace import (
     METADATA_MAX_TASKS,
     METADATA_REQUEST_BYTES,
@@ -169,10 +168,7 @@ def _describe_resources(
                 raise ValueError(f"{source.name}/{role}: {'; '.join(rejected[:3])}")
             # Declared resources before any image planning, registry access,
             # build, export or workload creation.
-            result[role] = {
-                name: Resources.model_validate(service.resources).model_dump(exclude_none=True)
-                for name, service in environment.project.services.items()
-            }
+            result[role] = {name: dict(service.resources) for name, service in environment.project.services.items()}
         return result
 
     def has_compose() -> bool:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import copy
+import dataclasses
 import threading
 import time
 import uuid
@@ -14,8 +15,13 @@ from pathlib import Path
 from types import TracebackType
 from typing import TYPE_CHECKING, Any
 
+from flotilla.compose.plan_task import AgentOverlay, plan_task
+from flotilla.compose.task import HarborTask, load_task
 from flotilla.config import FlotillaConfig
-from flotilla.prepared import PreparedEnvironment
+from flotilla.core.plan import TaskSource, TrialPlan
+from flotilla.platform.base import Resources
+from flotilla.registry import ImageConfigs
+from flotilla.resources import cpu, memory
 from flotilla.runtime.environment import Environment
 from flotilla.runtime.events import EventDispatcher
 from flotilla.runtime.manager import Manager
@@ -32,6 +38,58 @@ from flotilla.runtime.worker import Worker
 
 if TYPE_CHECKING:
     pass
+
+
+def with_options(plan: TrialPlan, options: OpenOptions) -> TrialPlan:
+    """Apply what a single run decides to a plan that was resolved without it.
+
+    `plan` resolves a task into a trial; these are the per-run choices `plan` folds in when it
+    resolves one itself. A caller handing in an already-resolved plan makes the same choices
+    through its `OpenOptions`, so they are applied here rather than silently dropped.
+    """
+    plan = with_resources(plan, options.resources)
+    if options.external_mounts:
+        plan = dataclasses.replace(
+            plan,
+            external_mounts={
+                **plan.external_mounts,
+                **{name: tuple(mounts) for name, mounts in options.external_mounts.items()},
+            },
+        )
+    if options.workspace_mounts:
+        plan = dataclasses.replace(
+            plan,
+            workspace_root=options.workspace_root or plan.workspace_root,
+            workspace_mounts={
+                **plan.workspace_mounts,
+                **{name: tuple(mounts) for name, mounts in options.workspace_mounts.items()},
+            },
+        )
+    return plan
+
+
+def with_resources(plan: TrialPlan, overrides: Mapping[str, Mapping[str, str]]) -> TrialPlan:
+    """One run's CPU / memory override, applied to a plan.
+
+    A run may be given more capacity than the task asks for without becoming a different task,
+    so this is the one planned value a caller can still change at `open`.
+    """
+    if not overrides:
+        return plan
+    units = dict(plan.units)
+    for name, override in overrides.items():
+        if name not in units:
+            raise ValueError(f"resource override names unknown service {name!r}")
+        if set(override) - {"cpu", "memory"}:
+            raise ValueError("only CPU and memory resource overrides are supported")
+        original = units[name].resources
+        units[name] = dataclasses.replace(
+            units[name],
+            resources=Resources(
+                cpu=cpu(override.get("cpu", original.cpu)), memory=memory(override.get("memory", original.memory))
+            ),
+        )
+    return dataclasses.replace(plan, units=units)
 
 
 class Flotilla:
@@ -54,6 +112,12 @@ class Flotilla:
         self._closed = False
         self._stop_callback_registered = False
         self.cleanup_report: CleanupReport | None = None
+        #: Image configs, by digest, for as long as this client lives. A digest names one config
+        #: forever, so the only cost of a second task naming the same image is a dict lookup.
+        self.image_configs = ImageConfigs(
+            credentials=self._deployment.registry.credentials(),
+            store=self._deployment.registry.config_cache,
+        )
 
     @property
     def config(self) -> FlotillaConfig:
@@ -107,14 +171,10 @@ class Flotilla:
             cancel_result=(lambda value: cancel_result(manager, value)) if cancel_result is not None else None,
         )
 
-    def reservation(self, prepared: PreparedEnvironment) -> ResourceReservation:
-        """Admission budget of one environment at this deployment's effective resources."""
-        manifest = prepared.manifest()
+    def reservation(self, plan: TrialPlan) -> ResourceReservation:
+        """Admission budget of one environment, at the resources its plan resolved to."""
         resources = {
-            name: self._deployment.resources.effective(
-                manifest.task, name, unit.resources.model_dump(exclude_none=True)
-            )
-            for name, unit in manifest.units.items()
+            name: {"cpu": unit.resources.cpu, "memory": unit.resources.memory} for name, unit in plan.units.items()
         }
         return ResourceReservation(resources, copies=ENVIRONMENT_RESERVATION_COPIES)
 
@@ -168,11 +228,42 @@ class Flotilla:
             for key, roles in declared.items()
         }
 
-    async def open(self, prepared: PreparedEnvironment, options: OpenOptions | None = None) -> Environment:
-        """Open a transient compiled environment; Harbor callers should use NativeAttempt."""
-        if not isinstance(prepared, PreparedEnvironment):
-            raise TypeError("open takes a transient PreparedEnvironment; use NativeAttempt for a native release row")
+    def plan(self, source: TaskSource, options: OpenOptions | None = None) -> TrialPlan:
+        """Resolve a task directory into the trial `open` would create, without creating it.
+
+        Separate from `open` so a caller can check a whole dataset before spending GPU time on
+        it, and so the cost of planning is visible rather than hidden inside an await.
+        """
+        options = options or OpenOptions()
+        parameters = {**self._deployment.runtime_params, **options.parameters}
+        return self.plan_environment(load_task(source.local, compose_environment=parameters), source, options)
+
+    def plan_environment(self, task: HarborTask, source: TaskSource, options: OpenOptions | None = None) -> TrialPlan:
+        """The same, for a task directory already read: a graded task reads it once per role."""
+        options = options or OpenOptions()
+        declared = {name: svc.resources for name, svc in task.project.services.items()}
+        overlay = self._deployment.agent_overlay
+        plan = plan_task(
+            task,
+            source,
+            configs=self.image_configs,
+            resources=self._deployment.resources.for_services(task.name, declared),
+            overlay=AgentOverlay(
+                env=overlay.env,
+                services=None if overlay.services is None else frozenset(overlay.services),
+            ),
+            external_mounts=options.external_mounts,
+            workspace_mounts=options.workspace_mounts,
+            workspace_root=options.workspace_root,
+        )
+        return with_resources(plan, options.resources)
+
+    async def open(self, source: TaskSource | TrialPlan, options: OpenOptions | None = None) -> Environment:
+        """Open an environment for a task directory, or for a plan already resolved from one."""
         options = copy.deepcopy(options or OpenOptions())
+        # A plan the caller already resolved still needs this run's own choices folded in;
+        # resolving a task source here does that as part of planning it.
+        plan = with_options(source, options) if isinstance(source, TrialPlan) else self.plan(source, options)
         admission = options.admission_timeout or self._deployment.limits.admission_timeout
         startup = options.startup_timeout or self._deployment.runtime.startup_timeout_s
         lifetime = options.lifetime or self._deployment.runtime.run_timeout_s
@@ -180,14 +271,11 @@ class Flotilla:
             raise ValueError("lifetime exceeds runtime.run_timeout_s")
         eid = uuid.uuid4().hex
         request = RunRequest(
-            prepared,
+            plan,
             options.request_id or eid,
             exec_env=options.exec_env,
             disable_internet=options.disable_internet,
-            resources=options.resources,
-            external_mounts=options.external_mounts,
             workspace_id=options.workspace_id,
-            workspace_mounts=options.workspace_mounts,
             lifetime=lifetime,
         )
         try:
@@ -204,9 +292,9 @@ class Flotilla:
 
     @asynccontextmanager
     async def environment(
-        self, prepared: PreparedEnvironment, options: OpenOptions | None = None
+        self, source: TaskSource | TrialPlan, options: OpenOptions | None = None
     ) -> AsyncIterator[Environment]:
-        env = await self.open(prepared, options)
+        env = await self.open(source, options)
         try:
             yield env
         except BaseException as primary:
