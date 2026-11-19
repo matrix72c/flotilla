@@ -1,6 +1,6 @@
 # Writing a backend
 
-A backend connects Flotilla to one sandbox platform. Everything above it is platform-independent: Compose parsing, image preparation, the anchor, file publication, network-policy planning, health gates, renewal, cleanup, and GC all go through the `Platform` protocol in [`flotilla/platform/base.py`](../src/flotilla/platform/base.py). The built-in backend is OpenSandbox ([`flotilla/platform/opensandbox/`](../src/flotilla/platform/opensandbox/)); others are separate Python packages discovered through an entry point.
+A backend connects Flotilla to one sandbox platform. Everything above it is platform-independent: Compose parsing, image preparation, the anchor, file publication, network-policy planning, health gates, renewal, cleanup, and GC all go through the `Platform` protocol in [`flotilla/platform/base.py`](../src/flotilla/platform/base.py). The built-in backend is OpenSandbox ([`flotilla/platform/opensandbox/`](../src/flotilla/platform/opensandbox/)); another backend lives in the Flotilla source tree and is registered in the `BACKENDS` table in `flotilla/config.py`.
 
 Read [Architecture](Architecture.md) first for the terminology (anchor, share release, trial, launch).
 
@@ -18,30 +18,24 @@ Before writing code, check that the platform can do the following. Flotilla does
 | A per-instance egress policy: none, an allowlist, or any | Network isolation |
 | A way for instances of one environment to reach each other by address | Multi-service tasks (optional: single-service tasks work without it) |
 
-## Package layout
+## Layout
+
+A backend is one module under `flotilla/platform/` plus its settings and registration:
 
 ```text
-flotilla-mycloud/
-  pyproject.toml
-  src/flotilla_mycloud/
-    __init__.py
-    backend.py      # settings model + Backend subclass
-    platform.py     # Platform implementation
+src/flotilla/platform/mycloud/
+  backend.py      # settings model + backend class, added to BACKENDS
+  ...             # Platform implementation
 ```
 
-Register the backend in the `flotilla.backends` entry-point group. The entry-point name is the value users put in `backend = "..."` and must match `[a-z][a-z0-9_-]*`:
+Register the class in the in-tree table in `flotilla/config.py`. The key is the value users put in `backend = "..."` and must match `[a-z][a-z0-9_-]*`:
 
-```toml
-[project]
-name = "flotilla-mycloud"
-# Replace FULL_COMMIT with the complete, published commit of this Flotilla project.
-dependencies = ["flotilla @ git+https://github.com/matrix72c/flotilla.git@FULL_COMMIT", "httpx"]
-
-[project.entry-points."flotilla.backends"]
-mycloud = "flotilla_mycloud.backend:MyCloudBackend"
+```python
+BACKENDS: dict[str, Backend[Any]] = {
+    BUILTIN: OpenSandboxBackend(),
+    "mycloud": MyCloudBackend(),
+}
 ```
-
-The value may point to a `Backend` subclass (instantiated with no arguments) or to an instance.
 
 ## Configuration
 
@@ -80,19 +74,20 @@ Validation errors are reported with the field path (`backends.mycloud.region: Fi
 
 `[storage]` is shared by all backends. `cfg.storage_settings()` (and `cfg.input_settings()` for the named read-only input roots) returns its `volumes` (`"host"` or `"pvc"`), `host_path`, `claim_name`, and `root_subpath`. Map them to whatever your platform calls a shared mount. If your platform has a different storage model, add your own keys to the settings model and document how they relate to `[storage]`.
 
-## The `Backend` class
+## The backend class
+
+A backend satisfies the `Backend` protocol in [`flotilla/backends.py`](../src/flotilla/backends.py); there is no base class to inherit:
 
 ```python
 from collections.abc import Awaitable, Callable
 
-from flotilla.backends import Backend
 from flotilla.config import FlotillaConfig
 from flotilla.platform.base import Capabilities, Clock, Platform
 
-from flotilla_mycloud.platform import MyCloudPlatform
+from flotilla.platform.mycloud.platform import MyCloudPlatform
 
 
-class MyCloudBackend(Backend[MyCloudSettings]):
+class MyCloudBackend:
     settings_model = MyCloudSettings
 
     def check(self, settings: MyCloudSettings, cfg: FlotillaConfig) -> list[str]:
@@ -122,12 +117,11 @@ class MyCloudBackend(Backend[MyCloudSettings]):
         )
 ```
 
-| Hook | Required | Default | Purpose |
-|---|---|---|---|
-| `build` | Yes | | Return a new `Platform`. The caller owns it and calls `aclose()`. Await `command_gate` (when given) before each user command request; it is the client's `limits.exec_rate` limiter |
-| `check` | No | No problems | Cross-field checks between your table and the rest of the config, run at load time. Return messages; Flotilla raises them together |
-| `capabilities` | No | Unchanged | Adjust the report's capabilities for what this configuration enforces or cannot provide. OpenSandbox uses it to turn off read-only rootfs and tmpfs unless an extension protocol is selected |
-| `profile` | No | Hash of all backend-specific settings | Fingerprint that read-only rootfs and native tmpfs evidence depends on. The probe records it; startup ignores that evidence when it changes |
+| Hook | Purpose |
+|---|---|
+| `build` | Return a new `Platform`. The caller owns it and calls `aclose()`. Await `command_gate` (when given) before each user command request; it is the client's `limits.exec_rate` limiter |
+| `check` | Cross-field checks between your table and the rest of the config, run at load time. Return messages; Flotilla raises them together |
+| `capabilities` | Adjust the report's capabilities for what this configuration enforces or cannot provide; return them unchanged when nothing applies. OpenSandbox uses it to turn off read-only rootfs and tmpfs unless an extension protocol is selected |
 
 `build` is called once per runtime client and once per CLI command (`probe`, `gc`, `share`). The same factory serves all of them, so a setting cannot apply to the runtime and silently not apply to the probe.
 
@@ -185,7 +179,7 @@ The probe follows the normal [deployment guide](Deployment.md): build and push t
 ## Testing
 
 1. **Unit tests without a platform.** Test request mapping and error classification with a mock transport, as the OpenSandbox tests do with `httpx.MockTransport` ([`tests/unit/test_opensandbox_platform.py`](../tests/unit/test_opensandbox_platform.py)). Cover lost create responses, timeouts during exec, unconfirmable interrupts, and rejected deletes.
-2. **Configuration.** Load a config with `backend = "<name>"` and check that table errors carry field paths and that `check` problems are reported. [`tests/unit/test_backends.py`](../tests/unit/test_backends.py) shows how to register a backend in a test without installing a package.
+2. **Configuration.** Load a config with `backend = "<name>"` and check that table errors carry field paths and that `check` problems are reported. [`tests/unit/test_backends.py`](../tests/unit/test_backends.py) shows how to register a backend in a test the same way the real table is built.
 3. **Reference behavior.** `flotilla.testing.platform.FakePlatform` is an in-memory `Platform` used by Flotilla's own runtime tests. Compare its behavior to yours when a contract is unclear.
 4. **A real deployment.** Run `flotilla probe`, then open a single-service and a multi-service task with the [library quick start](Quick_Start.md), and confirm that `cleanup_report.clean` is true and that an independent listing of the platform shows no labeled instances afterwards.
 
@@ -193,7 +187,7 @@ The opt-in real-platform contracts in `tests/contract/` currently construct Open
 
 ## Checklist
 
-- [ ] Entry point registered, settings model rejects unknown keys, credential read only through `credential_env`.
+- [ ] Registered in `BACKENDS`, settings model rejects unknown keys, credential read only through `credential_env`.
 - [ ] Every platform failure raised as `FlotillaError` with a deliberate category; create ambiguity reported as `TRANSIENT`.
 - [ ] Labels are filterable by `list`, and the deployment's declared `[platform].list_visibility_s` holds.
 - [ ] `exec` uses exact argv, identity, cwd, and environment; timeouts are confirmed stopped; `attempt` is updated.

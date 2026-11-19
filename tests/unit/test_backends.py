@@ -1,18 +1,16 @@
-"""Backend plugins: entry-point discovery, `[backends.<name>]` validation, and construction through the config."""
+"""Backend selection: the in-tree table, `[backends.<name>]` validation, and construction through the config."""
 
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Iterator
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from pydantic import ValidationError
 
-from flotilla import backends
-from flotilla.backends import Backend, BackendSettings, load_backend
-from flotilla.config import ConfigError, FlotillaConfig, OpenSandboxBackend
+from flotilla.backends import BackendSettings
+from flotilla.config import BACKENDS, ConfigError, FlotillaConfig, OpenSandboxBackend
 from flotilla.platform.base import Capabilities, Clock, Platform
 from flotilla.platform.clock import SystemClock
 from flotilla.testing.config import config_data
@@ -24,7 +22,9 @@ class FakeSettings(BackendSettings):
     tier: str = "standard"
 
 
-class FakeBackend(Backend[FakeSettings]):
+class FakeBackend:
+    """Satisfies `flotilla.backends.Backend`; registered into the in-tree table like a real backend."""
+
     settings_model = FakeSettings
 
     def __init__(self) -> None:
@@ -32,6 +32,9 @@ class FakeBackend(Backend[FakeSettings]):
 
     def check(self, settings: FakeSettings, cfg: FlotillaConfig) -> list[str]:
         return ["fake backend has no outbound access"] if cfg.network.external == "any" else []
+
+    def capabilities(self, settings: FakeSettings, cfg: FlotillaConfig, caps: Capabilities) -> Capabilities:
+        return caps
 
     def build(
         self,
@@ -50,13 +53,8 @@ class FakeBackend(Backend[FakeSettings]):
 @pytest.fixture
 def registered(monkeypatch: pytest.MonkeyPatch) -> Iterator[FakeBackend]:
     backend = FakeBackend()
-    entry = SimpleNamespace(name="fake", load=lambda: backend)
-    monkeypatch.setattr(
-        backends, "entry_points", lambda *, group: [entry] if group == backends.ENTRY_POINT_GROUP else []
-    )
-    load_backend.cache_clear()
+    monkeypatch.setitem(BACKENDS, "fake", backend)
     yield backend
-    load_backend.cache_clear()
 
 
 def fake_data(**table: Any) -> dict[str, Any]:
@@ -78,7 +76,7 @@ def test_the_management_client_is_bounded_regardless_of_what_the_platform_suppor
 def test_builtin_backend_is_the_default() -> None:
     cfg = FlotillaConfig.from_mapping(config_data())
     assert cfg.backend == "opensandbox"
-    assert isinstance(load_backend("opensandbox"), OpenSandboxBackend)
+    assert isinstance(BACKENDS["opensandbox"], OpenSandboxBackend)
     assert cfg.backend_settings is cfg.opensandbox
 
 
@@ -111,7 +109,7 @@ def test_backend_check_problems_reject_the_config(registered: FakeBackend) -> No
 @pytest.mark.parametrize(
     ("change", "message"),
     [
-        ({"backend": "missing"}, "unknown backend 'missing'; installed: fake, opensandbox"),
+        ({"backend": "missing"}, "unknown backend 'missing'; in-tree: fake, opensandbox"),
         ({"backend": "Bad Name"}, "backend must match"),
         ({"backends": {}}, "requires a \\[backends.fake\\] table"),
         ({"opensandbox": config_data()["opensandbox"]}, "\\[opensandbox\\] is set but backend = 'fake'"),

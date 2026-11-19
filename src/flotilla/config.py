@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
-from flotilla.backends import BUILTIN, Backend, BackendSettings, load_backend
+from flotilla.backends import BUILTIN, Backend, BackendSettings
 from flotilla.capabilities import ExternalTarget, IsolationEvidence, ProbeSettings
 from flotilla.core.anchor import EXPIRY_MARGIN_S, AnchorSettings
 from flotilla.core.reaper import ReaperSettings
@@ -552,7 +552,7 @@ class FlotillaConfig(_Model):
             selected = self.agent_runtime.input
             if selected is not None and selected not in self.inputs:
                 raise ValueError(f"agent_runtime.input names no [inputs.{selected}]")
-        backend = load_backend(self.backend)
+        backend = backend_of(self.backend)
         if self.backend == BUILTIN:
             if self.backends:
                 raise ValueError("[backends.*] tables are only read for third-party backends; use [opensandbox]")
@@ -614,7 +614,7 @@ class FlotillaConfig(_Model):
             return self.opensandbox_settings()
         table = self.backends[self.backend]
         try:
-            return load_backend(self.backend).settings_model.model_validate(table)
+            return backend_of(self.backend).settings_model.model_validate(table)
         except ValidationError as exc:
             # Re-raise with the TOML path; `hide_input_in_errors` keeps values out of the message.
             prefix = f"backends.{self.backend}"
@@ -669,7 +669,7 @@ class FlotillaConfig(_Model):
             native_tmpfs=True,
             shm_size=True,
         )
-        return load_backend(self.backend).capabilities(self.backend_settings, self, caps)
+        return backend_of(self.backend).capabilities(self.backend_settings, self, caps)
 
     def management_capabilities(self) -> Capabilities:
         """A bounded management client, NOT a capability report usable by normal tasks."""
@@ -721,7 +721,7 @@ class FlotillaConfig(_Model):
         self, *, clock: Clock, caps: Capabilities, command_gate: Callable[[], Awaitable[None]] | None = None
     ) -> Platform:
         """Construct the selected backend's platform client; the caller owns it and calls `aclose()`."""
-        return load_backend(self.backend).build(
+        return backend_of(self.backend).build(
             self.backend_settings, self, clock=clock, credential=self.credential(), caps=caps, command_gate=command_gate
         )
 
@@ -861,10 +861,10 @@ def _is_hostname(target: str) -> bool:
 __all__ = ["ConfigError", "FlotillaConfig"]
 
 
-class OpenSandboxBackend(Backend[OpenSandbox]):
-    """The built-in backend, configured by `[opensandbox]`."""
+class OpenSandboxBackend:
+    """The built-in backend, configured by `[opensandbox]`. Satisfies `flotilla.backends.Backend`."""
 
-    settings_model = OpenSandbox
+    settings_model: type[BackendSettings] = OpenSandbox
 
     def check(self, settings: OpenSandbox, cfg: FlotillaConfig) -> list[str]:
         problems = []
@@ -918,3 +918,18 @@ class OpenSandboxBackend(Backend[OpenSandbox]):
             create_timeout_s=cfg.timeouts.create_request,
             max_connections=settings.max_connections,
         )
+
+
+_BACKEND_NAME = re.compile(r"[a-z][a-z0-9_-]*")
+
+#: The in-tree backend table: registering a backend means adding it here.
+BACKENDS: dict[str, Backend[Any]] = {BUILTIN: OpenSandboxBackend()}
+
+
+def backend_of(name: str) -> Backend[Any]:
+    """Look a backend up in `BACKENDS`, the whole discovery mechanism."""
+    if not _BACKEND_NAME.fullmatch(name):
+        raise ValueError(f"backend must match [a-z][a-z0-9_-]*: {name!r}")
+    if (found := BACKENDS.get(name)) is None:
+        raise ValueError(f"unknown backend {name!r}; in-tree: {', '.join(sorted(BACKENDS))}")
+    return found

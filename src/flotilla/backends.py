@@ -1,19 +1,16 @@
-"""Sandbox backend plugins: the settings every backend table carries and how a backend builds its `Platform`.
+"""Sandbox backend settings and the shape of a backend.
 
-The built-in OpenSandbox backend is configured by `[opensandbox]`. A third-party backend registers a `Backend`
-subclass (or instance) in the `flotilla.backends` entry-point group and is selected with `backend = "<name>"`
-plus a `[backends.<name>]` table, validated by its `settings_model`.
+A backend is registered by adding it to `BACKENDS` in `flotilla.config` -- that table is the whole
+discovery mechanism. The built-in OpenSandbox backend is configured by `[opensandbox]`; another
+backend is selected with `backend = "<name>"` plus a `[backends.<name>]` table, validated by its
+`settings_model`.
 """
 
 from __future__ import annotations
 
-import functools
 import re
-from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
-from importlib import import_module
-from importlib.metadata import entry_points
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, field_validator
@@ -23,9 +20,7 @@ from flotilla.platform.base import Capabilities, Clock, Platform
 if TYPE_CHECKING:
     from flotilla.config import FlotillaConfig
 
-ENTRY_POINT_GROUP = "flotilla.backends"
 BUILTIN = "opensandbox"
-_BUILTINS = {BUILTIN: "flotilla.config:OpenSandboxBackend"}
 _NAME = re.compile(r"[a-z][a-z0-9_-]*")
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
@@ -59,20 +54,16 @@ class BackendSettings(BaseModel):
         return value
 
 
-class Backend[S: BackendSettings](ABC):
-    """One sandbox platform. Only `build` is required; the other hooks have conservative defaults."""
+@runtime_checkable
+class Backend[S: BackendSettings](Protocol):
+    """One sandbox platform: its settings table, what it can enforce, and how to build its `Platform` client."""
 
-    settings_model: ClassVar[type[BackendSettings]] = BackendSettings
+    settings_model: type[BackendSettings]
 
-    def check(self, settings: S, cfg: FlotillaConfig) -> list[str]:
-        """Cross-field problems between the backend table and the rest of the config, checked at load."""
-        return []
+    def check(self, settings: S, cfg: FlotillaConfig) -> list[str]: ...
 
-    def capabilities(self, settings: S, cfg: FlotillaConfig, caps: Capabilities) -> Capabilities:
-        """Narrow the assumed capabilities to what this configuration enforces or cannot provide."""
-        return caps
+    def capabilities(self, settings: S, cfg: FlotillaConfig, caps: Capabilities) -> Capabilities: ...
 
-    @abstractmethod
     def build(
         self,
         settings: S,
@@ -87,25 +78,3 @@ class Backend[S: BackendSettings](ABC):
 
         `command_gate`, when given, must be awaited before each user command request (the client's exec rate limit).
         """
-
-
-@functools.cache
-def load_backend(name: str) -> Backend[Any]:
-    """Resolve a backend by name: built-in first, then the `flotilla.backends` entry points."""
-    if not _NAME.fullmatch(name):
-        raise ValueError(f"backend must match [a-z][a-z0-9_-]*: {name!r}")
-    if name in _BUILTINS:
-        module, _, attr = _BUILTINS[name].partition(":")
-        target = getattr(import_module(module), attr)
-    else:
-        found = [ep for ep in entry_points(group=ENTRY_POINT_GROUP) if ep.name == name]
-        if not found:
-            installed = sorted({BUILTIN, *(ep.name for ep in entry_points(group=ENTRY_POINT_GROUP))})
-            raise ValueError(f"unknown backend {name!r}; installed: {', '.join(installed)}")
-        if len(found) > 1:
-            raise ValueError(f"backend {name!r} is registered by more than one installed package")
-        target = found[0].load()
-    backend = target() if isinstance(target, type) else target
-    if not isinstance(backend, Backend):
-        raise ValueError(f"backend {name!r} does not provide a flotilla.backends.Backend")
-    return backend
