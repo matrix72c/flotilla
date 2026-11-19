@@ -67,7 +67,7 @@ def documented_example(
     helper_calls: list[tuple[str, ...]] = []
 
     async def execute(handle: InstanceHandle, proc: ProcessSpec, *, attempt: ExecAttempt | None = None) -> ExecResult:
-        if proc.argv[:4] == ("python3", "-I", "-m", "flotilla.native.platform_verify"):
+        if proc.argv[:2] == ("/.flotilla/bin/busybox", "find") and proc.argv[3:] == ("-mindepth", "1", "-delete"):
             helper_calls.append(proc.argv)
             return ExecResult(0, b"", b"")
         if proc.argv[:2] == ("redis-cli", "ping"):
@@ -104,8 +104,9 @@ async def test_documented_example_runs(
     namespace: dict[str, Any] = {}
     exec(compile(code.replace("asyncio.run(main())", ""), document, "exec"), namespace)
     await namespace["main"]()
-    # The anchor runs the installed helper only to clear a mounted output directory.
-    assert all(argv[4] == "--clear-directory" for argv in helper_calls)
+    # The anchor clears a mounted output directory with one busybox find call.
+    expected = ("/.flotilla/bin/busybox", "find", "...", "-mindepth", "1", "-delete")
+    assert all(argv[:2] == expected[:2] and argv[3:] == expected[3:] for argv in helper_calls)
     assert deployment[1].instances() == []
     assert not any(key.startswith("launches/") for key in deployment[2].dirs | deployment[2].files)
 

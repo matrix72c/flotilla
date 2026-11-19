@@ -1,4 +1,4 @@
-"""A published dataset: finding its tasks, mapping it onto platform storage, and the installed helper.
+"""A published dataset: finding its tasks and mapping it onto platform storage.
 
 What used to be tested here was a release flotilla wrote and read back: a staging writer, a reader,
 a `dataset.jsonl`, and a persisted `Task` with a schema version. None of that exists. The dataset is
@@ -219,50 +219,13 @@ def test_paths_in_verification_and_artifacts_must_be_canonical() -> None:
         )
 
 
-# ───────────────────────── Installed helper and import boundaries ─────────────────────────
+# ───────────────────────── Import boundaries ─────────────────────────
 
 
-def helper_process(tmp_path: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    module = __import__("flotilla")
-    assert module.__file__ is not None
-    source = Path(module.__file__).parents[1]
-    hostile = tmp_path / "cwd"
-    (hostile / "flotilla" / "native").mkdir(parents=True, exist_ok=True)
-    (hostile / "flotilla" / "__init__.py").write_text("raise SystemExit(9)\n")
-    (hostile / "flotilla" / "native" / "__init__.py").write_text("")
-    (hostile / "flotilla" / "native" / "platform_verify.py").write_text("raise SystemExit(8)\n")
-    return subprocess.run(
-        [sys.executable, "-P", "-m", "flotilla.native.platform_verify", *args],
-        cwd=hostile,
-        env={**os.environ, "PYTHONPATH": str(source)},
-        capture_output=True,
-        text=True,
-        timeout=180,
-    )
+def test_the_installed_package_needs_neither_harbor_nor_a_deployment(tmp_path: Path) -> None:
+    """Importing the dataset API pulls in nothing that needs a deployment or the Harbor extra.
 
-
-def test_installed_helper_self_test_ignores_cwd(tmp_path: Path) -> None:
-    result = helper_process(tmp_path, "--self-test")
-    assert result.returncode == 0, result.stderr
-
-
-def test_installed_helper_clears_output_directory_in_place(tmp_path: Path) -> None:
-    output = tmp_path / "output"
-    (output / "nested").mkdir(parents=True)
-    (output / "reward.txt").write_text("1")
-    (output / "link").symlink_to(tmp_path)
-    inode = output.stat().st_ino
-    result = helper_process(tmp_path, "--clear-directory", str(output))
-    assert result.returncode == 0, result.stderr
-    assert list(output.iterdir()) == [] and output.stat().st_ino == inode
-    assert tmp_path.exists()
-    assert helper_process(tmp_path, "--clear-directory", str(tmp_path / "missing")).returncode != 0
-
-
-def test_the_installed_helper_needs_neither_harbor_nor_a_deployment(tmp_path: Path) -> None:
-    """The anchor runs `flotilla.native.platform_verify` with nothing configured.
-
-    Compose is no longer on this list: the client resolves a task in-process now, so importing
+    Compose is not on this list: the client resolves a task in-process now, so importing
     `flotilla` imports the parser. What still has to stay out is everything that would make the
     installed package need a Harbor install, an integration, or a deployment file to start.
     """
@@ -270,7 +233,7 @@ def test_the_installed_helper_needs_neither_harbor_nor_a_deployment(tmp_path: Pa
     assert module.__file__ is not None
     source = Path(module.__file__).parents[1]
     code = (
-        "import sys, flotilla.native.dataset, flotilla.native.platform_verify;"
+        "import sys, flotilla.native.dataset;"
         "bad = sorted(m for m in sys.modules if m.startswith("
         "('flotilla.integrations', 'flotilla.inspect', 'flotilla.anchor_build', 'harbor')));"
         "print(bad); sys.exit(1 if bad else 0)"

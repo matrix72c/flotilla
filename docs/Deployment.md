@@ -8,9 +8,9 @@ Flotilla resolves a task where it runs it: it reads the published task directory
 
 The platform Anchor needs the matching installed Flotilla runtime and filesystem tools. It does **not** need Docker/BuildKit or registry-push credentials. Never expose a host Docker socket or unauthenticated build endpoint to task/verifier sandboxes. Normal pulls of the fixed images remain a platform responsibility.
 
-## 1. Build the installed Anchor
+## 1. Build the Anchor image
 
-Install this repository's fixed commit or controlled wheel in a clean Python 3.12 Linux x86_64 environment. Do not use the unrelated public PyPI `flotilla` package. The builder snapshots the exact installed non-editable distribution and runtime dependency closure, validates RECORD hashes and uses packaged resources rather than a checkout.
+Run the builder from this repository's fixed commit or controlled wheel in a Python 3.12 Linux x86_64 environment. Do not use the unrelated public PyPI `flotilla` package. The image is a scratch filesystem containing one hash-verified static BusyBox plus its license and identity files; it contains no Python, package index access, or source checkout.
 
 ```python
 from flotilla.anchor_build import AnchorBuildOptions, build_anchor
@@ -18,7 +18,6 @@ from flotilla.anchor_build import AnchorBuildOptions, build_anchor
 result = build_anchor(
     AnchorBuildOptions(
         image="registry.example.org/team/anchor:VERSION",
-        python_image="python@sha256:FULL_PYTHON_312_DIGEST",
         push=True,
         authfile=Path("/private/registry-auth.json"),
     )
@@ -26,7 +25,7 @@ result = build_anchor(
 print(result.anchor_pin)   # None unless push succeeded
 ```
 
-The Python base must be pinned, compatible with the installed binary wheels and provide Python 3.12/venv. BusyBox is downloaded from a fixed source and verified. A fresh container checks the resulting helpers without network or source mounts. Publishing uses configurable Docker/Skopeo commands and a configurable manifest format (`v2s2` by default). No `latest` tag is changed. `anchor_pin` is the **remote manifest digest** to put in `reaper.anchor_image`; it is `None` when nothing was published, because a local Docker image ID is not something the platform can pull.
+BusyBox is downloaded from a fixed source and verified against pinned hashes. A fresh container exercises the resulting applets without network or source mounts. Publishing uses configurable Docker/Skopeo commands and a configurable manifest format (`v2s2` by default). No `latest` tag is changed. `anchor_pin` is the **remote manifest digest** to put in `reaper.anchor_image`; it is `None` when nothing was published, because a local Docker image ID is not something the platform can pull.
 
 A successful build proves image self-containment, not platform behavior. Do not promote an image as platform-tested until the following checks pass.
 

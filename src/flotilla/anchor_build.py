@@ -1,47 +1,43 @@
-"""Build a self-contained management Anchor from an installed Flotilla distribution.
+"""Build the management Anchor image: one verified static BusyBox in a scratch rootfs.
 
 This is a CPU-side API, not part of task execution. No checkout, package index,
-Harbor extra, or Docker-in-Docker is used. The caller supplies an immutable Python
-3.12 Linux/amd64 base, Docker access, and (only for publishing) skopeo/registry auth.
-The installed runtime dependency closure is copied, not resolved or upgraded.
-Editable installs are deliberately rejected: install a wheel before building.
+Harbor extra, or Docker-in-Docker is used. The anchor runs no interpreter: every
+operation the framework asks of it is a BusyBox applet. The caller supplies Docker
+access and (only for publishing) skopeo/registry auth.
 """
 
 from __future__ import annotations
 
-import base64
-import csv
-import hashlib
-import io
-import json
-import os
 import re
 import subprocess
 import sys
 import urllib.request
 from collections.abc import Sequence
 from dataclasses import dataclass
-from importlib import metadata, resources
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from flotilla.busybox import BUSYBOX_CONTROL, BUSYBOX_SHA256, BUSYBOX_URL
 
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 
+#: Applets reachable through PATH: the anchor's directory commands (mkdir, rm, chown,
+#: cp, mv, chmod, ls, true), the resident entrypoint (/bin/sleep), and shell access.
+#: Everything else is invoked as `/.flotilla/bin/busybox <applet>`, which the multicall
+#: binary serves without a link.
+_PATH_APPLETS = ("sh", "sleep", "mkdir", "rm", "ls", "chown", "chmod", "cp", "mv", "true")
+
 
 @dataclass(frozen=True)
 class AnchorBuildOptions:
     """Build options; commands are argv prefixes, never shell command strings.
 
-    ``python_image`` must be a repository@sha256 reference with Python 3.12 and
-    its stdlib venv module. ``busybox_url`` can select a mirror of the same pinned
-    APK; its content hashes cannot be overridden. Only linux/amd64 is supported.
-    Authentication stays outside the build context and is passed only to skopeo.
+    ``busybox_url`` can select a mirror of the same pinned APK; its content hashes
+    cannot be overridden. Only linux/amd64 is supported. Authentication stays
+    outside the build context and is passed only to skopeo.
     """
 
     image: str
-    python_image: str
     push: bool = False
     docker: tuple[str, ...] = ("docker",)
     skopeo: tuple[str, ...] = ("skopeo",)
@@ -53,7 +49,6 @@ class AnchorBuildOptions:
 @dataclass(frozen=True)
 class AnchorBuildResult:
     image: str
-    version: str
     image_id: str
     remote_digest: str | None
     published_image: str | None
@@ -74,9 +69,6 @@ def _run(args: Sequence[str], *, cwd: Path) -> str:
 
 
 def _validate(options: AnchorBuildOptions) -> None:
-    repo, sep, digest = options.python_image.partition("@")
-    if not repo or not sep or not _DIGEST.fullmatch(digest) or any(c.isspace() for c in repo):
-        raise ValueError("python_image must be an immutable repository@sha256:<64 lowercase hex> reference")
     # Require an explicit non-latest output tag, so publishing cannot move latest.
     image_repo, sep, tag = options.image.rpartition(":")
     if (
@@ -100,104 +92,45 @@ def _validate(options: AnchorBuildOptions) -> None:
         raise ValueError("authfile must be an existing file")
 
 
-def _installed_distributions() -> list[metadata.Distribution]:
-    # Build-only dependency. Runtime imports never need the packaging resolver.
-    from packaging.requirements import Requirement
-    from packaging.utils import canonicalize_name
-
-    pending = ["flotilla"]
-    found: dict[str, metadata.Distribution] = {}
-    while pending:
-        name = canonicalize_name(pending.pop())
-        if name in found:
-            continue
-        try:
-            dist = metadata.distribution(name)
-        except metadata.PackageNotFoundError as exc:
-            raise ValueError(f"Anchor build requires installed runtime dependency {name!r}") from exc
-        direct = json.loads(dist.read_text("direct_url.json") or "{}")
-        if direct.get("dir_info", {}).get("editable"):
-            raise ValueError(f"{name} is editable; install a non-editable wheel before building an Anchor")
-        if name == "flotilla" and not any(str(p) == "flotilla/anchor_build.py" for p in dist.files or ()):
-            raise ValueError("installed flotilla is not this framework; install its fixed Git revision or wheel")
-        found[name] = dist
-        for text in dist.requires or ():
-            requirement = Requirement(text)
-            if requirement.marker is not None and not requirement.marker.evaluate({"extra": ""}):
-                continue
-            if requirement.extras:
-                raise ValueError(f"runtime dependency extras are not supported by Anchor snapshots: {text}")
-            installed = metadata.version(requirement.name)
-            if requirement.specifier and not requirement.specifier.contains(installed, prereleases=True):
-                raise ValueError(f"installed {requirement.name}=={installed} does not satisfy {text}")
-            pending.append(requirement.name)
-    return [found[name] for name in sorted(found)]
-
-
-def _snapshot_installed(target: Path) -> dict[str, object]:
-    """Copy RECORD-owned files, verifying hashes; never walk an installation root.
-
-    Console scripts are not copied (their shebangs refer to the host environment).
-    Python entry points remain in metadata. Generated bytecode and installer-local
-    bookkeeping are omitted; RECORD is regenerated for the installed snapshot.
-    """
-    if sys.version_info[:2] != (3, 12) or sys.platform != "linux" or os.uname().machine != "x86_64":
-        raise ValueError("Anchor snapshots currently require Linux x86_64 and Python 3.12")
-    target.mkdir()
-    distributions: dict[str, str] = {}
-    hashes: dict[str, str] = {}
-    for dist in _installed_distributions():
-        name = dist.metadata["Name"]
-        distributions[name] = dist.version
-        records = dist.read_text("RECORD")
-        if not records:
-            raise ValueError(f"{name} has no wheel RECORD; install a non-editable wheel")
-        root = Path(str(dist.locate_file(""))).resolve()
-        output_records: list[tuple[str, str, str]] = []
-        record_path: str | None = None
-        for rel, digest, size in csv.reader(io.StringIO(records)):
-            path = PurePosixPath(rel)
-            if path.is_absolute() or ".." in path.parts:
-                # pip's generated console scripts live outside site-packages.
-                if not path.is_absolute() and path.parts[:3] == ("..", "..", "..") and path.parts[3:4] == ("bin",):
-                    continue
-                raise ValueError(f"unsupported installed data outside site-packages: {name}: {rel}")
-            if path.as_posix() != rel or not path.parts:
-                raise ValueError(f"noncanonical installed path: {name}: {rel}")
-            if path.name == "RECORD" and path.parent.name.endswith(".dist-info"):
-                record_path = rel
-                continue
-            if "__pycache__" in path.parts or path.suffix == ".pyc":
-                continue
-            if not digest:
-                # pip-generated, not part of the wheel's installed content.
-                if path.parent.name.endswith(".dist-info") and path.name in {"INSTALLER", "REQUESTED"}:
-                    continue
-                raise ValueError(f"unhashed installed file: {name}: {rel}")
-            source = Path(str(dist.locate_file(rel)))
-            if source.is_symlink() or not source.resolve().is_relative_to(root):
-                raise ValueError(f"installed file escapes its distribution root: {name}: {rel}")
-            blob = source.read_bytes()
-            algorithm, expected = digest.split("=", 1)
-            if algorithm not in {"sha256", "sha384", "sha512"}:
-                raise ValueError(f"unsupported RECORD hash algorithm: {algorithm}")
-            actual = base64.urlsafe_b64encode(hashlib.new(algorithm, blob).digest()).rstrip(b"=").decode()
-            if actual != expected or (size and len(blob) != int(size)):
-                raise ValueError(f"installed file differs from RECORD: {name}: {rel}")
-            sha256 = hashlib.sha256(blob).hexdigest()
-            if rel in hashes and hashes[rel] != sha256:
-                raise ValueError(f"installed distributions disagree on shared file {rel}")
-            hashes[rel] = sha256
-            dest = target / rel
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_bytes(blob)
-            dest.chmod(source.stat().st_mode & 0o777)
-            output_records.append((rel, digest, str(len(blob))))
-        if record_path is None:
-            raise ValueError(f"{name} RECORD does not list itself")
-        with (target / record_path).open("w", newline="") as stream:
-            csv.writer(stream).writerows([*output_records, (record_path, "", "")])
-    return {"distributions": distributions, "files": hashes}
+def _stage_rootfs(context: Path, scripts: Path, downloads: Path, options: AnchorBuildOptions) -> None:
+    """Lay out the scratch-image rootfs: busybox, PATH links, passwd/group, license, self-check."""
+    assets = Path(__file__).parent / "anchor_assets"
+    rootfs = context / "rootfs"
+    for directory in (
+        rootfs / ".flotilla/bin",
+        rootfs / ".flotilla/licenses",
+        rootfs / "bin",
+        rootfs / "etc",
+        rootfs / "tmp",
+    ):
+        directory.mkdir(parents=True)
+    (context / "Dockerfile").write_bytes((assets / "Dockerfile").read_bytes())
+    # Identity files: execd resolves HOME through /etc/passwd, and ownership changes read
+    # /etc/group, in every sandbox including the anchor.
+    (rootfs / "etc/passwd").write_text("root:x:0:0:root:/:/bin/sh\n")
+    (rootfs / "etc/group").write_text("root:x:0:\n")
+    for name in ("passwd", "group"):
+        (rootfs / "etc" / name).chmod(0o644)
+    (rootfs / "tmp").chmod(0o1777)
+    (rootfs / ".flotilla/licenses/busybox-GPL-2.0.txt").write_bytes((assets / "GPL-2.0.txt").read_bytes())
+    (rootfs / ".flotilla/verify.sh").write_bytes((assets / "verify.sh").read_bytes())
+    archive = downloads / "busybox.apk"
+    _download(options.busybox_url, archive)
+    # Extract straight into the rootfs; no interpreter runs inside the download directory.
+    _run(
+        [
+            sys.executable,
+            "-I",
+            str(scripts / "extract_busybox.py"),
+            str(archive),
+            BUSYBOX_CONTROL,
+            BUSYBOX_SHA256,
+            str(rootfs / ".flotilla/bin/busybox"),
+        ],
+        cwd=scripts,
+    )
+    for applet in _PATH_APPLETS:
+        (rootfs / "bin" / applet).symlink_to("../.flotilla/bin/busybox")
 
 
 def _download(url: str, destination: Path) -> None:
@@ -219,8 +152,8 @@ def build_anchor(options: AnchorBuildOptions) -> AnchorBuildResult:
     Failures raise before publication. Local images are retained for diagnosis.
     Publishing uses skopeo's requested format (v2s2 by default), then reads the
     actual remote manifest digest. No latest update, config edit, or Git action
-    is performed. Docker build needs registry read access to the pinned base;
-    its RUN steps and the self-containment test have no network access.
+    is performed. The build pulls nothing: the image is scratch plus a verified
+    binary, and the self-containment test has no network access.
     """
     _validate(options)
     # Three sibling directories: downloaded archives cannot shadow Python imports
@@ -231,38 +164,10 @@ def build_anchor(options: AnchorBuildOptions) -> AnchorBuildResult:
         TemporaryDirectory(prefix="flotilla-anchor-download-") as download_dir,
     ):
         context, scripts, downloads = Path(context_dir), Path(scripts_dir), Path(download_dir)
-        manifest = _snapshot_installed(context / "site-packages")
-        # Assets must come from the SAME installed distribution as the snapshot,
-        # not a PYTHONPATH overlay or a development checkout.
-        installed_package = context / "site-packages/flotilla"
-        if (
-            resources.files("flotilla").joinpath("anchor_build.py").read_bytes()
-            != (installed_package / "anchor_build.py").read_bytes()
-        ):
-            raise ValueError("imported Anchor builder differs from installed Flotilla; remove the source override")
-        installed_assets = installed_package / "anchor_assets"
-        package_assets = resources.files("flotilla.anchor_assets")
-        for name in ("Dockerfile", "verify.py", "extract_busybox.py", "GPL-2.0.txt"):
-            blob = package_assets.joinpath(name).read_bytes()
-            if blob != (installed_assets / name).read_bytes():
-                raise ValueError("imported Anchor assets differ from installed Flotilla; remove the source override")
-            destination = context if name != "extract_busybox.py" else scripts
-            (destination / name).write_bytes(blob)
-        (context / "snapshot.json").write_text(json.dumps(manifest, sort_keys=True) + "\n")
-        archive = downloads / "busybox.apk"
-        _download(options.busybox_url, archive)
-        _run(
-            [
-                sys.executable,
-                "-I",
-                str(scripts / "extract_busybox.py"),
-                str(archive),
-                BUSYBOX_CONTROL,
-                BUSYBOX_SHA256,
-                str(context / "busybox"),
-            ],
-            cwd=scripts,
+        (scripts / "extract_busybox.py").write_bytes(
+            (Path(__file__).parent / "anchor_assets" / "extract_busybox.py").read_bytes()
         )
+        _stage_rootfs(context, scripts, downloads, options)
         _run(
             [
                 *options.docker,
@@ -271,9 +176,6 @@ def build_anchor(options: AnchorBuildOptions) -> AnchorBuildResult:
                 "linux/amd64",
                 "--network",
                 "none",
-                "--pull=false",
-                "--build-arg",
-                f"PYTHON_IMAGE={options.python_image}",
                 "--tag",
                 options.image,
                 str(context),
@@ -292,10 +194,9 @@ def build_anchor(options: AnchorBuildOptions) -> AnchorBuildResult:
                 "--network",
                 "none",
                 "--entrypoint",
-                "/usr/bin/python3",
+                "/bin/sh",
                 image_id,
-                "-I",
-                "/opt/flotilla/verify.py",
+                "/.flotilla/verify.sh",
             ],
             cwd=scripts,
         )
@@ -329,6 +230,4 @@ def build_anchor(options: AnchorBuildOptions) -> AnchorBuildResult:
             )
             if not _DIGEST.fullmatch(remote_digest) or remote_digest != copied_digest:
                 raise ValueError(f"registry did not return the published manifest digest: {remote_digest!r}")
-        versions = manifest["distributions"]
-        assert isinstance(versions, dict)
-        return AnchorBuildResult(options.image, versions["flotilla"], image_id, remote_digest, published)
+        return AnchorBuildResult(options.image, image_id, remote_digest, published)

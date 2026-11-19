@@ -233,12 +233,12 @@ class NativeAttempt:
                 # Clear pre-existing outputs without replacing the mounted directory inode.
                 result = await manager.anchor.execute(
                     (
-                        "python3",
-                        "-I",
-                        "-m",
-                        "flotilla.native.platform_verify",
-                        "--clear-directory",
+                        "/.flotilla/bin/busybox",
+                        "find",
                         manager.anchor.path(f"{info.key}/verification"),
+                        "-mindepth",
+                        "1",
+                        "-delete",
                     ),
                     timeout_s=manager.cfg.prepare.workspace_timeout,
                     stage="prepare",
