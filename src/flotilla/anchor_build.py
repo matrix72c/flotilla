@@ -59,11 +59,13 @@ class AnchorBuildResult:
     published_image: str | None
 
     @property
-    def deployment_toml(self) -> str | None:
-        """Only remotely published digests are suitable for deployment pins."""
-        if self.published_image is None:
-            return None
-        return f"[reaper]\nanchor_image = {json.dumps(self.published_image)}\n"
+    def anchor_pin(self) -> str | None:
+        """What to put in the spec's `reaper.anchor_image`, or None if nothing was published.
+
+        A local image ID is not a pin: the platform pulls by remote digest, so only a published
+        reference can appear in a deployment.
+        """
+        return self.published_image
 
 
 def _run(args: Sequence[str], *, cwd: Path) -> str:

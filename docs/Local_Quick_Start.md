@@ -93,8 +93,9 @@ export FLOTILLA_OPENSANDBOX_CREDENTIAL="$(cat "$LOCAL/api_key")"
 Build the native Anchor from the installed Flotilla wheel and a fixed Python 3.12 base. For this local HTTP registry, build locally and push through the locally configured Docker daemon:
 
 ```sh
-flotilla anchor build --image localhost:5000/flotilla/anchor:local \
-  --python-image python@sha256:FULL_PYTHON_312_DIGEST
+python -c 'from flotilla.anchor_build import AnchorBuildOptions, build_anchor
+build_anchor(AnchorBuildOptions(image="localhost:5000/flotilla/anchor:local",
+                                python_image="python@sha256:FULL_PYTHON_312_DIGEST"))'
 docker push localhost:5000/flotilla/anchor:local
 "$FLOTILLA_REPO/images/probe/build.sh" localhost:5000/flotilla/probe:local --push
 ```
@@ -176,7 +177,6 @@ Commands outside your own process name the spec by where to import it from, so r
 ```sh
 export PYTHONPATH="$LOCAL"
 flotilla probe --deployment deployment:PLATFORM
-flotilla share verify --deployment deployment:PLATFORM
 ```
 
 The probe creates real sandboxes and measures whether egress policy, inbound isolation, read-only and subdirectory mounts, auto-mounting and exec authentication actually hold. It prints each observation and writes nothing; a nonzero exit means something it measured did not hold. This guide does not predict which will hold on your Docker runtime. Read the gaps before naming any of them in `security.accept_insecure` — a waiver records that you run without the property, and does not provide it.
@@ -192,12 +192,12 @@ printf 'Check Redis connectivity.\n' > task/instruction.md
 cat > task/environment/docker-compose.yaml <<'EOF'
 services:
   main:
-    image: alpine:3.20
+    image: alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc   # alpine:3.20
     depends_on:
       cache:
         condition: service_healthy
   cache:
-    image: redis:7-alpine
+    image: redis@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe    # redis:7-alpine
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 2s
@@ -206,6 +206,12 @@ EOF
 ```
 
 Add a verifier script under `task/tests/test.sh` for the task's verification contract. Publish the task directory under a dataset path in `$LOCAL/shared`, preserving file modes, and declare it as `[datasets.example]` with that local root and its platform root. Follow [Quick start](Quick_Start.md) for the exact binding form.
+
+Check the dataset before running anything, which plans each task exactly as `open` would:
+
+```sh
+flotilla inspect --deployment deployment:PLATFORM
+```
 
 Save the README's Python example as `example.py` in `$LOCAL`, pointing at that dataset, then run:
 

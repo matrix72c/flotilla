@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -18,6 +19,7 @@ from flotilla.native.runtime import NativeAttempt
 from flotilla.platform.base import Resources
 from flotilla.testing.config import importable
 from flotilla.testing.planning import FakeConfigs
+from flotilla.testing.platform import FakePlatform, ManualClock, SharedTree
 
 IMAGE = "example.invalid/unit@sha256:" + "c" * 64
 
@@ -161,6 +163,33 @@ def test_runtime_layers_and_mounts(published: tuple[str, Path]) -> None:
     moved = RuntimeLayers(root=layers.root, root_identity="elsewhere", keys=layers.keys)
     with pytest.raises(ValueError, match="does not match"):
         deployment.runtime_options(plan, moved, {"node": "/n", "lagent": "/l"})
+
+
+@pytest.mark.asyncio
+async def test_management_anchor_claims_no_task_capabilities_and_leaves_no_launch(
+    published: tuple[str, Path],
+    platform: FakePlatform,
+    clock: ManualClock,
+    tree: SharedTree,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Share publication reaches shared storage through this, and must not look like a launch to gc."""
+    monkeypatch.setattr("flotilla.platform.clock.SystemClock", lambda: clock)
+    monkeypatch.setattr(FlotillaConfig, "build_platform", lambda *_, **caps: platform)
+    monkeypatch.setattr(platform, "aclose", AsyncMock(), raising=False)
+    deployment = Deployment.load(published[0])
+    caps = deployment.config.management_capabilities()
+    assert not (caps.link or caps.shared_volume or caps.exec_auth or caps.privileged_runtime)
+
+    async def use() -> str:
+        async with deployment.management_anchor() as anchor:
+            assert anchor.iid is not None
+            return anchor.launch_id
+
+    launch = await clock.run(use())
+    assert launch.startswith("mgmt-")
+    assert platform.instances() == []  # the anchor is deleted on exit
+    assert not any(key.startswith("launches") for key in tree.dirs | tree.files)
 
 
 def test_runtime_layers_require_a_section(tmp_path: Path) -> None:

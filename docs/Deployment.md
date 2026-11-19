@@ -12,14 +12,21 @@ The platform Anchor needs the matching installed Flotilla runtime and filesystem
 
 Install this repository's fixed commit or controlled wheel in a clean Python 3.12 Linux x86_64 environment. Do not use the unrelated public PyPI `flotilla` package. The builder snapshots the exact installed non-editable distribution and runtime dependency closure, validates RECORD hashes and uses packaged resources rather than a checkout.
 
-```sh
-flotilla anchor build \
-  --image registry.example.org/team/anchor:VERSION \
-  --python-image python@sha256:FULL_PYTHON_312_DIGEST \
-  --push --authfile /private/registry-auth.json
+```python
+from flotilla.anchor_build import AnchorBuildOptions, build_anchor
+
+result = build_anchor(
+    AnchorBuildOptions(
+        image="registry.example.org/team/anchor:VERSION",
+        python_image="python@sha256:FULL_PYTHON_312_DIGEST",
+        push=True,
+        authfile=Path("/private/registry-auth.json"),
+    )
+)
+print(result.anchor_pin)   # None unless push succeeded
 ```
 
-The Python base must be pinned, compatible with the installed binary wheels and provide Python 3.12/venv. BusyBox is downloaded from a fixed source and verified. A fresh container checks the resulting helpers without network or source mounts. Publishing uses configurable Docker/Skopeo commands and a configurable manifest format (`v2s2` by default). No `latest` tag is changed. Record the reported **remote manifest digest**, not the local Docker image ID, in `[reaper].anchor_image`.
+The Python base must be pinned, compatible with the installed binary wheels and provide Python 3.12/venv. BusyBox is downloaded from a fixed source and verified. A fresh container checks the resulting helpers without network or source mounts. Publishing uses configurable Docker/Skopeo commands and a configurable manifest format (`v2s2` by default). No `latest` tag is changed. `anchor_pin` is the **remote manifest digest** to put in `reaper.anchor_image`; it is `None` when nothing was published, because a local Docker image ID is not something the platform can pull.
 
 A successful build proves image self-containment, not platform behavior. Do not promote an image as platform-tested until the following checks pass.
 
@@ -29,12 +36,16 @@ Copy the [deployment template](../deployments/examples/opensandbox.py) into your
 
 Use one shared root visible consistently to all workers and the Anchor. Without `[share]`, the deployment uses the built-in shared-tools release `busybox-1.36.1-r31`: probe and runtime start publish it into the work root from the Anchor image's own pinned BusyBox when it is missing, with no network access. A custom release is optional; assemble a directory containing the controlled `bin/busybox`, retain its license/source information and publish it:
 
-```sh
-flotilla share publish share-root --deployment myproject.deployment:PLATFORM \
-  --release initial --component busybox=1.36.1
+```python
+from flotilla.deployment import Deployment
+from flotilla.share.release import publish_release
+
+async with Deployment(PLATFORM).management_anchor() as anchor:
+    result = await publish_release(anchor, "initial", Path("share-root"), components={"busybox": "1.36.1"})
+print(result.release, result.release_sha256)
 ```
 
-Then put its release name and `RELEASE.json` digest in `[share]`. Shared-tools releases are immutable. They are separate from native task releases and any Agent runtime.
+Then put its release name and `RELEASE.json` digest in `[share]`. Shared-tools releases are immutable. They are separate from datasets and any Agent runtime.
 
 ## 3. Declare `[platform]` and measure isolation
 
@@ -44,7 +55,6 @@ Then configure an ordinary probe image with the required shell, Python and socke
 
 ```sh
 flotilla probe --deployment myproject.deployment:PLATFORM --env sandbox.env
-flotilla share verify --deployment myproject.deployment:PLATFORM
 ```
 
 The probe writes nothing. It prints each isolation property with what it observed and exits nonzero when one did not hold and `security.accept_insecure` does not name it, or when cleanup was not confirmed. The observations exist only for the length of the run, so read them there: a client in another process cannot re-derive them, and no later startup re-checks them.
@@ -86,6 +96,15 @@ datasets={
 
 The owner uploads task directories into those directories with their own storage tools. Read-only enforcement for other consumers is the platform's sharing permission; Flotilla only ever mounts input roots read-only.
 
+Once a dataset is bound, check it before anything is created:
+
+```sh
+flotilla inspect --deployment myproject.deployment:PLATFORM          # every declared dataset
+flotilla inspect example --deployment myproject.deployment:PLATFORM  # one of them
+```
+
+Each task is planned exactly as `open` would plan it, so a task that passes here is one that opens there. Nothing is created and nothing is written unless `--out` names a report file; a nonzero exit means at least one task would not open. Running it on the path that submits your jobs is what turns it into a gate — Flotilla provides the check and the exit code, not the policy.
+
 Configure instance budgets, concurrency, creation/exec rates and timeouts from measured quotas. Admission includes replacement capacity and Anchor overhead. Private writable task state is allocated per attempt; the task's own read-only files are mounted where they are published and shared by every attempt. A task's images and topology cannot be changed through runtime overrides.
 
 ## Acceptance and maintenance
@@ -96,7 +115,16 @@ Use real native tasks covering multi-service networking, separate verifier roles
 
 ```sh
 flotilla gc --deployment myproject.deployment:PLATFORM
-flotilla share gc --deployment myproject.deployment:PLATFORM --keep previous --dry-run
 ```
 
-GC is explicit, not a background schedule. Use `gc --launch ID` only after confirming that owner has exited. Review share GC's dry-run before deleting. Native releases and historical runs are not automatically migrated or deleted; old jobs retain their original code, images and evidence.
+Share releases are collected from your own code, because the caller already holds the spec:
+
+```python
+from flotilla.share.release import gc_releases, verify_release
+
+async with Deployment(PLATFORM).management_anchor() as anchor:
+    report = await verify_release(anchor, PLATFORM.share.release, expected_sha256=PLATFORM.share.release_sha256)
+    collected = await gc_releases(anchor, keep={PLATFORM.share.release, "previous"}, dry_run=True)
+```
+
+GC is explicit, not a background schedule. Use `gc --launch ID` only after confirming that owner has exited. Review `gc_releases(..., dry_run=True)` before deleting. Native releases and historical runs are not automatically migrated or deleted; old jobs retain their original code, images and evidence.

@@ -540,8 +540,8 @@ class FlotillaConfig(_Model):
     def _removed(cls, data: Any) -> Any:
         if isinstance(data, Mapping) and "preparation" in data:
             raise ValueError(
-                "[preparation] was removed: open no longer builds images. Move docker_command/concurrency to "
-                "[prepare] (used by `flotilla prepare`) and timeout_s to runtime.startup_timeout_s"
+                "[preparation] was removed: open no longer builds images. Move concurrency to "
+                "[prepare] (the management anchor) and timeout_s to runtime.startup_timeout_s"
             )
         if isinstance(data, Mapping) and "voyager" in data:
             raise ValueError(

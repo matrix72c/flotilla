@@ -33,8 +33,13 @@ Every `image:` must be `repo@sha256:...`. A tag is refused: it can move between 
 pinned to one would not be reproducible, and its provenance would not be in the task. Resolve tags
 to digests when the dataset is published.
 
-A task declaring `build:` is refused. Publish the image first and name it; producing images is a
+A task declaring `build:`, or a single-service task with only a `Dockerfile` and no
+`[environment].docker_image`, is refused. Publish the image first and name it; producing images is a
 different job from running them.
+
+Every image's own `USER` must be root (empty, `0`, `0:0` or `root`): the exec daemon is the sandbox
+entrypoint. Declare the application identity with Compose `user`, numerically as `uid[:gid]`. A named
+user is refused, because resolving it would mean reading the image's `/etc/passwd`.
 
 Multi-step Harbor tasks are refused by the protocol itself — the lifecycle is one agent run plus one
 verification — not by a consumer option.
@@ -54,8 +59,8 @@ datasets={
 }
 ```
 
-Local relative paths resolve against the deployment file, not the caller's working directory. For
-host storage, `platform_root` is a key relative to the shared root or an absolute path under it. For
+`local_root` must be absolute: a spec is imported by the client, Harbor workers and `flotilla gc`
+alike, and a relative path would mean something different in each. For host storage, `platform_root` is a key relative to the shared root or an absolute path under it. For
 PVC storage use the explicit `pvc:<claim>/<configured-root-subpath>/<key>` form; a bare relative key
 is refused, and an arbitrary absolute host path is not turned into a PVC key by stripping a prefix.
 
@@ -117,16 +122,31 @@ for key in dataset.tasks():
 Both read image configs through the client's cache, so checking a dataset also warms it: a digest
 names one config forever, and a second task naming the same image costs a dict lookup.
 
-A task that cannot run fails here rather than mid-run. Making that a gate — refusing to submit a job
-whose dataset does not fully resolve — belongs to whatever submits your jobs; Flotilla provides the
-check and the exit code, not the policy.
+`flotilla inspect` is the same check as a command, for a shell script or a submit hook that has no
+client yet:
+
+```sh
+flotilla inspect example --deployment myproject.deployment:PLATFORM
+```
+
+With no argument it checks every dataset the spec declares; a local path checks a dataset that is not
+declared yet, planned with no platform key so its storage rules go unchecked. A nonzero exit means at
+least one task would not open, and `--out report.json` records each one with the fields that were
+refused. Making that a gate — refusing to submit a job whose dataset does not fully resolve — belongs
+to whatever submits your jobs; Flotilla provides the check and the exit code, not the policy.
 
 ## Installed Anchor builder
 
-```sh
-flotilla anchor build --image registry.example.org/team/anchor:VERSION \
-  --python-image registry.example.org/python@sha256:FULL_DIGEST
-# Add --push and optionally --authfile to publish explicitly.
+```python
+from flotilla.anchor_build import AnchorBuildOptions, build_anchor
+
+result = build_anchor(
+    AnchorBuildOptions(
+        image="registry.example.org/team/anchor:VERSION",
+        python_image="registry.example.org/python@sha256:FULL_DIGEST",
+    )
+)
+# Add push=True and optionally authfile= to publish explicitly.
 ```
 
 The builder uses packaged assets and the exact installed non-editable Flotilla distribution plus its
@@ -137,7 +157,7 @@ archives are isolated temporary directories.
 
 A new container verifies helpers and tools without network or source/credential mounts. Publication
 uses configurable Docker/Skopeo argv and manifest format (`v2s2` by default for the current internal
-registry). A deployment snippet is printed only after obtaining the remote digest. Local image IDs
+registry). `result.anchor_pin` is set only after obtaining the remote digest. Local image IDs
 are not deployment pins. Platform behavior is still measured by probe; self-containment does not
 replace platform or GPU acceptance.
 

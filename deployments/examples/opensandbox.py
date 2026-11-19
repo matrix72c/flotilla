@@ -58,9 +58,9 @@ PLATFORM = FlotillaConfig(
         # PVC on Kubernetes): volumes="pvc", claim_name="flotilla-shared", root_subpath="flotilla".
     ),
     # `share=` is optional: without it, probe and runtime start publish the built-in BusyBox release
-    # from the Anchor image. For a custom release, run
-    # `flotilla share publish <dir> --deployment myproject.deployment:PLATFORM`
-    # and paste the two values it prints into Share(release=..., release_sha256=...).
+    # from the Anchor image. For a custom release, call `flotilla.share.release.publish_release`
+    # inside `Deployment(PLATFORM).management_anchor()` and put the release name and the returned
+    # `release_sha256` into Share(release=..., release_sha256=...).
     network=Network(external=[]),
     security=Security(accept_insecure=[]),
     reaper=Reaper(anchor_image=ANCHOR, trial_ttl=1800, renew_before_s=600, renew_margin_s=120),

@@ -272,7 +272,7 @@ def test_the_installed_helper_needs_neither_harbor_nor_a_deployment(tmp_path: Pa
     code = (
         "import sys, flotilla.native.dataset, flotilla.native.platform_verify;"
         "bad = sorted(m for m in sys.modules if m.startswith("
-        "('flotilla.integrations', 'flotilla.prepare.', 'flotilla.anchor_build', 'harbor')));"
+        "('flotilla.integrations', 'flotilla.inspect', 'flotilla.anchor_build', 'harbor')));"
         "print(bad); sys.exit(1 if bad else 0)"
     )
     result = subprocess.run(

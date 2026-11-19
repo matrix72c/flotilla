@@ -1,12 +1,12 @@
 # Read-only root filesystems and native tmpfs
 
-Compose `read_only: true` and `tmpfs` are supported through an explicitly selected lifecycle extension on compatible internal container deployments. They are independent capabilities. A task requiring either capability is rejected when the selected deployment has no matching evidence. Flotilla never retries a create after removing filesystem restrictions, and never substitutes a regular directory for tmpfs.
+Compose `read_only: true` and `tmpfs` are supported through an explicitly selected lifecycle extension on compatible internal container deployments. They are independent capabilities. A task requiring either is rejected at planning unless the deployment selects a filesystem protocol that can express it. Flotilla never retries a create after removing filesystem restrictions, and never substitutes a regular directory for tmpfs.
 
 The internal mapping follows the platform's **17. Sandbox read-only root filesystem and tmpfs memory mounts** contract. Selecting this mapping is not evidence that a particular server or runtime implements it; run the optional probes on the actual deployment.
 
 ## Enable a deployment
 
-Add this key to the existing `[opensandbox]` table in the private deployment configuration:
+Set this field on the deployment spec's `OpenSandbox(...)`:
 
 ```python
 OpenSandbox(
@@ -15,19 +15,9 @@ OpenSandbox(
 )
 ```
 
-This is independent of `[opensandbox.execd].protocol`. The default filesystem protocol is `"upstream"`, which sends neither `readOnlyRootFilesystem` nor `tmpfsMounts`, including for ordinary tasks with false/empty requirements. Upstream mode rejects tasks requiring the new capabilities even if a capability file claims they are available.
+This is independent of `[opensandbox.execd].protocol`. The default filesystem protocol is `"upstream"`, which sends neither `readOnlyRootFilesystem` nor `tmpfsMounts`, including for ordinary tasks with false/empty requirements. Upstream mode rejects tasks requiring these capabilities.
 
-Configure the pinned probe image in `[probe].image`, then regenerate evidence with the exact deployment that will run tasks:
-
-```sh
-flotilla probe --deployment myproject.deployment:PLATFORM
-```
-
-Filesystem checks run when the explicitly selected protocol can express them; unsupported modes produce `skipped`, not an automatic protocol/runtime fallback. There are no handwritten declaration flags. The image needs the standard probe tools including Python 3, `stat` (`-f`), `dd`, `grep`, `touch`, `/tmp`, and `/var/tmp`, plus working configured share mounts.
-
-These three capabilities come from `opensandbox.filesystem_protocol`: `sandbox-system-v1` has them, `upstream` does not and rejects such a task at planning. Nothing measures them first — a platform that advertises the dialect and then drops the fields is caught by `python -m tests.contract.filesystem`, not by a stored report. The probe measures isolation, which is separate.
-
-Checks include EROFS root writes, writable-volume transfer, `/etc/hosts`, actual tmpfs type, ownership/mode, non-root writes, capacity exhaustion, persistence across exec, output delivery while full, and separation between instances. The combined readonly/tmpfs behavior is also checked. Probe cleanup is bounded and recorded. Unit mocks are not real platform acceptance.
+These three capabilities come from `opensandbox.filesystem_protocol`: `sandbox-system-v1` has them, `upstream` does not and rejects such a task at planning. Nothing measures them first, and `flotilla probe` does not check them: a platform that cannot honor the fields refuses the create, and the probe measures only isolation. Selecting the protocol is not evidence that a particular server implements it, so before relying on it, open a task that declares `read_only` and `tmpfs` on the actual deployment and observe from inside the sandbox: writes to `/` fail with EROFS, each tmpfs mount has type `tmpfs` with the declared size, mode and owner, and declared writable volumes stay writable. Unit mocks are not platform acceptance.
 
 ## Task configuration
 

@@ -34,7 +34,7 @@ Storage uses deployment-approved host paths or an existing shared PVC, with conf
 
 `opensandbox.network.link="cidr"` requires accurate sandbox CIDRs. `link="sandbox"` uses explicit `sandbox:<id>` peer targets and supports none/allowlist external policies. The optional `group_extension` is used only when the deployment implements that extension; it groups a trial, rather than pinning a worker node.
 
-Validate the selected peer-target mode against the deployment: support for sandbox-ID policies does not establish support for raw peer-IP/CIDR policies. Record the mode and any required group extension with the capability evidence.
+Validate the selected peer-target mode against the deployment: support for sandbox-ID policies does not establish support for raw peer-IP/CIDR policies. Record the mode and any required group extension with the probe run that measured it.
 
 Create uses the common top-level `networkPolicy` field; replacements use `PUT /v1/sandboxes/{id}/networkpolicy` on both upstream OpenSandbox and platforms implementing its compatibility route. Flotilla does not fall back to a provider-specific route or the sidecar API. Upstream's policy schema contains `defaultAction` and `egress`; provider extensions are explicitly selected.
 

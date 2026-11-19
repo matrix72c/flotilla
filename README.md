@@ -29,7 +29,9 @@ flowchart LR
 
 ## Example
 
-A task is a directory with a `task.toml` and an `environment/` directory containing a Dockerfile, a Compose file, or both:
+A task is a directory with a `task.toml` and an `environment/` directory. A multi-service task has a Compose file there; a single-service task can
+instead name its image in `task.toml` as `[environment].docker_image`. Images are published and named
+by digest, and nothing is built:
 
 ```text
 task/
@@ -43,12 +45,12 @@ task/
 ```yaml
 services:
   main:
-    image: alpine:3.20
+    image: alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc   # alpine:3.20
     depends_on:
       cache:
         condition: service_healthy
   cache:
-    image: redis:7-alpine
+    image: redis@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe    # redis:7-alpine
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 2s
@@ -133,9 +135,10 @@ source/runtime interfaces.
 
 Flotilla runs on **Linux x86_64 with Python 3.12**. A task's `task.toml` is Harbor's format, so
 `harbor` is a required dependency; nothing needs Docker, a Compose binary or a GPU stack. Build the
-Anchor from the installed package with `flotilla anchor build`, using a pinned Python base; publication
-requires explicit `--push`. Platform capabilities and cleanup must pass `flotilla probe` before
-consumption. See [Native tasks](docs/Native_Tasks.md) for the complete workflow.
+Anchor from the installed package with `flotilla.anchor_build.build_anchor`, using a pinned Python
+base; publication requires an explicit `push=True`. A deployment's isolation must pass
+`flotilla probe` before consumption. See [Native tasks](docs/Native_Tasks.md) for the complete
+workflow.
 
 ```sh
 git clone https://github.com/matrix72c/flotilla.git
