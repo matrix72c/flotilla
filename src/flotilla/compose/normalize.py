@@ -93,18 +93,18 @@ _REJECT: dict[str, tuple[Category, str]] = {
     "platform": ("docker-internal", "preparation pins every image by digest, which fixes its platform"),
     "memswap_limit": ("docker-internal", "the sandbox takes cpu and memory only; swap is not separately accountable"),
     "cgroup": ("no-model", "the sandbox owns its own cgroup placement"),
-    "tty": ("unimplemented", "requires a pty; not supported yet"),
-    "stdin_open": ("unimplemented", "requires a pty; not supported yet"),
+    "tty": ("unimplemented", "needs a pseudo-terminal, and the exec channel gives a service none"),
+    "stdin_open": ("unimplemented", "needs a held-open stdin, and the exec channel gives a service none"),
     "pid": ("no-model", "pid sharing needs two containers in one sandbox; a sandbox runs exactly one"),
     "ipc": ("no-model", "ipc sharing needs two containers in one sandbox; a sandbox runs exactly one"),
     "userns_mode": ("no-model", "the sandbox is already the isolation domain; there is no mapping to choose"),
     "runtime": ("no-model", "the runtime is a deployment property, not something a task selects"),
-    "extends": ("unimplemented", "the input gate stops it before the Compose CLI, which would expand it"),
-    "profiles": ("unimplemented", "not implemented yet (not seen in task data)"),
-    "secrets": ("unimplemented", "would expand to mounts; not implemented yet (not seen in task data)"),
-    "configs": ("unimplemented", "would expand to mounts; not implemented yet (not seen in task data)"),
+    "extends": ("unimplemented", "inherits another service definition; the parser does not expand it"),
+    "profiles": ("unimplemented", "profile selection is not implemented"),
+    "secrets": ("unimplemented", "would expand to file mounts; not implemented"),
+    "configs": ("unimplemented", "would expand to file mounts; not implemented"),
     "domainname": ("docker-internal", "an NIS domain has no counterpart in a sandbox"),
-    "scale": ("unimplemented", "replicas would be several sandboxes; not implemented yet"),
+    "scale": ("unimplemented", "replicas would be several sandboxes behind one name; not implemented"),
 }
 # Bridge driver options with no effect on platform networks.
 _BRIDGE_OPTIONS = frozenset(
@@ -139,13 +139,13 @@ class _Collector:
 def normalize(compose: Mapping[str, Any]) -> Project:
     """Translate resolved Compose config output to the runtime model.
 
-    The input is already merged and interpolated by the official Compose config
-    adapter, so nothing here substitutes variables or opens further files.
+    The input is already merged and interpolated by `flotilla.compose.parse`, so
+    nothing here substitutes variables or opens further files.
     """
     c = _Collector()
     for key in compose:
         if key.startswith("x-"):
-            # The config adapter resolves anchors before this point, so a surviving
+            # The parser resolves anchors before this point, so a surviving
             # extension field is leftover metadata. Compose strips the service-,
             # network- and volume-level ones, which is why only the top level needs this.
             c.note(key, "extension field; recorded only, nothing here reads it")
@@ -256,7 +256,7 @@ def _service(
 def _devices(value: object, path: str, c: _Collector) -> frozenset[TaskDevice]:
     """Host device nodes: only `/dev/fuse`, `/dev/kvm` and `/dev/net/tun`, at the same path, with `rwm` access.
 
-    Accepts short syntax (`src[:dst[:perms]]`) and the long form the official Compose config emits.
+    Accepts short syntax (`src[:dst[:perms]]`) and the long form (`source`, `target`, `permissions`).
     """
     if value is None:
         return frozenset()
