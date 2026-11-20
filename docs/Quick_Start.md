@@ -2,8 +2,8 @@
 
 This tutorial publishes a directory of Harbor tasks to shared storage, declares where it is, and runs
 one task using the installed Flotilla package. It assumes deployment values from whoever runs your
-sandbox platform, platform credentials, a matching Anchor and shared tools. See [Native tasks](Native_Tasks.md) for installation
-and protocol details, and [Compose support](Compose_Support.md) for which Compose keys are supported.
+sandbox platform and platform credentials. See [Compose support](Compose_Support.md) for which
+Compose keys are supported.
 
 ## 1. Write the deployment spec
 
@@ -44,23 +44,12 @@ confirmed cleanup. Run it once per deployment, before running any task on it.
 ## 3. Publish the dataset
 
 A dataset is a directory of task directories. Copy it to shared storage with your existing tools,
-preserving contents and file metadata. Nothing is generated in between: the directory the platform
-mounts is the one you published.
+preserving contents and file metadata; the directory the platform mounts is the one you published.
+Every image must be named by digest (`repo@sha256:...`) and declare a root `USER`. `datasets` above
+declares both the client path and the platform path, because neither side can infer the other. See
+[Running published tasks](Native_Tasks.md) for the task layout and binding rules.
 
-Each image must be published and referenced by digest (`repo@sha256:...`), and must declare a root
-`USER`: the exec daemon is the sandbox entrypoint. A task that declares `build:` instead of an image is
-rejected, because Flotilla does not build images.
-
-## 4. Both sides of the binding
-
-`datasets` above declares both views because neither side can infer the other: a client path says
-nothing about how the platform mounts the storage. On host storage the platform root is either a key
-relative to the shared root or an absolute path under it; a `pvc:` value is refused. PVC deployments
-require the explicit `pvc:<claim>/<subpath>/...` form and refuse a relative key. `local_root` must be
-absolute, because a spec outlives the directory it was written in. See
-[Native tasks](Native_Tasks.md#bind-local-and-platform-roots).
-
-## 5. Execute
+## 4. Execute
 
 ```python
 import asyncio
@@ -100,21 +89,20 @@ confirmed cleanup. Infrastructure and cleanup failures are not task scores.
 
 ## Commands and files
 
-Once an environment is open, its regular service APIs remain available:
+Once an environment is open, its service APIs remain available:
 
 ```python
 await env.agent.exec(["ls", "-l", "/"], timeout=10)
 await env.agent.shell("printf '%s' hello > out.txt", cwd="/tmp", timeout=10)
-await env.agent.exec(["id"], uid=1000, gid=1000, timeout=10)
 await env.agent.download_file("/tmp/out.txt", Path("out.txt"))
 ```
 
-Only use writable paths declared by the task: readonly-rootfs tasks do not implicitly gain a writable `/tmp`. Runtime options may override resources, timeouts and execution settings; they cannot change the task's images or topology. Change the task directory for anything else.
-
-`exec` returns bytes stdout/stderr and an exit code. A command is not silently replayed after an uncertain response. See [Runtime API](Runtime_API.md) for timeout, cancellation, background process and `ExecOutcomeUnknown` behavior.
+Only use writable paths the task declares. See [Runtime API](Runtime_API.md) for identities,
+timeouts, cancellation, background processes and `ExecOutcomeUnknown`.
 
 ## Next steps
 
-- [Native tasks](Native_Tasks.md): protocol, installed Anchor builder and path binding.
+- [Running published tasks](Native_Tasks.md): task layout, datasets, grading phases and `flotilla inspect`.
+- [Integration guide](Integration_Guide.md): use Flotilla from an evaluation runner or RL framework.
 - [Configuration](Configuration.md): every field of a deployment spec.
 - [Compose support](Compose_Support.md): which Compose keys are supported.

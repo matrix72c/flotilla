@@ -2,12 +2,12 @@
 
 This is a local infrastructure reference for OpenSandbox's Docker runtime, not evidence that your deployment passes isolation or filesystem contracts. Do not interpret example security waivers as measurements or a no-network guarantee.
 
-Tasks are published as static directories and resolved where they run. The Anchor runs the installed Flotilla helper; no Compose executable, builder or Docker socket is needed anywhere, and a client needs registry read access only. Container `localhost` is not the host registry. Until the capability probe and cleanup pass on your actual deployment, stop before running tasks. See [Deployment](Deployment.md) for installed-package provisioning.
+Tasks are published as static directories and resolved where they run. The Anchor is a scratch BusyBox image; no Compose executable, builder or Docker socket is needed anywhere, and a client needs registry read access only. Container `localhost` is not the host registry. Until the capability probe and cleanup pass on your actual deployment, stop before running tasks. See [Deployment](Deployment.md) for installed-package provisioning.
 
 ## Prerequisites
 
 - Linux x86_64 with a kernel that has nf_tables. OpenSandbox's egress sidecar enforces network policies with nftables.
-- Docker with buildx, able to pull from Docker Hub. The commands use `docker`; if you need `sudo`, see [Using sudo](#using-sudo).
+- Docker, able to pull from Docker Hub. The commands use `docker`; if you need `sudo`, see [Using sudo](#using-sudo).
 - Python 3.12 and Flotilla installed (`python -m pip install .` in a checkout).
 - `curl` and `openssl`.
 
@@ -24,7 +24,7 @@ cd "$LOCAL"
 
 ## 1. Start a registry
 
-Flotilla pushes the images it builds to a registry the platform can pull from. Docker treats `localhost` registries as trusted, so a plain local registry works:
+The anchor and probe images you build below need a registry the platform can pull from. Flotilla itself never builds or pushes task images; it only reads them. Docker treats `localhost` registries as trusted, so a plain local registry works:
 
 ```sh
 docker run -d --name flotilla-registry -p 127.0.0.1:5000:5000 registry:2
@@ -163,7 +163,7 @@ PLATFORM = FlotillaConfig(
 
 A task's images must be published where the sandboxes can pull from, and named by digest.
 
-Nothing here declares what the platform can do: every capability is assumed until a request is refused, and only isolation is measured. An absent control is reported as not shown, never as isolation. Configure TCP/UDP service controls and a DNS query name as described in [Network validation](Network_Validation.md). HTTPS and NTP avoid the need to operate raw echo servers; `service="echo"` remains the default. A standard service uses one pinned IP across allow, deny and allow again, and HTTPS requires valid CA trust and hostname verification. The resolvers named in `platform.cluster_dns` may remain reachable. A waiver records that you run without a property; it does not provide it.
+Nothing here declares what the platform can do: every capability is assumed until a request is refused, and only isolation is measured. An absent control is reported as not shown, never as isolation. Configure TCP/UDP service controls and a DNS query name as described in the [deployment guide](Deployment.md#isolation-measurement). HTTPS and NTP avoid the need to operate raw echo servers; `service="echo"` remains the default. A standard service uses one pinned IP across allow, deny and allow again, and HTTPS requires valid CA trust and hostname verification. The resolvers named in `platform.cluster_dns` may remain reachable. A waiver records that you run without a property; it does not provide it.
 
 ## 5. Measure the platform's isolation
 
@@ -240,12 +240,11 @@ sudo rm -rf "$LOCAL"   # sandboxes create root-owned files under shared/
 
 - **Inbound isolation.** Any container on the Docker bridge can connect to any sandbox, including sandboxes of other environments.
 - **Verified exec authentication.** Flotilla gives each sandbox's exec daemon an access token, but its ports are published on the host and this setup has not verified that requests without the token are rejected.
-- **Offline tasks.** Only measured network acceptance with controlled TCP/UDP and DNS behavior can authorize them. An empty exception list is not evidence; there is no declaration-based shortcut. See [Network validation](Network_Validation.md).
+- **Offline tasks.** Only measured network acceptance with controlled TCP/UDP and DNS behavior can authorize them. An empty exception list is not evidence; there is no declaration-based shortcut. See the [deployment guide](Deployment.md#isolation-measurement).
 - **UDP between services.** Enabled only after directed content-bearing UDP and disconnect/reconnect checks pass.
-- **Platform-side building.** Local images and host Docker access do not establish that the management sandbox can compile tasks, reach a build service, or use explicitly mounted credentials.
 
 For a deployment that does provide these, follow the [deployment guide](Deployment.md).
 
 ## Using sudo
 
-If host Docker needs `sudo`, prefix the infrastructure commands above or pass `DOCKER="sudo docker"` to the existing build scripts. This does not configure the platform management helper: its Docker command, remote endpoint, network policy and credential paths must be explicitly usable inside the trusted management sandbox. Do not pass host credentials or a privileged Docker socket into agent role sandboxes.
+If host Docker needs `sudo`, prefix the infrastructure commands above, or pass `DOCKER="sudo docker"` to `images/probe/build.sh` and `docker=("sudo", "docker")` to `AnchorBuildOptions`. Do not pass host credentials or a privileged Docker socket into task sandboxes.
