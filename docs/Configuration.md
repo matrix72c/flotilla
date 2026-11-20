@@ -15,7 +15,7 @@ must be absolute: a spec outlives the directory it was written in. Validation er
 
 | Key | Default | Meaning |
 |---|---|---|
-| `backend` | `"opensandbox"` | Sandbox backend. The built-in `opensandbox` backend reads `[opensandbox]`; any other name must be an installed backend plugin |
+| `backend` | `"opensandbox"` | Sandbox backend. The built-in `opensandbox` backend reads `[opensandbox]`; any other name must be a backend registered in the `BACKENDS` table in `flotilla/config.py` |
 | `[backends.<name>]` | | The selected third-party backend's settings, validated by that backend. Every backend table has `endpoint` and `credential_env` with the same meaning as in `[opensandbox]` |
 
 A configuration contains exactly one backend table: `[opensandbox]` for the built-in backend, or `[backends.<name>]` matching `backend`. See [Writing a backend](Writing_a_Backend.md).
@@ -81,7 +81,7 @@ Where one published dataset is, on both sides. Loading a deployment opens nothin
 | `input` | Optional `[inputs.<name>]` holding the dataset; omitted means the work root `[storage]` |
 | `platform_root` | Dataset location on its root: a relative storage key, an absolute host root confined beneath an absolute `host_path`/`root_subpath`, or explicit `pvc:<claim>/<root_subpath>/<key>` for PVC. Platform-identifier host paths require relative keys |
 
-The binding name is a configuration label, not a guessed task identity. `launches/` and `share/` are refused: those are Flotilla's own state, not task data. A dataset is read-only to Flotilla, which never writes to one; do not mutate one running jobs are reading. See [Native tasks](Native_Tasks.md).
+The binding name is a configuration label, not a guessed task identity. `launches/` and `share/` are refused: those are Flotilla's own state, not task data. A dataset is read-only to Flotilla, which never writes to one; do not mutate one running jobs are reading. See [Running published tasks](Native_Tasks.md).
 
 ### `[agent_runtime]` (optional)
 
@@ -93,7 +93,7 @@ Typed, layer-agnostic bindings for a consumer's agent runtime. Flotilla validate
 | `layers.<name>.local_root` | Optional local directory of the layer, absolute when given; Flotilla only records it |
 | `layers.<name>.platform_root` | Layer location on its root, same forms as a release's `platform_root` |
 
-Agent identity, runtime mount paths and timeouts belong to the consumer's recipe, not to this section. The former opaque `[voyager]` namespace was removed; loading a deployment that still declares it fails with a migration error. Secrets must not be embedded here or in task definitions.
+Agent identity, runtime mount paths and timeouts belong to the consumer's recipe, not to this section. Secrets must not be embedded here or in task definitions.
 
 ### `[share]` (optional)
 
@@ -179,7 +179,7 @@ Per-stage startup deadlines. The whole startup, from admission to ready, is also
 | `prepare` | `600` | Preparing trial directories on shared storage |
 | `create` | `600` | Creating all sandboxes |
 | `create_request` | `60` | One create request. When no response arrives in time (for example, the gateway drops it under load), the sandbox is looked up by its labels and adopted. Must be below `create` |
-| `pending` | `300` | One sandbox staying pending. It is deleted and created again once; if the replacement also stays pending, the open fails. An explicit numeric value must be below `create`; the default is off when `create` is not above it. Disabled pending replacement is serialized as JSON `null`, preserving the effective behavior when a workspace compiler reloads the full configuration snapshot |
+| `pending` | `300` | One sandbox staying pending. It is deleted and created again once; if the replacement also stays pending, the open fails. An explicit numeric value must be below `create`; the default is off when `create` is not above it. Set to `None` to disable pending replacement |
 | `address` | `30` | Resolving sandbox addresses |
 | `wire` | `60` | Applying peer network links |
 | `hosts` | `30` | Writing `/etc/hosts` entries |
@@ -254,10 +254,10 @@ All probe inputs are fields of the spec. Images must be pinned `repo@sha256:<64 
 | `external_targets` | `[]` | Explicit `{host, port, protocol, service}` controls: `service = "echo"` (default, TCP/UDP), `"https"` (TCP), or `"ntp"` (UDP); `protocol` defaults to `"tcp"`; never inferred from workload egress |
 | `dns_name` | `""` | DNS query name for explicit TCP/UDP resolver checks |
 
-For external isolation, provide TCP and UDP service controls (for example HTTPS and NTP, without operating echo servers) and a DNS query name. HTTPS/NTP resolve once under an allowing policy and use the same pinned IP for allow, deny and allow again; HTTPS retains certificate hostname verification and SNI. Missing positives, invalid responses, certificate errors and restore failures never prove isolation. The `platform.cluster_dns` resolvers are allowed on TCP/UDP 53; that is not complete network disconnection. See [Network validation](Network_Validation.md). Probe targets do not extend `[network].external` for tasks.
+For external isolation, provide TCP and UDP service controls (for example HTTPS and NTP, without operating echo servers) and a DNS query name. HTTPS/NTP resolve once under an allowing policy and use the same pinned IP for allow, deny and allow again; HTTPS retains certificate hostname verification and SNI. Missing positives, invalid responses, certificate errors and restore failures never prove isolation. The `platform.cluster_dns` resolvers are allowed on TCP/UDP 53; that is not complete network disconnection. See the [deployment guide](Deployment.md#isolation-measurement). Probe targets do not extend `[network].external` for tasks.
 
 The probe image needs the configured execd interface, shell and file utilities, and Python 3's standard socket/TLS libraries with a CA trust store for HTTPS.
 
 ## Isolation evidence
 
-`flotilla probe` prints one line per isolation property with what was observed, and exits nonzero if any of them did not hold without being named in `security.accept_insecure`, or if cleanup was not confirmed. It writes no file: the observations exist only for the length of the run, and a client in another process cannot re-derive them, so running the probe and reading its exit status is the gate. See [Platform requirements](Platform_Requirements.md).
+`flotilla probe` prints one line per isolation property with what was observed, and exits nonzero if any of them did not hold without being named in `security.accept_insecure`, or if cleanup was not confirmed. It writes no file: the observations exist only for the length of the run, and a client in another process cannot re-derive them, so running the probe and reading its exit status is the gate. See the [deployment guide](Deployment.md#isolation-measurement).
