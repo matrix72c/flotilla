@@ -124,7 +124,7 @@ image config is cached by digest, so a repeated image costs no network. Keep pub
 immutable: an attempt mounts the task directory read-only, in place, so changing it mid-run changes
 what running attempts see.
 
-See [Native tasks](Native_Tasks.md) for installation and path binding. Volume initialization and
+See [Running published tasks](Native_Tasks.md) for path binding. Volume initialization and
 artifact handoffs are attempt-private. Snapshot the dataset name, the task keys and the image digests
 the task declares.
 
@@ -176,19 +176,7 @@ finally:
     await attempt.close()
 ```
 
-How to treat each outcome:
-
-| Outcome | Meaning | Typical handling |
-|---|---|---|
-| `ExecResult` with `timed_out=False` | The command ran to completion, including signal exits | Normal observation |
-| `ExecResult` with `timed_out=True` | The deadline passed and the remote process was confirmed stopped | Normal observation; the environment is still usable |
-| `ExecOutcomeUnknown` | The command may or may not have run. The environment has already been invalidated and released | Discard the episode. Never replay the command automatically |
-| `FlotillaError`, category `SERVICE` | The task itself failed: a service did not start, failed its healthcheck, or exited | Discard the sample; retrying will usually fail the same way |
-| `FlotillaError`, category `LOST` | The infrastructure lost the environment after it was ready | Retry the episode in a new environment |
-| Other `FlotillaError` with `retryable=True` | Rate limit, capacity, or a transient platform error | Retry later |
-| `CleanupError` | Release could not confirm deletion | Record `exc.report`; run `flotilla gc` later |
-
-`retryable` describes the failed operation. It never means a command with side effects may be sent again.
+Each outcome's meaning and retry policy is in the [SDK error table](SDK.md#errors-whose-fault-and-what-to-do). In short: `timed_out=True` is a normal observation (the remote process was confirmed stopped); `ExecOutcomeUnknown` discards the episode and is never replayed; `SERVICE` is a task fault; `LOST` and other `retryable` errors are infrastructure and may be retried in a new environment; `CleanupError` is recorded and left for `flotilla gc`.
 
 ## Background processes
 

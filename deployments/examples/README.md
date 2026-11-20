@@ -21,7 +21,7 @@ Before running `flotilla probe`:
 
 Run `flotilla probe --deployment myproject.deployment:PLATFORM`. It reports each isolation property with what it observed and exits nonzero when one did not hold without being waived, or when cleanup was not confirmed. Nothing is written, so there is no report to review later or promote: read the output of the run. The probe makes real sandbox requests only when explicitly invoked, and a failed deletion is reported rather than disguised as a successful TTL cleanup. Keep private deployment inputs outside source control.
 
-See [the backend documentation](../../docs/backends/opensandbox.md) for the implementation and [the platform requirements](../../docs/Platform_Requirements.md) for the contract.
+See [the backend documentation](../../docs/backends/opensandbox.md) for the implementation and the [deployment guide](../../docs/Deployment.md) for the operator contract.
 
 To assemble the minimal share, copy the verified binary from the anchor image you built:
 

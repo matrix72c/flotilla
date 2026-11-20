@@ -4,8 +4,6 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 ![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)
 
-[中文](README_zh.md)
-
 **Run a multi-service Compose task as isolated attempts on a sandbox platform.**
 
 Flotilla reads a published task directory, resolves it into one sandbox per service, connects them
@@ -87,7 +85,7 @@ name the spec by where to import it from:
 flotilla probe --deployment myproject.deployment:PLATFORM --env sandbox.env
 ```
 
-See [Native tasks](docs/Native_Tasks.md) for path binding, installation and credentials.
+See [Running published tasks](docs/Native_Tasks.md) for path binding and [Deployment](docs/Deployment.md) for credentials and the anchor.
 
 ```python
 import asyncio
@@ -137,17 +135,14 @@ does per trial.
 - **Confirmed cleanup.** Every sandbox and directory is labeled with its owner. A lost create response is reconciled, capacity is released only after deletion is confirmed, and `flotilla gc` collects what a crashed process left behind.
 - **No silent replays.** A command is never sent twice. `timed_out=True` means the remote process was confirmed stopped; if that cannot be confirmed, you get `ExecOutcomeUnknown` and the environment is retired.
 - **Built for many concurrent environments.** One client manages admission, create and exec rate limits, sandbox renewal, and per-service resource defaults for every environment it opens.
-- **Pluggable backends.** OpenSandbox is built in. Other platforms plug in through a Python entry point; see [Writing a backend](docs/Writing_a_Backend.md).
+- **Pluggable backends.** OpenSandbox is built in. Another backend lives in the source tree and is added to the `BACKENDS` table in `flotilla/config.py`; see [Writing a backend](docs/Writing_a_Backend.md).
 
 ## Get started
 
 Flotilla runs on **Linux x86_64 with Python 3.12**. A task's `task.toml` is Harbor's format, so
-`harbor` is a required dependency; nothing needs Docker, a Compose binary or a GPU stack. Build the
-Anchor image with `flotilla.anchor_build.build_anchor`: a scratch filesystem with one verified
-static BusyBox, no Python base. Publication requires an explicit `push=True`. A deployment's
-isolation must pass
-`flotilla probe` before consumption. See [Native tasks](docs/Native_Tasks.md) for the complete
-workflow.
+`harbor` is a required dependency; nothing needs Docker, a Compose binary or a GPU stack. A
+deployment's isolation must pass `flotilla probe` before use; see the
+[deployment guide](docs/Deployment.md).
 
 ```sh
 git clone https://github.com/matrix72c/flotilla.git
@@ -163,7 +158,7 @@ Then pick a path:
 |---|---|
 | One Linux machine with Docker, and want to try it | [Local quick start](docs/Local_Quick_Start.md): run OpenSandbox and Flotilla on one machine |
 | Deployment values from whoever runs your sandbox platform | [Quick start](docs/Quick_Start.md): write a task and run it from Python |
-| Harbor tasks such as Terminal-Bench | [Native tasks](docs/Native_Tasks.md): run a published Harbor-format dataset with `NativeAttempt`, or drive it with `harbor run` itself |
+| Harbor tasks such as Terminal-Bench | [Running published tasks](docs/Native_Tasks.md): run a published Harbor-format dataset with `NativeAttempt`, or drive it with `harbor run` itself |
 | A sandbox platform to set up for your team | [Deployment guide](docs/Deployment.md) |
 
 ## Documentation
@@ -171,15 +166,15 @@ Then pick a path:
 **Using Flotilla**
 
 - [Quick start](docs/Quick_Start.md): write a multi-service task and run it.
+- [Running published tasks](docs/Native_Tasks.md): task layout, datasets, the two grading phases, and `flotilla inspect`.
 - [Runtime API](docs/Runtime_API.md): execution, files, background processes, timeouts, cancellation, and errors.
 - [Compose support](docs/Compose_Support.md): which Compose keys are supported, approximated, or rejected.
 
 **Operating a deployment**
 
-- [Deployment guide](docs/Deployment.md): one-time setup of images, the share release, and the capability probe.
+- [Deployment guide](docs/Deployment.md): one-time setup of the anchor and share release, dataset binding, the isolation probe, and feature enablement.
 - [Configuration reference](docs/Configuration.md): every field of a deployment spec.
-- [Platform requirements](docs/Platform_Requirements.md) and [network validation](docs/Network_Validation.md): what a deployment must enable, feature by feature, and how to verify each.
-- [OpenSandbox backend](docs/backends/opensandbox.md), including [read-only root filesystems and tmpfs](docs/Readonly_Rootfs_and_Tmpfs.md).
+- [OpenSandbox backend](docs/backends/opensandbox.md): execd protocols, storage/network mapping, and read-only rootfs, tmpfs and shared memory.
 
 **Extending Flotilla**
 

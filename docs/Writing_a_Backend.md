@@ -1,6 +1,6 @@
 # Writing a backend
 
-A backend connects Flotilla to one sandbox platform. Everything above it is platform-independent: Compose parsing, image preparation, the anchor, file publication, network-policy planning, health gates, renewal, cleanup, and GC all go through the `Platform` protocol in [`flotilla/platform/base.py`](../src/flotilla/platform/base.py). The built-in backend is OpenSandbox ([`flotilla/platform/opensandbox/`](../src/flotilla/platform/opensandbox/)); another backend lives in the Flotilla source tree and is registered in the `BACKENDS` table in `flotilla/config.py`.
+A backend connects Flotilla to one sandbox platform. Everything above it is platform-independent: Compose parsing, task resolution, the anchor, file publication, network-policy planning, health gates, renewal, cleanup, and GC all go through the `Platform` protocol in [`flotilla/platform/base.py`](../src/flotilla/platform/base.py). The built-in backend is OpenSandbox ([`flotilla/platform/opensandbox/`](../src/flotilla/platform/opensandbox/)), registered in the `BACKENDS` table in `flotilla/config.py`; adding a key to that table is the whole registration mechanism.
 
 Read [Architecture](Architecture.md) first for the terminology (anchor, share release, trial, launch).
 
@@ -54,7 +54,7 @@ storage=Storage(volumes="host", host_path="/mnt/shared/flotilla"),
 # share, reaper, network, limits, ... are the same for every backend.
 ```
 
-The table is validated by your settings model, which subclasses `BackendSettings`. The base class provides the three fields every backend needs and rejects unknown keys:
+The table is validated by your settings model, which subclasses `BackendSettings`. The base class provides the two fields every backend needs and rejects unknown keys:
 
 | Field | Meaning |
 |---|---|
@@ -172,7 +172,7 @@ Never include raw response bodies, credentials, environment values, or command o
 
 `Backend.capabilities` is where your backend narrows what a deployment may be asked for. It receives everything on, because a platform that cannot do something refuses the request, and takes away what your configuration rules out. It must never add a capability back.
 
-`flotilla probe` measures isolation through your `Platform` and reports it through its output and exit status; it writes nothing. A check your backend cannot express must raise `NotImplementedError`, which the probe records as not-shown. Never fabricate a success. See [Platform requirements](Platform_Requirements.md).
+`flotilla probe` measures isolation through your `Platform` and reports it through its output and exit status; it writes nothing. A check your backend cannot express must raise `NotImplementedError`, which the probe records as not-shown. Never fabricate a success. See the [deployment guide](Deployment.md#isolation-measurement).
 
 The probe follows the normal [deployment guide](Deployment.md): build and push the anchor and probe images, publish a share release, run `flotilla probe`, and read its output and exit status. Common checks use the Platform contract. Current independent ingress, execd authentication and privileged-runtime checks also use explicit OpenSandbox helpers; another backend must provide equivalent measured controls before those capabilities can be enabled. Management bootstrap uses conservative capabilities and must not bypass normal create gates.
 
@@ -192,5 +192,5 @@ The opt-in real-platform contracts in `tests/contract/` currently construct Open
 - [ ] Labels are filterable by `list`, and the deployment's declared `[platform].list_visibility_s` holds.
 - [ ] `exec` uses exact argv, identity, cwd, and environment; timeouts are confirmed stopped; `attempt` is updated.
 - [ ] Only the requested volumes are mounted.
-- [ ] Egress policies and links are enforced, with positive and negative checks ([network validation](Network_Validation.md)).
+- [ ] Egress policies and links are enforced, with positive and negative checks ([isolation measurement](Deployment.md#isolation-measurement)).
 - [ ] `flotilla probe` passes the required items, and a real run ends with a clean cleanup report.
