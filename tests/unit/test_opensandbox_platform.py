@@ -946,6 +946,78 @@ async def test_long_command_cannot_starve_lifecycle_or_status(caps: Capabilities
 
 
 @pytest.mark.asyncio
+async def test_user_commands_open_a_fresh_connection_each(caps: Capabilities) -> None:
+    """The workload pool keeps no idle connections, so every user command connects anew.
+
+    A reused connection can stay pinned to a proxy backend that stopped answering; every command sent over it then
+    waits for a status line that never arrives (the `phases=` marks in the execd end log locate that case).
+    """
+    import asyncio
+
+    from flotilla.platform.base import ExecAttempt
+    from flotilla.platform.clock import SystemClock
+
+    paths_by_connection: list[list[str]] = []
+    writers: set[asyncio.StreamWriter] = set()
+
+    async def serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        writers.add(writer)
+        paths: list[str] = []
+        paths_by_connection.append(paths)
+        try:
+            while True:
+                header = await reader.readuntil(b"\r\n\r\n")
+                first, *headers = header.decode().split("\r\n")
+                _method, path, _ = first.split()
+                length = next((int(h.split(":", 1)[1]) for h in headers if h.lower().startswith("content-length:")), 0)
+                if length:
+                    await reader.readexactly(length)
+                paths.append(path)
+                body = (
+                    b'{"type":"init","text":"cmd"}\n\n{"type":"execution_complete"}\n\n'
+                    if path.endswith("/command")
+                    else json.dumps({"id": "fresh-connection", "status": {"state": "Running"}}).encode()
+                )
+                writer.write(
+                    f"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {len(body)}\r\n\r\n".encode()
+                    + body
+                )
+                await writer.drain()
+        except (asyncio.IncompleteReadError, ConnectionResetError):
+            pass
+        finally:
+            writer.close()
+            await writer.wait_closed()
+            writers.discard(writer)
+
+    server = await asyncio.start_server(serve, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    platform = build(
+        endpoint=f"http://127.0.0.1:{port}",
+        credential="test",
+        clock=SystemClock(),
+        settings=SETTINGS,
+        storage=HOST_STORAGE,
+        caps=caps,
+    )
+    try:
+        handle = await platform.create(_spec("main"))
+        for _ in range(2):
+            result = await platform.exec(handle, ProcessSpec(("true",), 0, 0, "/", {}, 30), attempt=ExecAttempt())
+            assert result.exit_code == 0
+        commands = [paths for paths in paths_by_connection if paths and paths[-1].endswith("/command")]
+        assert len(commands) == 2
+        assert all(sum(path.endswith("/command") for path in paths) == 1 for paths in commands)
+    finally:
+        await platform.aclose()
+        server.close()
+        await server.wait_closed()
+        async with asyncio.timeout(2):
+            while writers:
+                await asyncio.sleep(0.001)
+
+
+@pytest.mark.asyncio
 async def test_reconciliation_keeps_tokens_of_repeated_creates_distinct(clock: ManualClock, caps: Capabilities) -> None:
     created: list[dict[str, Any]] = []
 

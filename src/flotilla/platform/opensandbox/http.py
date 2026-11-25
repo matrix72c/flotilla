@@ -10,7 +10,7 @@ import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 
 import httpx
 
@@ -81,6 +81,37 @@ def _retryable(category: ErrorCategory) -> bool:
 
 
 DEFAULT_RETRY = RetryPolicy()
+
+
+class _RequestPhases:
+    """Transport milestones of one execd request, from httpcore's `trace` extension.
+
+    httpcore reports `<logger>.<stage>.<started|complete|failed>`; only the marks below are kept. The offsets in the
+    end log say where a request without a status line stopped: no mark at all (never assigned a connection),
+    `connect` (TCP connect in progress), or `status_wait` (request written, waiting for the status line). A reused
+    connection skips the `connect` marks.
+    """
+
+    MARK_OF: ClassVar[Mapping[str, str]] = {
+        "connection.connect_tcp.started": "connect",
+        "connection.connect_tcp.complete": "connected",
+        "http11.send_request_headers.complete": "sent",
+        "http11.receive_response_headers.started": "status_wait",
+        "http11.receive_response_headers.complete": "status",
+    }
+
+    def __init__(self, clock: Clock) -> None:
+        self._clock = clock
+        self._marks: dict[str, float] = {}
+
+    async def __call__(self, name: str, info: Mapping[str, Any]) -> None:
+        mark = self.MARK_OF.get(name)
+        if mark is not None and mark not in self._marks:
+            self._marks[mark] = self._clock.monotonic()
+
+    def summary(self, started_at: float) -> str:
+        """`mark@seconds-since-start` for each mark reached, in event order; `none` when no trace event arrived."""
+        return " ".join(f"{mark}@{at - started_at:.3f}" for mark, at in self._marks.items()) or "none"
 
 
 class Http:
@@ -232,6 +263,7 @@ class Http:
         trace_id = uuid.uuid4().hex
         background = isinstance(json, Mapping) and json.get("background") is True
         started_at = self._clock.monotonic()
+        phases = _RequestPhases(self._clock)
         status: int | None = None
         request_id = ""
         outcome = "cancelled"
@@ -251,7 +283,11 @@ class Http:
                 attempt.sent = True
             if on_send is not None:
                 on_send()
-            async with self._client.stream("POST", url, json=json, headers=headers) as response:
+            # `build_request` + `send(stream=True)` is `client.stream` with `extensions`: httpcore reports its
+            # transport milestones to `phases` for the end log below.
+            request = self._client.build_request("POST", url, json=json, headers=headers, extensions={"trace": phases})
+            response = await self._client.send(request, stream=True)
+            try:
                 status = response.status_code
                 request_id = _safe_id(response.headers.get("x-request-id"))
                 log.debug(
@@ -292,6 +328,8 @@ class Http:
                     request=response.request,
                     headers={"x-request-id": request_id},
                 )
+            finally:
+                await response.aclose()
 
         async def send() -> httpx.Response:
             return await self._bounded(read(), deadline_s)
@@ -316,7 +354,7 @@ class Http:
             log.log(
                 logging.DEBUG if outcome == "response_complete" else logging.WARNING,
                 "execd request end trace_id=%s path=%r stage=%s background=%s status=%s request_id=%s "
-                "command_id=%s outcome=%s started_monotonic_s=%.6f monotonic_s=%.6f duration_s=%.6f",
+                "command_id=%s outcome=%s phases=%s started_monotonic_s=%.6f monotonic_s=%.6f duration_s=%.6f",
                 trace_id,
                 url,
                 stage,
@@ -325,6 +363,7 @@ class Http:
                 request_id,
                 _safe_id(attempt.command_id) if attempt else "",
                 outcome,
+                phases.summary(started_at),
                 started_at,
                 finished_at,
                 finished_at - started_at,

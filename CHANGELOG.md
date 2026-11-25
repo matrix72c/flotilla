@@ -30,6 +30,7 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Changed
 
+- User commands (`exec` with an `ExecAttempt`) never reuse an HTTP connection: the workload pool keeps no idle connections, so a connection pinned to a proxy backend that stopped answering cannot wedge later commands in the same process. The execd end log gains `phases=` offsets (`connect`, `connected`, `sent`, `status_wait`, `status`), which locate where a request that ended without a status line stopped.
 - `Deployment.setup_budget()` is the per-phase timeouts' sum capped by `runtime.startup_timeout_s`, the bound one open really has.
 - The import contracts pin the current layer graph: `models` at the bottom, `compose` offline, the runtime free of `compose` and `native`, `native` above both.
 - **Breaking:** the shared vocabulary lives in `flotilla.models`. `flotilla.core.plan` → `flotilla.models.plan`; `flotilla.native.models` → `flotilla.models.verification` and `flotilla.models.paths`; `flotilla.platform.filesystem` → `flotilla.models.filesystem`; the value objects and errors of `flotilla.platform.base` → `flotilla.models.platform` (still re-exported from `platform.base`). The top-level `flotilla` surface is unchanged.
