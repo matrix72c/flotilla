@@ -437,19 +437,27 @@ def build(
 
     `transport=None` uses httpx's default transport (real deployments); tests inject `httpx.MockTransport`.
     `max_connections` is the per-pool limit: long user commands cannot take control or maintenance connections.
+    User commands never reuse a connection: the platform proxy can pin a reused connection to a backend that stopped
+    answering (the request then never gets a status line), while connecting costs milliseconds next to a command's
+    runtime. A fresh connection per command cannot inherit such a black hole.
     """
 
-    def client() -> httpx.AsyncClient:
+    def client(*, keepalive: bool = True) -> httpx.AsyncClient:
         return httpx.AsyncClient(
             base_url=f"{endpoint.rstrip('/')}/{API_VERSION}",
             transport=transport,
             headers={CREDENTIAL_HEADER: credential},
             timeout=timeout,
-            limits=httpx.Limits(max_connections=max_connections),
+            limits=(
+                httpx.Limits(max_connections=max_connections)
+                if keepalive
+                else httpx.Limits(max_connections=max_connections, max_keepalive_connections=0)
+            ),
             trust_env=False,
         )
 
-    control_client, maintenance_client, workload_client = client(), client(), client()
+    control_client, maintenance_client = client(), client()
+    workload_client = client(keepalive=False)
     control = Http(control_client, clock, retry, slots=asyncio.Semaphore(max_connections))
     maintenance = Http(maintenance_client, clock, retry, slots=asyncio.Semaphore(max_connections))
     workload = Http(workload_client, clock, retry, slots=asyncio.Semaphore(max_connections))
