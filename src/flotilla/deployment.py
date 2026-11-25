@@ -200,9 +200,15 @@ class Deployment:
         return self._config.runtime.run_timeout_s
 
     def setup_budget(self) -> float:
-        """Worst-case seconds from creating one environment to its started services."""
+        """Worst-case seconds from creating one environment to its started services.
+
+        The per-phase timeouts are each the documented worst case, but a single open is also
+        bounded end to end by ``runtime.startup_timeout_s``; the smaller of the two is the
+        real upper bound.
+        """
         timeouts = self._config.timeouts
-        return float(sum(getattr(timeouts, name) for name in _SETUP_PHASES))
+        total = float(sum(getattr(timeouts, name) for name in _SETUP_PHASES))
+        return min(total, float(self._config.runtime.startup_timeout_s))
 
     def client_overhead(self) -> dict[str, float]:
         """Per-client anchor reservation, in addition to environment reservations."""

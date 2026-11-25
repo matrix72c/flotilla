@@ -120,12 +120,27 @@ def test_budgets_and_limits(published: tuple[str, Path]) -> None:
     deployment = Deployment.load(published[0])
     config = deployment.config
     t = config.timeouts
-    assert deployment.setup_budget() == t.create + t.address + t.wire + t.hosts + t.prepare + t.start_max
+    phase_sum = t.create + t.address + t.wire + t.hosts + t.prepare + t.start_max
+    assert deployment.setup_budget() == min(phase_sum, config.runtime.startup_timeout_s)
     assert deployment.run_timeout() == config.runtime.run_timeout_s
     assert deployment.trial_concurrency == config.limits.trial_concurrency
     assert deployment.instance_budget == config.limits.instance_budget
     overhead = deployment.client_overhead()
     assert overhead["cpu"] > 0 and overhead["memory_gib"] > 0
+
+
+@pytest.mark.parametrize("startup_timeout_s", [100.0, 100_000.0])
+def test_setup_budget_is_capped_by_the_startup_timeout(published: tuple[str, Path], startup_timeout_s: float) -> None:
+    """The phase timeouts sum to the documented worst case, but one open is bounded by the
+    runtime's startup timeout; the phase sum only wins when it is the smaller of the two."""
+    deployment = Deployment.load(published[0])
+    config = deployment.config
+    t = config.timeouts
+    phase_sum = t.create + t.address + t.wire + t.hosts + t.prepare + t.start_max
+    runtime = config.runtime.model_copy(update={"startup_timeout_s": startup_timeout_s})
+    bounded = Deployment(config.model_copy(update={"runtime": runtime}))
+
+    assert bounded.setup_budget() == min(phase_sum, startup_timeout_s)
 
 
 def test_declared_datasets_are_reachable_by_name(published: tuple[str, Path]) -> None:
