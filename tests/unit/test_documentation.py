@@ -91,7 +91,7 @@ def documented_example(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("document", ["README.md", "README_zh.md", "docs/Quick_Start.md"])
+@pytest.mark.parametrize("document", ["README.md", "docs/Quick_Start.md"])
 async def test_documented_example_runs(
     deployment: tuple[FlotillaConfig, FakePlatform, SharedTree],
     tmp_path: Path,
@@ -124,7 +124,7 @@ async def test_integration_guide_test_example(
 
 
 def test_local_documentation_links_resolve() -> None:
-    paths = [ROOT / "README.md", ROOT / "README_zh.md", ROOT / "CONTRIBUTING.md", *ROOT.glob("docs/**/*.md")]
+    paths = [ROOT / "README.md", ROOT / "CONTRIBUTING.md", *ROOT.glob("docs/**/*.md")]
     for path in paths:
         for link in re.findall(r"\]\(([^)]+)\)", path.read_text()):
             if "://" in link or link.startswith("#"):

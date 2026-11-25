@@ -4,18 +4,8 @@ Flotilla owns the execution protocol. A task is a published directory; running i
 computation over that directory plus each image's config, so there is no build step, no
 intermediate artifact and nothing Flotilla writes and reads back. Harbor supplies the task
 format and is a required dependency; using Harbor as an evaluation consumer is optional.
-
-## Install
-
-Use Linux x86_64 and Python 3.12. Install a wheel from this repository or a full Git commit from
-`https://github.com/matrix72c/flotilla.git`. The distribution, import and executable are
-`flotilla`. The public PyPI project with that name is unrelated: do not use bare
-`pip install flotilla`. Do not install `flotilla-compose` alongside the renamed package. Use a new
-environment rather than modifying an environment used by running jobs.
-
-Nothing needs Docker, a Compose executable or a GPU stack. Flotilla loads Compose itself and reads
-image configs from the registry over HTTP, by digest. A CPU environment does not require Torch,
-CUDA, XTuner or LMDeploy.
+Installation is in the [README](../README.md#get-started); building the Anchor and binding
+storage are in the [deployment guide](Deployment.md).
 
 ## A task directory
 
@@ -141,27 +131,6 @@ least one task would not open, and `--out report.json` records each one with the
 refused. Making that a gate — refusing to submit a job whose dataset does not fully resolve — belongs
 to whatever submits your jobs; Flotilla provides the check and the exit code, not the policy.
 
-## Anchor image builder
-
-```python
-from flotilla.anchor_build import AnchorBuildOptions, build_anchor
-
-result = build_anchor(AnchorBuildOptions(image="registry.example.org/team/anchor:VERSION"))
-# Add push=True and optionally authfile= to publish explicitly.
-```
-
-The builder assembles a scratch filesystem from packaged assets and a hash-verified pinned BusyBox:
-the multicall binary at `/.flotilla/bin/busybox`, PATH symlinks for the anchor's directory commands,
-`/etc/passwd` and `/etc/group`, the GPL text, and a self-check script. It copies no source checkout,
-credentials or compiler stack, and pulls no base image. Build context and downloaded
-archives are isolated temporary directories.
-
-A new container verifies the applets without network or source/credential mounts. Publication
-uses configurable Docker/Skopeo argv and manifest format (`v2s2` by default for the current internal
-registry). `result.anchor_pin` is set only after obtaining the remote digest. Local image IDs
-are not deployment pins. Platform behavior is still measured by probe; self-containment does not
-replace platform or GPU acceptance.
-
 ## What a consumer may and may not do
 
 Consumers may pull the fixed runtime images normally. Missing assets and incompatible packages fail
@@ -169,4 +138,4 @@ explicitly. Infrastructure and cleanup failures are errors, not task scores. Rew
 belongs to the consumer.
 
 Installation, fake-platform tests, real platform behavior and GPU training are different
-verification scopes. Consult recorded acceptance results rather than assuming one proves the others.
+verification scopes; passing one does not establish the others.
