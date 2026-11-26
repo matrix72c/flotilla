@@ -93,7 +93,7 @@ class NetworkDef:
 
 @dataclass(frozen=True)
 class Project:
-    """A task's normalized Compose project, as resolved by the official Compose config adapter."""
+    """A task's normalized Compose project, as read by `flotilla.compose.parse` and `normalize()`."""
 
     services: Mapping[str, Service]
     networks: Mapping[str, NetworkDef]
